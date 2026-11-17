@@ -61,7 +61,7 @@
 
 <div class="grid">
   <div class="stat"><b class="pass">全绿</b><small>tsc / vite build / 12 项 Rust 测试 / npm audit 0 漏洞</small></div>
-  <div class="stat"><b>5</b><small>P0 · 数据安全、崩溃与用户输入丢失</small></div>
+  <div class="stat"><b>5 / 已修复</b><small>P0 · 数据安全、崩溃与用户输入丢失（本批全部落地）</small></div>
   <div class="stat"><b>10+</b><small>P1 · 正确性与明显卡顿</small></div>
   <div class="stat"><b>22+</b><small>P2 · 手感、性能、工程化</small></div>
 </div>
@@ -69,7 +69,7 @@
 <div class="card">
   <strong>一句话结论：</strong>功能完成度非常高（M1–M23 全做完，交互细节甚至做到滚轮防连翻、封面预解码无闪烁），代码也有类型检查和集成测试兜底；但 <b>发布级工程化明显缺位</b>（无 Git、无 lint/CI、clippy 20 条警告、fmt 不统一），并且有几处 <b>会静默丢数据 / 直接退出进程</b> 的底层风险，主要集中在备份、图片解码、行错误处理。建议先修 P0/P1，再做手感与架构升级。
   <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:13px">
-    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>
+    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>。
   </div>
 </div>
 
@@ -87,7 +87,7 @@
 </table>
 <div class="note" style="margin-top:12px">本次为只读审查，未修改任何源码；仅 <code>npm run build</code> 正常重生成了 <code>dist/</code> 构建产物。未执行任何 scan / import / purge，未复制或备份原始画集。</div>
 
-<h2>二、缺点：P0 数据安全与崩溃风险</h2>
+<h2>二、缺点：P0 数据安全与崩溃风险（四项均已在第一批修复，见 12.7）</h2>
 
 <div class="issue i0">
   <div class="t"><span class="badge b0">P0</span> 1. 迁移备份可能是不完整快照</div>
@@ -118,13 +118,13 @@
   <div class="fix"><b>建议：</b>写 <code>.tmp</code> → <code>fs::rename</code> 原子替换；读缓存时校验文件头/可解码；提供"重建封面"命令批量修复。</div>
 </div>
 
-<h2>三、缺点：P1 正确性与明显卡顿（第 14 条经复核降为 P2，见 12.5）</h2>
+<h2>三、缺点：P1 正确性与明显卡顿（第 5 条为已确认设计决策、第 14 条复核降 P2）</h2>
 
-<div class="issue i1">
-  <div class="t"><span class="badge b1">P1</span> 5. 默认评分 60 与"未评分"筛选语义冲突</div>
-  <div class="loc"><code>db.rs:172 / 501</code>、<code>library.rs:418-435</code>、<code>LibraryView.tsx:119-128</code>、<code>ArchiveCard.tsx:103-106</code>、<code>DetailDrawer.tsx:605</code></div>
-  <p>表定义 <code>rating DEFAULT 60</code>，<code>insert_archive</code> 硬编码写入 60；筛选把 <code>rating &lt;= 0</code> 当作"未评分"（bucket 0），卡片直接显示 <code>{card.rating}</code>。结果：<b>每本新导入的画集都被自动评为 60 分并显示星标</b>，"未评分"筛选恒为空，按评分分组时所有未评分画集挤进 41–60 组。详情抽屉把 60 标注为"默认评分"，说明是有意设计，但数据模型与筛选语义互相矛盾。</p>
-  <div class="fix"><b>建议：</b>让 <code>rating</code> 可为 NULL（或增加 <code>rating_set</code> 标志）表示未评分；迁移时把从未手动改动过的 60 归一为未评分；筛选与分组按 NULL 判断。</div>
+<div class="issue i2">
+  <div class="t"><span class="badge b2">已确认 · 非缺陷</span> 5. 默认评分 60 —— 用户拍板保留的产品设定</div>
+  <div class="loc"><code>db.rs:172 / 501</code>、<code>library.rs:418-435</code>、<code>ArchiveCard.tsx:103-106</code></div>
+  <p>初稿把「新画集自动评为 60、未评分筛选恒为空、分组全挤进 41–60」列为语义冲突。<b>你已确认这是有意设计</b>：下载入库的大多是喜欢的，默认即纳入及格线。因此 <code>rating DEFAULT 60</code>、<code>insert_archive</code> 写入 60 与卡片显示 60 分<b>均保持不变，本批及后续批次都不改评分数据、不做迁移</b>；「未评分」筛选恒为空是这一设定的预期结果，不再计为缺陷，也不再列入推进顺序。</p>
+  <div class="fix"><b>保留前提下的可选项（非本批、非必须）：</b>若将来想区分「默认 60」与「手动改过」，可加一个 <code>rating_manual</code> 布尔列，仅由 <code>set_rating</code> 置位，把该筛选改名为「未手动评分」——<b>默认值与现有数据一律不动</b>。若不需要这个区分，也可以直接从筛选 UI 移除恒为空的 bucket，避免用户点了没反应。两点都需你另行确认后再做。</div>
 </div>
 
 <div class="issue i1">
@@ -250,18 +250,18 @@
   <tr><td><span class="badge b0">第 0 步</span></td><td><code>git init</code> + 基线提交 + .gitignore / 残留清理</td><td>后面所有重构都要能回滚，这是零成本的安全网</td></tr>
   <tr><td><span class="badge b0">第 1 步</span></td><td>P0 四项：备份改 <code>VACUUM INTO</code>、去掉 <code>filter_map(Result::ok)</code>、图片解码 Limits、封面原子写</td><td>都是可能导致「静默丢数据 / 直接退出」的问题，改动小、收益最大</td></tr>
   <tr><td><span class="badge b1">第 2 步</span></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + 批量 IPC</td><td>一次改动同时解决翻页延迟、缩略图卡顿、CSP 与内存占用，手感提升最明显</td></tr>
-  <tr><td><span class="badge b1">第 3 步</span></td><td>默认评分语义、settings/settings 原子写、迁移事务、导入可取消与任务隔离</td><td>消除「用着用着状态不对」的隐性问题</td></tr>
+  <tr><td><span class="badge b1">第 3 步</span></td><td>settings 原子写、迁移事务、导入可取消与任务隔离 <span style="color:var(--muted)">（评分 60 已确认保留，不在范围）</span></td><td>消除「用着用着状态不对」的隐性问题</td></tr>
   <tr><td><span class="badge b2">第 4 步</span></td><td>质量门禁（clippy/fmt/lint/CI）+ 组件与 CSS 拆分 + 代码分割</td><td>为后续长期迭代降低维护成本</td></tr>
   <tr><td><span class="badge b2">第 5 步</span></td><td>手感打磨（撤销、右键菜单、主题、reduced-motion、快捷键冲突）+ 搜索升级 + 发布链路</td><td>从「能用」到「好用」，并补齐 1.0 之后的升级路径</td></tr>
 </table>
 
-<h2>九、需要你确认的事项</h2>
+<h2>九、决策与执行状态（已拍板）</h2>
 <div class="card">
 <ul>
-  <li>默认评分 60 是否是有意的产品设定？改动会牵涉数据迁移与既有筛选习惯，需你拍板。</li>
-  <li>是否同意 <code>git init</code> 并清理 <code>damai-grab/</code> 与脚手架 SVG？本次审查<b>没有删除任何文件</b>。</li>
-  <li>是否需要在改代码前，先只备份元数据 <code>.gallery/library.db</code>（不复制原始画集）？按 HANDOFF 约束，全量扫描 <code>F:\Hthings\BENZI</code> 需你明确启动。</li>
-  <li>正式版进程（PID 46516）仍在运行；如需重新打包，需先关闭它，本次未动。</li>
+  <li><b>默认评分 60：保留。</b>理由是「下载入库的大多是喜欢的，默认即纳入及格线」。评分数据、表默认值、卡片显示与筛选逻辑一律不动，第三章第 5 条已改定性为「已确认设计决策、非缺陷」。</li>
+  <li><b>其余改进：按最优与安全优先执行。</b>已 <code>git init</code> 并做基线提交 <code>461e545</code>（74 个文件 / 30,948 行）；根 <code>.gitignore</code> 补齐 <code>/src-tauri/target/</code>、<code>.gallery/</code>、<code>*.db</code>、<code>/damai-grab/</code> 等。<b><code>damai-grab/</code> 与脚手架 SVG 一律不删除</b>，只在版本控制中排除 —— 安全优先不做破坏性清理。</li>
+  <li><b>生产库不做额外备份，也不触碰。</b>本批只改源码、不运行应用、不触发迁移，<code>F:\Hthings\BENZI</code> 与 <code>.gallery/library.db</code> 均未被读写；源码由 Git 基线提交保护。后续若要执行迁移或全量扫描，届时会先单独备份元数据并再次确认。</li>
+  <li>正式版进程（PID 46516）仍在运行，本次未结束、未重新打包；改动生效需在关闭它之后重新构建。</li>
 </ul>
 </div>
 
@@ -321,7 +321,7 @@
   <tr><td>1</td><td>不变：P0 四项（备份一致性、去掉静默吞错、图片 Limits、封面原子写）——<b>内部顺序按 12.5 改为 1a 静默丢数据两项 → 1b 崩溃与破图两项</b></td></tr>
   <tr><td><b>2（新增，与原 3 合并）</b></td><td><b>「连接与任务层」一次重构</b>：统一连接 + 导入/扫描批量事务 + busy 重试 + WAL checkpoint + 命令 async 化 + <code>ensure_full_text</code> 去掉每次 DDL（B2 / B3 / P1-12 / S1）。这是「部分导入失败 / 启动锁冲突 / UI 假死」的共同根因，宜一次做完。<br><b>【复核修订】2 的尾部追加 B4：命令 ACL + 路径 / <code>library_id</code> / <code>cover_key</code> 校验</b> —— 两者都在改 <code>lib.rs</code>，分开做等于同一批代码改两遍</td></tr>
   <tr><td>3</td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + 批量 IPC；<b>CSP 收口随本步一并做（已降 P2）</b></td></tr>
-  <tr><td>4</td><td>默认评分语义、settings 原子写、迁移事务化、导入可取消、<b>CLI coverPath 修复</b>（<del>CSP 与命令 ACL 已移出：CSP → 第 3 步，ACL → 第 2 步尾</del>）</td></tr>
+  <tr><td>4</td><td>settings 原子写、迁移事务化、导入可取消、<b>CLI coverPath 修复</b>（<del>CSP 与命令 ACL 已移出：CSP → 第 3 步，ACL → 第 2 步尾</del>）；评分 60 已确认保留，不做语义改动</td></tr>
   <tr><td>5</td><td>不变：质量门禁 + 拆分 + 手感打磨 + 搜索升级 + 发布链路</td></tr>
 </table>
 
@@ -331,7 +331,7 @@
 </div>
 
 <div class="issue i0">
-  <div class="t"><span class="badge b0">新增 P0</span> F1. 备注草稿未保存时按 Esc 或点遮罩，内容静默丢失</div>
+  <div class="t"><span class="badge b0">新增 P0</span> F1. 备注草稿未保存时按 Esc 或点遮罩，内容静默丢失（第一批已修复，见 12.7）</div>
   <div class="loc"><code>DetailDrawer.tsx:240-246</code>、<code>:493</code>、<code>:503</code>、<code>:628-645</code></div>
   <p>Esc 监听是无条件 <code>onClose()</code>，遮罩是 <code>onClick={onClose}</code>；代码里<b>已经算出</b> <code>noteDirty = noteDraft.trim() !== (card.note ?? "").trim()</code>，却只用它控制「保存备注」按钮的 disabled，<b>没有用于关闭拦截</b>。备注是手动保存（Ctrl+Enter / 按钮），不像评分那样有卸载 flush。用户写了一段简介后习惯性按 Esc 或点到遮罩，草稿既没保存也没有任何提示——这是<b>用户输入的真实丢失</b>，比本报告其它手感问题都严重。</p>
   <p>更不一致的是：只有 <code>tag-input</code>(:724-730) 与批量 textarea(:779-785) 做了 <code>stopPropagation</code>，备注框、评分数字框、标签搜索框、新建收藏夹输入框都没有。</p>
@@ -451,7 +451,7 @@
 <p>你的两点保留意见成立。下表把每条结论的「证据强度」显式分开，避免静态推断被当成实测：</p>
 <table>
   <tr><th>等级</th><th>含义</th><th>本报告对应内容</th><th>你的复核状态</th></tr>
-  <tr><td><b>A · 命令实测</b></td><td>本次会话实际执行、有 stdout</td><td><code>tsc --noEmit</code> / <code>vite build</code>（379 KB JS）/ <code>clippy</code> 20 条 / <code>fmt --check</code> 差异 / <code>npm audit</code> 0 / <code>git status</code> / 进程 PID 46516 / <code>cargo test --lib</code> <b>12 passed</b></td><td>除 <code>cargo test</code> 外你已复跑；<b>12 passed 对你而言是采信，不是验证</b></td></tr>
+  <tr><td><b>A · 命令实测</b></td><td>本次会话实际执行、有 stdout</td><td><code>tsc --noEmit</code> / <code>vite build</code>（379 KB JS）/ <code>clippy</code> 20 条 / <code>fmt --check</code> 差异 / <code>npm audit</code> 0 / <code>git status</code> / 进程 PID 46516 / <code>cargo test --lib</code> <b>12 passed</b></td><td>除 <code>cargo test</code> 外你已复跑；<b>12 passed 对你而言是采信</b>（本批改动后本报告又复跑一次，仍 12 passed，见 12.7）</td></tr>
   <tr><td><b>A′ · 依赖源码核对</b></td><td>读第三方 registry 源码</td><td><code>image-0.25.10</code> 的 <code>Limits::default()</code>：<code>max_alloc 512MB</code>、宽高无上限、便捷函数无法传自定义 Limits（P0-3 / 第十章）</td><td>静态可复核</td></tr>
   <tr><td><b>A″ · 引擎 / 纯函数实测</b></td><td>跑了可复现的小实验</td><td>SQLite FTS5 trigram：「妄想 秘話」带空格搜不到（第四章）；<b>本轮新增</b>：<code>translate.rs</code> 词典命中率脚本（12.2）</td><td>本轮新增项可复现</td></tr>
   <tr><td><b>B · 静态代码事实</b></td><td>逐行可核对，无推断成分</td><td>所有行号、SQL、<code>DEFAULT 60</code>、<code>csp: null</code>、<code>Path::new("")</code>、<code>noteDirty</code>、<code>filter_map(Result::ok)</code> 8 处、0 处 <code>React.memo</code> / <code>prefers-reduced-motion</code> / <code>aria-haspopup</code></td><td class="pass">你已抽查，全部属实</td></tr>
@@ -470,6 +470,7 @@
   <tr><td>B4 从第 4 步提到第 2 步尾（同在改 <code>lib.rs</code>）</td><td>已并入连接层重构尾部，第 4 步移除</td><td>第十 / 十一章顺序表、12.6</td></tr>
   <tr><td>F1 单独提前，且与 F2 模态基座同一处改动</td><td>列为第 1 步前端并行线，明确「同一次提交落地、不要拆两次」</td><td>第十一章顺序表、12.6</td></tr>
   <tr><td>抽查结论：证据链、优先级、亮点保留都可信</td><td>已验证条目原样保留，亮点清单仍在第十一章末尾</td><td>—</td></tr>
+  <tr><td><b>默认评分 60 保留；其余按最优与安全优先改进</b></td><td>评分数据与筛选逻辑不动，第三章第 5 条改定性为「已确认设计决策」；安全网 + P0 四项 + F1 已落地</td><td>12.7</td></tr>
 </table>
 
 <h3>12.6 最终推进总表（覆盖第八 / 十 / 十一章）</h3>
@@ -481,12 +482,37 @@
   <tr><td><b>1b</b></td><td><b>P0-3</b> 图片解码 <code>Limits</code> + 先读 <code>dimensions()</code>、移除命令路径 <code>expect</code>；<b>P0-4</b> 封面 <code>.tmp</code> + rename 原子写</td><td>按复核意见下调到静默丢数据两项之后</td></tr>
   <tr><td><b>2</b></td><td><b>连接与任务层一次重构</b>：统一连接、批量事务、busy 重试、checkpoint 管理、命令 async 化、去掉每次开库的 DDL；<b>尾部追加 B4</b>：命令 permission / 路径白名单 / <code>library_id</code> / <code>cover_key</code> 校验 + DTO 入参上限</td><td>共同根因；B4 与它同在 <code>lib.rs</code>，一次改完</td></tr>
   <tr><td><b>3</b></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + <b>CSP 收口</b>；随后 F3 大列表性能三件套</td><td>CSP 已降 P2，随数据通道顺手做</td></tr>
-  <tr><td><b>4</b></td><td>默认评分语义、settings 原子写、迁移事务化、导入可取消与任务隔离、CLI <code>coverPath</code>、F4/F5 与批量 IPC、确认 / 撤销</td><td>状态与手感收口</td></tr>
+  <tr><td><b>4</b></td><td>settings 原子写、迁移事务化、导入可取消与任务隔离、CLI <code>coverPath</code>、F4/F5 与批量 IPC、确认 / 撤销 <span style="color:var(--muted)">（默认评分 60 已确认保留，不在范围）</span></td><td>状态与手感收口</td></tr>
   <tr><td><b>5</b></td><td>词典命中率升级（12.2）、IPC 契约生成（12.3）、质量门禁与 CI、组件 / CSS 拆分、视觉与无障碍、发布链路</td><td>补遗项与长期维护</td></tr>
 </table>
 <div class="note" style="margin-top:10px"><b>运行时验证贯穿：</b>第 2 / 3 步改动前先按 12.4 建临时测试库并打基线，改动后用同一组数据复测，避免把 C 级推断当成验收标准。<b>仍需你拍板：</b>默认评分 60 是否保留、是否 <code>git init</code> 并清理 <code>damai-grab/</code> 与脚手架 SVG、改代码前是否先单独备份 <code>.gallery/library.db</code> 元数据。</div>
 
-<footer>本报告基于 2026-11-17 的工程快照。<b>性质说明：</b>这是静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有应用运行时 / 性能压测 / 真实库操作验证</b>；证据等级与未验证边界见 12.4。全程未修改源码、未访问 <code>F:\Hthings\BENZI</code>、未执行 scan / import / purge、未结束运行中的正式版；仅 <code>npm run build</code> 正常重生成 <code>dist/</code>。</footer>
+<h3>12.7 第一批落地记录（基线 <code>461e545</code> → 修复 <code>fbde767</code>）</h3>
+<div class="card">
+按 12.6 的「0 → 1 前端并行 → 1a → 1b」执行。<b>前提与边界：</b>默认评分 60 保留、评分数据与筛选逻辑零改动；不碰 <code>F:\Hthings\BENZI</code> 与 <code>.gallery/library.db</code>；不删除任何文件；不结束正式版进程；不执行 scan / import / purge；不重新打包。修改仅涉及 5 个源码文件、根 <code>.gitignore</code> 与本报告。
+</div>
+<table>
+  <tr><th>项</th><th>文件</th><th>改动</th></tr>
+  <tr><td>安全网</td><td><code>.gitignore</code>、<code>.git/</code></td><td><code>git init</code> + 基线提交 74 个文件；排除 14.7 GB 的 <code>target/</code>、<code>node_modules/</code>、<code>dist/</code>、数据库与 <code>damai-grab/</code>（文件保留在磁盘上）。所有后续改动可 <code>git diff</code> / 回滚。</td></tr>
+  <tr><td>P0-1</td><td><code>db.rs::backup_database</code></td><td>删除「忽略结果的 <code>wal_checkpoint(TRUNCATE)</code> + <code>fs::copy</code> 主库」，改为 <code>VACUUM INTO ?1</code>：由当前连接直接生成一致性快照，天然包含 WAL 中已提交但未 checkpoint 的事务；备份失败或文件为 0 字节即中止迁移，并校验 <code>metadata.len()</code>。已用独立 SQLite 实测参数绑定可行、WAL 中 50 行全部进入备份。</td></tr>
+  <tr><td>P0-2</td><td><code>library.rs</code> 5 处、<code>db.rs</code> 2 处</td><td>7 处 DB 行解析的 <code>filter_map(Result::ok)</code> 全部改为 <code>collect::&lt;Result&lt;Vec&lt;_&gt;, _&gt;&gt;()</code> + <code>?</code> 或逐行 <code>?</code>，行错误不再静默丢画集；<code>library.rs:260</code> 的扫描分支把错误收进 <code>ScanReport.errors</code> 而非吞掉。第 8 处 <code>tests.rs:76</code> 是 <code>WalkDir</code> 遍历容错（非行解析），按原样保留。</td></tr>
+  <tr><td>P0-3</td><td><code>archive.rs</code>、<code>reader.rs</code></td><td>新增 <code>decode_image(bytes, max_alloc)</code>：<code>ImageReader::with_guessed_format()</code> → <code>Limits</code>（封面 / 缩略图 64 MB、整页 256 MB、边长上限 12000）→ <code>into_decoder().dimensions()</code> 显式校验 → <code>DynamicImage::from_decoder</code>；阅读器 TIFF 转码、缩略图、封面提取全部改走它。<b>顺带修正本报告原建议的 API 写法</b>：<code>image 0.25</code> 的 <code>Limits</code> 是 <code>#[non_exhaustive]</code> 且没有链式 setter，字面量 <code>Limits { ... }</code> 与 <code>.max_alloc(...)</code> 都编译不过，必须 <code>Limits::default()</code> 后逐字段赋值再用 <code>ImageReader::limits()</code>。</td></tr>
+  <tr><td>P0-4</td><td><code>archive.rs::save_jpeg / inspect_archive</code></td><td>封面改为「<code>write_to(Jpeg)</code> → <code>fs::write(.tmp)</code> → <code>fs::rename</code>」原子替换，临时文件带 PID + 时间戳并在失败时清理；因 <code>.tmp</code> 扩展名无法被 <code>image.save</code> 推断格式，显式指定 JPEG 编码。<code>inspect_archive</code> 的 <code>exists()</code> 改为「文件存在且非空」，0 字节 / 截断缓存会被重新生成。</td></tr>
+  <tr><td>F1</td><td><code>DetailDrawer.tsx</code></td><td>Esc、遮罩、两个关闭按钮统一收敛到 <code>requestClose()</code>：<code>noteDirty</code> 时先自动 <code>api.setNote()</code> 再关闭，失败则保留抽屉与草稿并 Toast 报错；<code>requestCloseRef</code> 让 keydown 只注册一次且始终读到最新草稿，Esc 增加 <code>defaultPrevented</code> 检查。<b>取舍：</b>选自动保存而非「保存 / 放弃 / 取消」对话框，是零新增 UI 且绝不丢输入；「放弃草稿」与 F2 完整模态栈（焦点陷阱、模态栈、Reader 快捷键）留下一批一起做。</td></tr>
+</table>
+
+<p><b>验证结果（本批改动后实跑）</b></p>
+<table>
+  <tr><th>检查</th><th>结果</th></tr>
+  <tr><td><code>tsc --noEmit</code> / <code>npm run build</code></td><td class="pass">均通过；JS 379.77 KB（gzip 109.66 KB）、CSS 69.06 KB</td></tr>
+  <tr><td><code>cargo check --lib</code> / <code>cargo test --lib</code></td><td class="pass">编译通过；12 passed / 0 failed</td></tr>
+  <tr><td><code>cargo clippy --lib --all-targets</code></td><td>20 条警告，与基线数量一致，<b>本批未新增</b>（集中在 <code>galleryctl.rs</code> 的 bool_comparison 等原有项）</td></tr>
+  <tr><td><code>cargo fmt --check</code></td><td>82 处差异，全部为基线原有位置；本批新增代码的 4 处格式建议已手动修正（86 → 82）。<b>未跑全量 <code>cargo fmt</code></b>，避免把 82 处无关改动混进本批</td></tr>
+  <tr><td>VACUUM INTO 参数化 + WAL 一致性</td><td class="pass">独立 SQLite 实测：绑定参数成功，未 checkpoint 的 50 行全部进入备份</td></tr>
+</table>
+<div class="note" style="margin-top:10px"><b>仍未验证：</b>12.4 的 C 级结论（换页延迟、43 MB IPC 卡顿、大库掉帧、WAL 膨胀）依旧只是静态推断，本批没有做应用运行时 / 性能压测。<b>剩余批次</b>按 12.6：第 2 步连接与任务层重构 + B4 命令 ACL / 路径校验（同在 <code>lib.rs</code>，一次改完）；第 3 步阅读器数据通道 + CSP 收口 + F3 大列表；第 4 步状态同步、settings、迁移事务、CLI coverPath、批量 IPC；第 5 步词典升级、契约生成、门禁与拆分。<b>第 2 / 3 步动工前应先按 12.4 建临时测试库打性能基线。</b></div>
+
+<footer>本报告基于 2026-11-17 的工程快照；审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有应用运行时 / 性能压测 / 真实库操作验证</b>，证据等级与未验证边界见 12.4。第一批改进已落地（提交 <code>fbde767</code>），改动范围为 5 个源码文件、根 <code>.gitignore</code> 与本报告；未修改评分数据与筛选逻辑、未访问 <code>F:\Hthings\BENZI</code> 与 <code>.gallery/library.db</code>、未删除任何文件、未执行 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。</footer>
 </div>
 </body>
 </html>
