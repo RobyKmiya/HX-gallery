@@ -905,12 +905,14 @@ async fn read_reader_page(
     state: State<'_, AppState>,
     archive_id: i64,
     index: i64,
+    current: Option<bool>,
 ) -> Result<ReaderPage, String> {
+    let pin = current.unwrap_or(false);
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let path = archive_file_path(&state, archive_id)?;
         reader::remember_archive(archive_id, &path);
-        reader::read_page(&path, index)
+        reader::read_page(&path, index, pin)
     })
     .await
     .map_err(|error| format!("读取页面异常结束: {error}"))?

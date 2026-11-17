@@ -1492,8 +1492,11 @@ fn reader_reads_pages_and_persists_progress() {
     assert_eq!(info.page_count, 3);
     assert_eq!(info.last_page, 0);
 
-    let first = crate::reader::read_page(&path, 0).unwrap();
+    // 正在显示的那一页传 pin=true：预取邻页时不能被挤掉。
+    let first = crate::reader::read_page(&path, 0, true).unwrap();
     assert_eq!(first.name, "2.png");
+    assert!(!first.version.is_empty(), "版本号用于前端缓存 URL");
+    assert!(first.bytes > 0);
 
     // 页面字节留在后端缓存里，前端只按 URL 取图，不再走 base64 IPC。
     let payload = crate::reader::cached_page(&path, 0).expect("读过的页应已预热");
@@ -1504,10 +1507,10 @@ fn reader_reads_pages_and_persists_progress() {
         "没读过的页不应出现在缓存里"
     );
 
-    let last = crate::reader::read_page(&path, 2).unwrap();
+    let last = crate::reader::read_page(&path, 2, false).unwrap();
     assert_eq!(last.name, "page1.png");
-    assert!(crate::reader::read_page(&path, 3).is_err());
-    assert!(crate::reader::read_page(&path, -1).is_err());
+    assert!(crate::reader::read_page(&path, 3, false).is_err());
+    assert!(crate::reader::read_page(&path, -1, false).is_err());
 
     let thumb = crate::reader::read_thumbnail(&path, 0, Some(96)).unwrap();
     assert_eq!(thumb.name, "2.png");

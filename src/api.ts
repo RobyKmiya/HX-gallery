@@ -149,9 +149,12 @@ export const api = {
   openReader: (archiveId: number) =>
     invoke<ReaderInfo>("open_reader", { archiveId }),
 
-  /** 预热一页：后端解压/解码后放进缓存，图片由 readerPageUrl 提供。 */
-  readReaderPage: (archiveId: number, index: number) =>
-    invoke<ReaderPage>("read_reader_page", { archiveId, index }),
+  /**
+   * 预热一页：后端解压/解码后放进缓存，图片由 readerPageUrl 提供。
+   * `current` 表示这页正在显示，后端会把它钉在缓存里，不让预取挤掉。
+   */
+  readReaderPage: (archiveId: number, index: number, current = false) =>
+    invoke<ReaderPage>("read_reader_page", { archiveId, index, current }),
 
   readReaderThumbnail: (archiveId: number, index: number, maxEdge?: number) =>
     invoke<ReaderThumb>("read_reader_thumbnail", {
@@ -195,7 +198,13 @@ export function readerPageUrl(
   archiveId: number,
   index: number,
   token = 0,
+  version?: string,
 ): string {
-  const suffix = `/page/${archiveId}/${index}`;
-  return token ? `${GALLERY_ORIGIN}${suffix}?t=${token}` : `${GALLERY_ORIGIN}${suffix}`;
+  const params = new URLSearchParams();
+  // `v` 是压缩包版本号：带它的 URL 与内容一一对应，webview 可以直接缓存，
+  // 于是重试 / 切页回来 / 重新挂 <img> 都不必再把几十兆的字节搬一遍。
+  if (version) params.set("v", version);
+  if (token) params.set("t", String(token));
+  const query = params.toString();
+  return `${GALLERY_ORIGIN}/page/${archiveId}/${index}${query ? `?${query}` : ""}`;
 }

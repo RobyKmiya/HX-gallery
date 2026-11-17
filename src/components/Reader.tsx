@@ -37,6 +37,18 @@ type ZoomMode = "fit" | "width" | "actual";
 const CACHE_LIMIT = 14;
 const PREFETCH_AHEAD = 4;
 const PREFETCH_BEHIND = 1;
+/**
+ * 超过这个体积的页不预取。
+ *
+ * 动图（animated webp/gif）单页能到二三十兆：预取 4 页就是上百兆，既超过
+ * 后端 96MB 的字节缓存预算（会把正在看的那页挤出去），也会让渲染进程同时
+ * 解码多张动图。这类页改成翻到时再加载。
+ */
+const PREFETCH_MAX_PAGE_BYTES = 12 * 1024 * 1024;
+/** 一次预取最多提前准备多少字节。 */
+const PREFETCH_BUDGET_BYTES = 48 * 1024 * 1024;
+/** 预解码等待上限；超时说明这张图太大，交给 <img> 自己解码。 */
+const PAGE_DECODE_TIMEOUT = 6000;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 4;
 const ZOOM_STEP = 0.25;
@@ -219,14 +231,14 @@ export default function Reader({
   pageRef.current = page + 1;
 
   const fetchPageData = useCallback(
-    (index: number): Promise<ReaderPage> => {
+    (index: number, current = false): Promise<ReaderPage> => {
       const cached = cacheRef.current.get(index);
       if (cached) return Promise.resolve(cached);
       const inflight = inflightRef.current.get(index);
       if (inflight) return inflight;
 
       const request = api
-        .readReaderPage(card.id, index)
+        .readReaderPage(card.id, index, current)
         .then((data) => {
           cacheRef.current.set(data.index, data);
           trimPageCache(cacheRef.current, pageRef.current - 1);
@@ -249,9 +261,20 @@ export default function Reader({
 
       const promise = new Promise<void>((resolve) => {
         let settled = false;
+        let timer = 0;
+        // 预解码只是为了「翻到这一页时立刻有图」。动图（几十 MB、上百帧）
+        // 解码可能要好几秒，不能让它把整页卡住：超时就先放行，<img> 自己
+        // 解码出来后照样显示。
+        const bail = () => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          resolve();
+        };
         const finish = () => {
           if (settled) return;
           settled = true;
+          window.clearTimeout(timer);
           if (typeof image.decode === "function") {
             image.decode().then(
               () => resolve(),
@@ -265,13 +288,19 @@ export default function Reader({
         image.decoding = "sync";
         image.onload = finish;
         image.onerror = () => {
-          if (!settled) {
-            settled = true;
-            resolve();
-          }
+          // 记成「已解码」会让这一页永远停在破图上：把记忆删掉，下次重来时
+          // 还能真正重新预热一次。
+          decodedRef.current.delete(data.index);
+          bail();
         };
-        image.src = readerPageUrl(card.id, data.index, assetToken);
+        image.src = readerPageUrl(
+          card.id,
+          data.index,
+          assetToken,
+          data.version,
+        );
         if (image.complete) finish();
+        timer = window.setTimeout(bail, PAGE_DECODE_TIMEOUT);
       });
 
       decodedRef.current.set(data.index, promise);
@@ -363,8 +392,10 @@ export default function Reader({
     setLoading(true);
     setError(null);
     Promise.all([
-      fetchPageData(page),
-      secondIndex !== null ? fetchPageData(secondIndex) : Promise.resolve(null),
+      fetchPageData(page, true),
+      secondIndex !== null
+        ? fetchPageData(secondIndex, true)
+        : Promise.resolve(null),
     ])
       .then(async ([first, second]) => {
         await Promise.all([
@@ -413,12 +444,21 @@ export default function Reader({
 
     let cancelled = false;
     const run = async () => {
+      let spent = 0;
       for (const index of indexes) {
         if (cancelled) return;
         try {
           const data =
             cacheRef.current.get(index) ?? (await fetchPageData(index));
           if (cancelled) return;
+
+          // 大页（动图）不预取：一是几十兆一份，预取 4 页就超过后端 96MB
+          // 缓存预算，会反过来把正在看的那页挤出去；二是渲染进程解码多张
+          // 动图本身就可能失败。留到用户真的翻过去时再加载。
+          if (data.bytes > PREFETCH_MAX_PAGE_BYTES) continue;
+          if (spent + data.bytes > PREFETCH_BUDGET_BYTES) return;
+          spent += data.bytes;
+
           await preparePage(data);
         } catch {
           // Prefetch failures must never disturb the frame on screen.
@@ -712,12 +752,14 @@ export default function Reader({
       setOpenToken((value) => value + 1);
       return;
     }
+    // 只作废当前这一页（双页时连带第二页），别把已经预热好的邻页一起清掉：
+    // 清整张表会让重试变成「把几十兆重新解压一遍」。
     for (const index of [page, page + 1]) {
       cacheRef.current.delete(index);
+      inflightRef.current.delete(index);
+      decodedRef.current.delete(index);
     }
     // URL 里带 token，换 token 后旧的解码结果全部作废。
-    inflightRef.current.clear();
-    decodedRef.current.clear();
     setAssetToken((value) => value + 1);
     setReloadToken((value) => value + 1);
   };
@@ -725,9 +767,9 @@ export default function Reader({
   /**
    * 图片加载失败时先自愈一次。
    *
-   * 协议层只在后端缓存未命中时返回 404（例如页面被 LRU 淘汰），此时重新走
-   * 一遍命令就能把页面重新预热并换 URL 取到图。同一次打开里每页只自愈一次，
-   * 再失败就走错误态，交给用户点「重试」。
+   * 协议层只在后端缓存未命中时返回 404（例如页面被 LRU 淘汰），这时重挂一次
+   * <img>（换 URL 版本号）通常就能拿到图：后端缓存是热的，命令层不必重跑。
+   * 同一次打开里每页只自愈一次，再失败就走错误态，交给用户点「重试」。
    */
   const handleImageError = (index: number) => {
     if (recoveredRef.current.has(index)) {
@@ -736,7 +778,9 @@ export default function Reader({
       return;
     }
     recoveredRef.current.add(index);
-    retry();
+    // 只换 <img> 的 key 与 URL 版本，不动后端缓存、不重新走命令。
+    decodedRef.current.delete(index);
+    setAssetToken((value) => value + 1);
   };
 
   const handleImageLoad = useCallback(
@@ -993,7 +1037,13 @@ export default function Reader({
             (spread ? (
               <div className="reader-spread">
                 <img
-                  src={readerPageUrl(card.id, pageData.index, assetToken)}
+                  key={`${pageData.index}-${assetToken}`}
+                  src={readerPageUrl(
+                    card.id,
+                    pageData.index,
+                    assetToken,
+                    pageData.version,
+                  )}
                   alt={pageData.name}
                   style={imageStyleFor(pageData)}
                   decoding="sync"
@@ -1003,10 +1053,12 @@ export default function Reader({
                 />
                 {visibleSecond && (
                   <img
+                    key={`${visibleSecond.index}-${assetToken}`}
                     src={readerPageUrl(
                       card.id,
                       visibleSecond.index,
                       assetToken,
+                      visibleSecond.version,
                     )}
                     alt={visibleSecond.name}
                     style={imageStyleFor(visibleSecond)}
@@ -1021,7 +1073,13 @@ export default function Reader({
               </div>
             ) : (
               <img
-                src={readerPageUrl(card.id, pageData.index, assetToken)}
+                key={`${pageData.index}-${assetToken}`}
+                src={readerPageUrl(
+                  card.id,
+                  pageData.index,
+                  assetToken,
+                  pageData.version,
+                )}
                 alt={pageData.name}
                 style={imageStyleFor(pageData)}
                 decoding="sync"

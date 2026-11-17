@@ -71,6 +71,10 @@ export interface ReaderBookmark {
 export interface ReaderPage {
   index: number;
   name: string;
+  /** 压缩包版本号（修改时间-大小），拼进取图 URL 做缓存键。 */
+  version: string;
+  /** 这一页的字节数，用来决定要不要预取。 */
+  bytes: number;
 }
 
 /** 缩略图体积小，继续内联成 data URL，省一次协议往返。 */

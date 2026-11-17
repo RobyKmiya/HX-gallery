@@ -43,6 +43,14 @@ fn parse_page_path(path: &str) -> Option<(i64, i64)> {
     Some((archive_id, index))
 }
 
+/// 从 query 里取 `v=`（压缩包版本号）。
+fn query_version(query: Option<&str>) -> Option<&str> {
+    query?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("v="))
+        .filter(|value| !value.is_empty())
+}
+
 pub fn serve(
     _context: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: Request<Vec<u8>>,
@@ -55,16 +63,34 @@ pub fn serve(
         return plain(StatusCode::NOT_FOUND, "画集未在阅读器中打开");
     };
 
+    let version = query_version(request.uri().query());
+
+    // URL 带版本号时，压缩包换过就必须重新预热（否则会拿到旧图）。
+    if let Some(version) = version
+        && version != reader::file_version(&path)
+    {
+        return plain(StatusCode::NOT_FOUND, "画集文件已更新，请重新打开");
+    }
+
     let Some(payload) = reader::cached_page(&path, index) else {
         // 页面还没预热（或已被 LRU 淘汰）：交给前端重新走一次命令。
         return plain(StatusCode::NOT_FOUND, "页面尚未准备完成");
+    };
+
+    // 带 `?v=` 的 URL 与压缩包内容一一对应，可以放心让 webview 自己缓存：
+    // 动图动辄二三十兆，之前 `no-store` 意味着每次重挂 <img>（重试、切页回来）
+    // 都要重走一遍协议、再 memcpy 一份到 JS 侧。
+    let cache_control = if version.is_some() {
+        "private, max-age=3600"
+    } else {
+        "no-store"
     };
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", payload.mime)
         .header("Content-Length", payload.bytes.len())
-        .header("Cache-Control", "no-store")
+        .header("Cache-Control", cache_control)
         .body(payload.bytes.as_ref().clone())
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }

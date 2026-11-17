@@ -97,6 +97,11 @@ pub struct ReaderBookmark {
 pub struct ReaderPage {
     pub index: i64,
     pub name: String,
+    /// 压缩包的「修改时间-大小」，前端拼进 URL（`?v=`）做缓存版本号。
+    pub version: String,
+    /// 这一页的字节数。前端据此决定要不要预取：动图单页能到二三十兆，
+    /// 无脑预取 4 页会把正在看的那页从内存缓存里挤出去。
+    pub bytes: i64,
 }
 
 /// 缩略图。

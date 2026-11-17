@@ -17,8 +17,9 @@ use crate::pagecache::{ByteCache, Cached};
 
 const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// 页面字节缓存预算。至少能装下两页上限大小的图，避免大图把自己挤出去。
-const PAGE_CACHE_BUDGET: usize = 96 * 1024 * 1024;
+/// 页面字节缓存预算。至少能装下两页上限大小的图，避免大图把自己挤出去；
+/// 动图常见 20–30MB，留到 128MB 才够「当前页 + 一两页邻页」共存。
+const PAGE_CACHE_BUDGET: usize = 128 * 1024 * 1024;
 const THUMB_CACHE_BUDGET: usize = 24 * 1024 * 1024;
 /// 记住多少个「正在读」的压缩包路径，供自定义协议解析。
 const MAX_REMEMBERED_ARCHIVES: usize = 32;
@@ -164,32 +165,51 @@ pub fn reader_info(path: &Path, last_page: i64) -> Result<ReaderInfo, String> {
     })
 }
 
+/// 压缩包版本号（修改时间-大小），前端拼进 URL 做缓存键。
+pub fn file_version(path: &Path) -> String {
+    match file_stamp(path) {
+        Ok((modified, size)) => format!("{modified}-{size}"),
+        Err(_) => String::new(),
+    }
+}
+
 /// 把一页准备进后端缓存，返回它的元信息。
 ///
 /// 解码 / TIFF 转码都在调用方（阻塞线程）完成，协议取图时只是内存读取，
 /// 因此 webview 的 UI 线程不会因为解码大图而卡顿。
-pub fn read_page(path: &Path, page_index: i64) -> Result<ReaderPage, String> {
-    let payload = page_payload(path, page_index)?;
+///
+/// `pin` 表示这一页正显示在屏幕上：缓存会为它保留位置，不让预取的邻页
+/// 把它挤掉（动图单页二三十兆时，预取 3 页就能把当前页顶出 96MB 预算）。
+pub fn read_page(path: &Path, page_index: i64, pin: bool) -> Result<ReaderPage, String> {
+    let payload = page_payload(path, page_index, pin)?;
     Ok(ReaderPage {
         index: page_index,
         name: payload.name.clone(),
+        version: file_version(path),
+        bytes: payload.len() as i64,
     })
 }
 
 /// 取页面字节：命中缓存直接返回，未命中则解压 + 解码 + 转码后写回缓存。
-pub fn page_payload(path: &Path, page_index: i64) -> Result<Cached, String> {
+pub fn page_payload(path: &Path, page_index: i64, pin: bool) -> Result<Cached, String> {
     let key = cache_key("page", path, page_index, "")?;
 
     if let Ok(mut cache) = page_cache().lock()
         && let Some(hit) = cache.get(&key)
     {
+        if pin {
+            cache.pin(&key);
+        }
         return Ok(hit);
     }
 
     let payload = extract_page(path, page_index)?;
 
     if let Ok(mut cache) = page_cache().lock() {
-        cache.insert(key, payload.clone());
+        cache.insert(key.clone(), payload.clone());
+        if pin {
+            cache.pin(&key);
+        }
     }
 
     Ok(payload)

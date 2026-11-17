@@ -40,6 +40,8 @@ struct Slot {
 pub struct ByteCache {
     budget: usize,
     used: usize,
+    /// 正在显示的那一页。淘汰时跳过它，否则「预取的邻页」会把当前页顶出去。
+    pinned: Option<String>,
     /// 最久未使用的键在最前面。
     order: VecDeque<String>,
     slots: HashMap<String, Slot>,
@@ -50,6 +52,7 @@ impl ByteCache {
         Self {
             budget,
             used: 0,
+            pinned: None,
             order: VecDeque::new(),
             slots: HashMap::new(),
         }
@@ -95,11 +98,30 @@ impl ByteCache {
         self.evict();
     }
 
+    /// 把某一页钉住：淘汰时最后才考虑它。
+    ///
+    /// 端到端的问题是这样的：用户停在一张 25MB 的动图上，前端预取后面 4 页，
+    /// 每插一页都要淘汰最久未使用的条目，插到第 3 页时当前页正好成了最久未使用
+    /// 的那条 —— 于是「正在看的图」被自己邻居的预取挤出了缓存，协议层随即 404，
+    /// 前端重试再预热，邻居又把它挤掉，来回抖动。
+    pub fn pin(&mut self, key: &str) {
+        if self.slots.contains_key(key) {
+            self.pinned = Some(key.to_string());
+        }
+    }
+
     fn evict(&mut self) {
-        while self.used > self.budget {
+        // 队列里可能只剩被钉住的那一条，用计数兜底，避免死循环。
+        let mut guard = self.order.len() + 1;
+        while self.used > self.budget && guard > 0 {
+            guard -= 1;
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
+            if self.pinned.as_deref() == Some(oldest.as_str()) {
+                self.order.push_back(oldest);
+                continue;
+            }
             if let Some(slot) = self.slots.remove(&oldest) {
                 self.used = self.used.saturating_sub(slot.size);
             }
@@ -136,6 +158,20 @@ mod tests {
         cache.insert("huge".to_string(), entry(65));
         assert!(cache.get("huge").is_none());
         assert_eq!(cache.used(), 0);
+    }
+
+    #[test]
+    fn pinned_entry_survives_neighbor_inserts() {
+        let mut cache = ByteCache::new(100);
+        cache.insert("current".to_string(), entry(40));
+        cache.pin("current");
+
+        // 预取邻页，总占用会超过预算：被钉住的当前页必须留下。
+        cache.insert("next1".to_string(), entry(40));
+        cache.insert("next2".to_string(), entry(40));
+
+        assert!(cache.get("current").is_some(), "正在看的一页不能被挤掉");
+        assert!(cache.used() <= 100);
     }
 
     #[test]
