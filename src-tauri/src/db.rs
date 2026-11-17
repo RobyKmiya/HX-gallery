@@ -285,21 +285,35 @@ fn backup_database(conn: &Connection, gallery_dir: &Path, version: i64) -> Resul
         return Ok(());
     }
 
-    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     let backup_dir = gallery_dir.join("backups");
     fs::create_dir_all(&backup_dir).map_err(|e| format!("无法创建迁移备份目录: {e}"))?;
-    let backup_path = backup_dir.join(format!(
-        "library-v{version}-{}.db",
-        fsutil::now_ms()
-    ));
-    fs::copy(&db_path, &backup_path).map_err(|e| {
-        format!(
-            "迁移前备份失败，已中止升级（{}）: {e}",
+    let backup_path = backup_dir.join(format!("library-v{version}-{}.db", fsutil::now_ms()));
+
+    // VACUUM INTO 由当前连接生成一致性快照，包含 WAL 中尚未 checkpoint 的已提交事务。
+    // 原先先 checkpoint 再 fs::copy 主库的做法，在 checkpoint 失败（另一实例持有连接）
+    // 时会静默丢掉最近写入，且 checkpoint 的返回值被丢弃。
+    let target = backup_path.to_string_lossy().to_string();
+    conn.execute("VACUUM INTO ?1", rusqlite::params![target])
+        .map_err(|e| {
+            format!(
+                "迁移前备份失败，已中止升级（{}）: {e}",
+                backup_path.to_string_lossy()
+            )
+        })?;
+
+    let size = fs::metadata(&backup_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    if size == 0 {
+        let _ = fs::remove_file(&backup_path);
+        return Err(format!(
+            "迁移前备份为空，已中止升级（{}）",
             backup_path.to_string_lossy()
-        )
-    })?;
+        ));
+    }
+
     eprintln!(
-        "database v{version} backed up to {}",
+        "database v{version} backed up to {} ({size} bytes)",
         backup_path.to_string_lossy()
     );
     Ok(())
@@ -1419,7 +1433,8 @@ fn category_subtree_height(conn: &Connection, path: &str) -> Result<usize, Strin
         .query_map(params![prefix_len, prefix], |row| row.get::<_, String>(0))
         .map_err(|e| format!("查询子分类失败: {e}"))?;
     let mut height = 0usize;
-    for row in rows.filter_map(Result::ok) {
+    for row in rows {
+        let row = row.map_err(|e| format!("读取子分类失败: {e}"))?;
         height = height.max(row.matches('/').count().saturating_sub(own_depth));
     }
     Ok(height)
@@ -1464,8 +1479,8 @@ fn backfill_tag_categories(conn: &Connection) -> Result<(), String> {
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|e| format!("查询旧分类失败: {e}"))?;
     let legacy = rows
-        .filter_map(Result::ok)
-        .collect::<Vec<String>>();
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| format!("读取旧分类失败: {e}"))?;
 
     for raw in legacy {
         let mut segments = Vec::new();

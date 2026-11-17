@@ -8,7 +8,9 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use zip::ZipArchive;
 
-use crate::archive::{is_ignored_entry, is_image_name};
+use crate::archive::{
+    PAGE_DECODE_ALLOC, THUMB_DECODE_ALLOC, decode_image, is_ignored_entry, is_image_name,
+};
 use crate::fsutil;
 use crate::models::{ReaderInfo, ReaderPage};
 
@@ -119,8 +121,7 @@ pub fn read_page(path: &Path, page_index: i64) -> Result<ReaderPage, String> {
         .to_ascii_lowercase();
 
     let (bytes, mime) = if matches!(extension.as_str(), "tif" | "tiff") {
-        let image = image::load_from_memory(&bytes)
-            .map_err(|error| format!("页面图片无法解码: {error}"))?;
+        let image = decode_image(&bytes, PAGE_DECODE_ALLOC)?;
         let mut encoded = Vec::new();
         image
             .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
@@ -145,8 +146,7 @@ pub fn read_thumbnail(
     let (name, bytes) = read_page_bytes(path, page_index)?;
     let edge = max_edge.unwrap_or(180).clamp(64, 512);
 
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| format!("缩略图解码失败: {error}"))?;
+    let image = decode_image(&bytes, THUMB_DECODE_ALLOC)?;
     let thumbnail = image.thumbnail(edge, edge);
 
     let mut encoded = Vec::new();

@@ -237,13 +237,18 @@ export default function DetailDrawer({
     return bulkTagNames.filter((name) => !attached.has(name.toLowerCase()));
   }, [bulkTagNames, tags]);
 
+  // Esc、遮罩、关闭按钮统一走带守卫的关闭入口，避免备注草稿被静默丢弃。
+  // 用 ref 持有最新处理函数，保证 keydown 监听只注册一次且总能读到最新草稿状态。
+  const requestCloseRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      requestCloseRef.current();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -491,6 +496,34 @@ export default function DetailDrawer({
   }
 
   const noteDirty = noteDraft.trim() !== (card.note ?? "").trim();
+  const closingRef = useRef(false);
+
+  async function requestClose() {
+    if (closingRef.current || noteBusy) return;
+    if (!noteDirty) {
+      onClose();
+      return;
+    }
+    // 草稿未保存：先自动落盘再关闭，失败则保留抽屉与草稿并提示。
+    // 选择自动保存而非「保存/放弃/取消」对话框，是为了零新增 UI 且绝不丢输入；
+    // 后续统一模态层落地后可在此替换为 useCloseGuard 三选一。
+    closingRef.current = true;
+    setNoteBusy(true);
+    try {
+      const saved = await api.setNote(card.id, noteDraft.trim() || null);
+      onNoteChange(card.id, saved);
+      onNotify("备注已保存", "success");
+      onClose();
+    } catch (error) {
+      setNoteState("error");
+      onNotify(`备注未保存，已保留草稿：${String(error)}`, "error");
+    } finally {
+      setNoteBusy(false);
+      closingRef.current = false;
+    }
+  }
+  requestCloseRef.current = () => void requestClose();
+
   const hasProgress = card.lastPage > 0 && card.pageCount > 0;
   const finished = hasProgress && card.lastPage >= card.pageCount;
   const readLabel = finished
@@ -500,7 +533,7 @@ export default function DetailDrawer({
       : "开始阅读";
 
   return (
-    <div className="drawer-backdrop" onClick={onClose}>
+    <div className="drawer-backdrop" onClick={() => void requestClose()}>
       <aside
         className="detail-drawer"
         role="dialog"
@@ -515,7 +548,7 @@ export default function DetailDrawer({
           </div>
           <button
             className="icon-button"
-            onClick={onClose}
+            onClick={() => void requestClose()}
             aria-label="关闭详情"
           >
             <CloseIcon />
@@ -1079,7 +1112,7 @@ export default function DetailDrawer({
             <TrashIcon width={13} height={13} />
             {deleting ? "处理中…" : deleteConfirm ? "确认删除" : "移入回收站"}
           </button>
-          <button className="btn btn-ghost" onClick={onClose}>
+          <button className="btn btn-ghost" onClick={() => void requestClose()}>
             关闭
           </button>
         </div>

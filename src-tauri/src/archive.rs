@@ -1,13 +1,50 @@
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-use image::DynamicImage;
+use image::{DynamicImage, ImageDecoder};
 use zip::ZipArchive;
+
+use crate::fsutil;
 
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const COVER_MAX_WIDTH: u32 = 480;
 const COVER_MAX_HEIGHT: u32 = 720;
+
+/// 解码后像素边长上限，防止声明超大尺寸的压缩包图片申请 GB 级内存。
+const MAX_PIXEL_EDGE: u32 = 12_000;
+/// 封面 / 缩略图解码允许的最大分配量。
+pub(crate) const THUMB_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
+/// 阅读器整页解码允许的最大分配量。
+pub(crate) const PAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// 带资源上限的图片解码。`image::load_from_memory` 内部使用 `Limits::default()`
+/// （max_alloc 512 MB、宽高无上限），对高压缩比或声明超大尺寸的图片不安全。
+pub(crate) fn decode_image(bytes: &[u8], max_alloc: u64) -> Result<DynamicImage, String> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("图片格式无法识别: {error}"))?;
+
+    // image 0.25 的 Limits 是 #[non_exhaustive]，没有链式 setter，
+    // 只能取默认值后逐字段修改，再用 ImageReader::limits() 应用。
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    limits.max_image_width = Some(MAX_PIXEL_EDGE);
+    limits.max_image_height = Some(MAX_PIXEL_EDGE);
+    reader.limits(limits);
+
+    let decoder = reader
+        .into_decoder()
+        .map_err(|error| format!("图片无法解码: {error}"))?;
+    let (width, height) = decoder.dimensions();
+    if width > MAX_PIXEL_EDGE || height > MAX_PIXEL_EDGE {
+        return Err(format!(
+            "图片尺寸过大（{width}×{height}，上限 {MAX_PIXEL_EDGE}），已跳过"
+        ));
+    }
+
+    DynamicImage::from_decoder(decoder).map_err(|error| format!("图片无法解码: {error}"))
+}
 
 #[derive(Debug, Default)]
 pub struct ArchiveInspection {
@@ -120,24 +157,27 @@ pub fn inspect_archive(
     let cover_path = covers_dir.join(&cover_key);
     let mut error = None;
 
-    if !cover_path.exists() {
+    // 只判断 exists() 会把中断留下的 0 字节 / 截断文件当成有效封面；
+    // 这里至少校验非空，写入失败时临时文件由 save_jpeg 自行清理。
+    let cover_ready = || {
+        fs::metadata(&cover_path)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false)
+    };
+
+    if !cover_ready() {
         if let Err(create_error) = fs::create_dir_all(covers_dir) {
             error = Some(format!("无法创建封面缓存目录: {create_error}"));
         } else if let Err(write_error) =
             write_cover(&mut archive, images[cover_position].0, &cover_path)
         {
-            let _ = fs::remove_file(&cover_path);
             error = Some(write_error);
         }
     }
 
     ArchiveInspection {
         page_count,
-        cover_key: if cover_path.exists() {
-            Some(cover_key)
-        } else {
-            None
-        },
+        cover_key: if cover_ready() { Some(cover_key) } else { None },
         error,
     }
 }
@@ -165,8 +205,7 @@ fn write_cover(
         return Err("封面图片过大，已跳过".to_string());
     }
 
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| format!("封面图片无法解码: {error}"))?;
+    let image = decode_image(&bytes, THUMB_DECODE_ALLOC)?;
     let thumbnail = image.thumbnail(COVER_MAX_WIDTH, COVER_MAX_HEIGHT);
     let rgb = thumbnail.to_rgb8();
 
@@ -178,9 +217,32 @@ fn save_jpeg(image: &DynamicImage, destination: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| format!("无法创建封面目录: {error}"))?;
     }
 
+    // 先写同目录临时文件，再 rename 原子替换：避免中断留下截断 JPEG
+    // 被下次的 exists() 判断当成有效封面永久使用。
+    let name = destination
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "cover".to_string());
+    let temp = destination.with_file_name(format!(
+        "{name}.{}-{}.tmp",
+        std::process::id(),
+        fsutil::now_ms()
+    ));
+
+    // 显式指定 JPEG 格式（临时文件扩展名是 .tmp，image.save 无法推断格式）。
+    let mut encoded = Vec::new();
     image
-        .save(destination)
-        .map_err(|error| format!("保存封面失败: {error}"))
+        .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Jpeg)
+        .map_err(|error| format!("封面编码失败: {error}"))?;
+    fs::write(&temp, &encoded).map_err(|error| {
+        let _ = fs::remove_file(&temp);
+        format!("保存封面失败: {error}")
+    })?;
+
+    fs::rename(&temp, destination).map_err(|error| {
+        let _ = fs::remove_file(&temp);
+        format!("封面写入未完成: {error}")
+    })
 }
 
 pub fn covers_dir_for(cache_dir: &Path, library_id: &str) -> PathBuf {

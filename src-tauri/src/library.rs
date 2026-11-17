@@ -254,10 +254,17 @@ pub fn scan_with_covers(root: &Path, covers_dir: &Path) -> ScanReport {
             }
         };
 
-        match statement.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
-        }) {
-            Ok(rows) => rows.filter_map(Result::ok).collect(),
+        match statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        {
+            Ok(rows) => rows,
             Err(error) => {
                 errors.push(format!("读取缺失记录失败: {error}"));
                 Vec::new()
@@ -622,7 +629,10 @@ pub fn query_archives(
             )
             .map_err(|error| format!("查询分组失败: {error}"))?;
 
-        Some(rows.filter_map(Result::ok).collect::<Vec<_>>())
+        Some(
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取评分分组失败: {error}"))?,
+        )
     } else if group_by_tag {
         let mut statement = connection
             .prepare(&format!(
@@ -652,7 +662,10 @@ pub fn query_archives(
             )
             .map_err(|error| format!("查询标签分组失败: {error}"))?;
 
-        Some(rows.filter_map(Result::ok).collect::<Vec<_>>())
+        Some(
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取标签分组失败: {error}"))?,
+        )
     } else if group_by_collection {
         let mut statement = connection
             .prepare(&format!(
@@ -684,7 +697,10 @@ pub fn query_archives(
             )
             .map_err(|error| format!("查询收藏夹分组失败: {error}"))?;
 
-        Some(rows.filter_map(Result::ok).collect::<Vec<_>>())
+        Some(
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取收藏夹分组失败: {error}"))?,
+        )
     } else {
         None
     };
@@ -798,8 +814,8 @@ pub fn query_archives(
         .map_err(|error| format!("查询画集失败: {error}"))?;
 
     let items: Vec<ArchiveCard> = rows
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("读取画集行失败: {error}"))?;
 
     Ok(ArchivePage {
         items,
