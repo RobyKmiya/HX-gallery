@@ -704,11 +704,47 @@
 <b>本批暴露的一个流程问题（比 bug 本身更重要）：</b>改完第四批再冒烟时界面里仍是旧逻辑、报错照旧——因为 <code>src-tauri\target\release\archive-gallery.exe</code> 是 <b>17:53</b> 编译的，四批改动一行都不在里面。Tauri 的前端产物（<code>dist/</code>）是在编译时<b>嵌入二进制</b>的，<code>npm run build</code> 只更新磁盘上的 <code>dist/</code>，不重启旧进程就永远看不到变化。<br><b>重建命令必须带特性开关：</b><code>cargo build --release --bin archive-gallery --features tauri/custom-protocol</code>。漏掉 <code>custom-protocol</code> 时 <code>tauri</code> crate 的 <code>dev</code> 判定为真，程序会去连 <code>http://localhost:1420</code>（<code>devUrl</code>）而不是读内嵌资源，表现是白屏。用 <code>npm run tauri build</code> 则由 CLI 自动带上该特性，也是本项目原本的构建方式。<b>本次已按正确方式重建并核对：二进制内嵌的是新产物（<code>index-E8qUo15-.js</code> / <code>index-BMD4sEs7.css</code>）。</b>
 </div>
 
+<h3 id="batch5">12.11 第五批落地记录（<code>8c32671</code>）：阅读器停在单张动图上永远加载不出来</h3>
+<div class="card">
+用户反馈：「动图加载久一点正常，前后浏览再加载就正常，但一旦停留在单一动图就不会正常加载，<b>即使已经加载好了</b>。」截图：第 30/41 页，转了 32 秒后变成「页面图片加载失败，请重试」。这是第三批数据通道改动暴露出来的问题——静态页 2 MB 时看不出来，动图 20–30 MB 时两个缺陷同时触发。
+</div>
+
+<p><b>一、两个叠加的机制</b></p>
+<table>
+  <tr><th>#</th><th>机制</th><th>为什么「停着不动」反而更容易坏</th></tr>
+  <tr><td><b>A</b></td><td><b>预取把当前页挤出缓存</b>：<code>PREFETCH_AHEAD=4</code>，每插一页淘汰最久未使用的一条；页预算 96 MB，而一页 25 MB，插到第 3 页时「当前页」正好成了最久未使用的那条 → 协议层 404 → 前端自愈重预热 → 邻居再把它挤掉，来回抖</td><td>前后翻页时当前页刚预热、邻居还没排上队，所以「再加载就正常」；一旦停住，预取队列才有时间把它顶出去</td></tr>
+  <tr><td><b>B</b></td><td><b>同一张图要过两遍协议</b>：<code>read_reader_page</code> 预热一次（给 JS 的 <code>Image</code> 解码用），<code>&lt;img&gt;</code> 又用同一 URL 取一次；响应是 <code>no-store</code>，第二遍是完整的几十兆重传 + 重新解码，超时即触发 <code>onerror</code></td><td>数据其实早就在内存里了，只是 webview 不让复用——正是「即使已经加载好了」</td></tr>
+</table>
+
+<p><b>二、改法</b></p>
+<table>
+  <tr><th>位置</th><th>改动</th><th>作用</th></tr>
+  <tr><td>缓存</td><td><code>ByteCache::pin(key)</code>，淘汰时跳过被钉住的那条（计 <code>guard</code> 防死循环）；页预算 96 → <b>128 MB</b></td><td>直接掐掉机制 A：正在看的那页不会被自己的邻居挤走</td></tr>
+  <tr><td>命令</td><td><code>read_reader_page(…, current)</code> 只对<b>正在显示</b>的那页 pin，预取传 false</td><td>钉住的是「屏幕上的页」，不是「最后请求的页」</td></tr>
+  <tr><td>协议</td><td>URL 带 <code>?v=&lt;mtime-size&gt;</code> 时用 <code>private, max-age=3600</code> 让 webview 自己缓存；版本不匹配直接 404 让前端重新预热</td><td>掐掉机制 B：第二遍取图变成内存命中，几十兆不再重传、不再重新解码；压缩包换过则 URL 变，不会拿到旧图</td></tr>
+  <tr><td>预取</td><td>按字节算：单页 &gt; <b>12 MB</b> 不预取，累计 &gt; <b>48 MB</b> 就停</td><td>动图预取收益极低（翻到时本来就要等），却要吃掉几十兆后端缓存 + 渲染进程解码内存</td></tr>
+  <tr><td>预解码</td><td>加 6 s 上限，超时先放行交给 <code>&lt;img&gt;</code> 自己解码；解码失败时删掉「已解码」记忆</td><td>避免一个几十兆的动图把整页卡在 spinner 上，也避免失败被永久记成成功</td></tr>
+  <tr><td>自愈</td><td>只换 URL 版本号、不动后端缓存；<code>&lt;img&gt;</code> 加 <code>key</code> 换一个干净元素；手动「重试」只作废当前页</td><td>原来的自愈会清空整张解码表并重跑命令，对动图等于「把几十兆重新解压一遍」</td></tr>
+</table>
+
+<p><b>三、验证</b></p>
+<table>
+  <tr><th>检查</th><th>结果</th></tr>
+  <tr><td><code>cargo test</code></td><td class="pass">24 passed / 0 failed / 1 ignored（23 → 24）。新增 1 个：被钉住的页在连续插入两个邻页、总占用超过预算后<b>仍在缓存里</b></td></tr>
+  <tr><td><code>tsc --noEmit</code> / <code>npm run build</code></td><td class="pass">通过。JS 382.74 → <b>383.18 KB</b>（预取预算 + 超时 + URL 版本号）</td></tr>
+  <tr><td><code>cargo clippy --all-targets</code></td><td class="pass">15 处，<b>新代码 0 条</b>；改动的 4 个文件 rustfmt 0 差异</td></tr>
+  <tr><td>运行时可验证性</td><td class="fail">仍然是<b>不可本地验证</b>的一类：动图解码耗时、WebView2 的内存表现都要真机跑。本批用「机制上排除」的方式收敛：先让 404 循环不可能发生（pin），再让重复下载不可能发生（版本化 URL + 允许缓存）</td></tr>
+</table>
+
+<div class="note" style="margin-top:10px">
+<b>如果重启后仍然复现，下一步的取证方式：</b>① 打开阅读器后按 F12（若该构建未开 devtools，用 <code>npm run tauri dev</code> 跑一遍同样操作），看 Console 里是否成对出现 <code>404</code> 与 <code>Refused/Failed to load</code>——有 404 就是缓存仍被挤掉（继续加大预算或降低预取）；只有 <code>Failed to load</code> 没有 404，则是 WebView2 对该动图的解码失败（与协议无关，需要看这张图的具体尺寸/帧数）。② 在 Network 面板看同一页的请求次数：正常应只有 1 次（带 <code>?v=</code> 后第二次起是 <code>(memory cache)</code>）。
+</div>
+
 <div class="note" style="margin-top:10px">
 <b>仍然存在的已知缺口（第三批未触及）：</b>命令 ACL（需把 45 个命令拆进 plugin）；CLI 与桌面的跨进程并发仍只靠 <code>busy_timeout</code>；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未做 Unicode 规范化；M2（每次翻页 3 条 SQL）未合并；<code>translate.rs</code> 仍是 131 行的小词典（12.2 的升级方案未动）。
 </div>
 
-<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地四批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）、<b>第四批</b> <code>3ab267b</code>（批量标签解析命名空间 + <code>add_tags_bulk</code> 单事务导入，9 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
+<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地五批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）、<b>第四批</b> <code>3ab267b</code>（批量标签解析命名空间 + <code>add_tags_bulk</code> 单事务导入，9 个文件）、<b>第五批</b> <code>8c32671</code>（阅读器动图加载：缓存 pin + 版本化 URL + 按字节预取，8 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
 
 </div>
 </body>
