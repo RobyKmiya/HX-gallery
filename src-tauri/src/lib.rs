@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use models::{
-    ArchivePage, ArchiveQuery, Collection, ImportOptions, ImportReport, LibraryState,
-    ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb, ScanReport, Tag, TagCategory, TagGraph,
-    TagTranslationInput, TrashedArchive,
+    ArchivePage, ArchiveQuery, BulkTagReport, Collection, ImportOptions, ImportReport, LibraryState,
+    ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb, ScanReport, Tag, TagCategory, TagDraft,
+    TagGraph, TagTranslationInput, TrashedArchive,
 };
 
 /// 一次导入最多接受多少个入口路径，避免单次 IPC 传入超大数组。
@@ -471,6 +471,21 @@ async fn add_tag(
     run_blocking(state, move |state| {
         with_library(state, |library| {
             db::add_tag(&library.conn, archive_id, &name)
+        })
+    })
+    .await
+}
+
+/// 批量导入标签（一次事务）。返回成功/失败明细，单条失败不影响其余。
+#[tauri::command]
+async fn add_tags_bulk(
+    state: State<'_, AppState>,
+    archive_id: i64,
+    tags: Vec<TagDraft>,
+) -> Result<BulkTagReport, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::add_tags_bulk(&library.conn, archive_id, &tags)
         })
     })
     .await
@@ -1007,6 +1022,7 @@ pub fn run() {
             list_deleted_tags,
             list_archive_tags,
             add_tag,
+            add_tags_bulk,
             remove_tag,
             update_tag,
             set_tag_translations,

@@ -9,7 +9,7 @@ use zip::write::SimpleFileOptions;
 use crate::db;
 use crate::importer;
 use crate::library;
-use crate::models::{ArchiveQuery, ImportOptions, TagTranslationInput};
+use crate::models::{ArchiveQuery, ImportOptions, TagDraft, TagTranslationInput};
 
 struct Fixture {
     base: PathBuf,
@@ -659,6 +659,111 @@ fn tag_categories_hierarchy_and_grouping() {
     let cleared = db::set_tag_category(&context.conn, tag_a.id, None).unwrap();
     assert!(cleared.category.is_none());
     assert_eq!(other.path, "资料");
+}
+
+#[test]
+fn bulk_tag_import_categorizes_and_survives_bad_rows() {
+    let fixture = Fixture::new();
+    let zip = fixture.source.join("批量标签.cbz");
+    write_zip(&zip, &["001.png", "002.png"], 40);
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip],
+        ImportOptions::default(),
+        |_| {},
+    );
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let archive_id = page.items[0].id;
+
+    let oversized = "很".repeat(db::MAX_TAG_NAME + 1);
+    let report = db::add_tags_bulk(
+        &context.conn,
+        archive_id,
+        &[
+            TagDraft {
+                name: "长裙".into(),
+                category: Some("角色".into()),
+            },
+            // 批内重复（大小写不同）只算一次
+            TagDraft {
+                name: "长裙".into(),
+                category: Some("其他".into()),
+            },
+            TagDraft {
+                name: "mountainhan".into(),
+                category: Some("作者".into()),
+            },
+            TagDraft {
+                name: "全彩".into(),
+                category: None,
+            },
+            // 超长的那条必须只记失败，不拖累其余三条
+            TagDraft {
+                name: oversized.clone(),
+                category: Some("其他".into()),
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(report.added, 3);
+    assert_eq!(report.linked, 3);
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(
+        report.failed[0].reason,
+        format!("标签最多 {} 个字符", db::MAX_TAG_NAME)
+    );
+
+    let attached = db::archive_tags(&context.conn, archive_id).unwrap();
+    assert_eq!(attached.len(), 3);
+    let find = |name: &str| attached.iter().find(|tag| tag.name == name).unwrap();
+    assert_eq!(find("长裙").category.as_deref(), Some("角色"));
+    assert_eq!(find("mountainhan").category.as_deref(), Some("作者"));
+    assert_eq!(find("全彩").category, None);
+
+    // 再导一次：不新增、不重复挂、且不覆盖已有分类，只把空的补上。
+    let again = db::add_tags_bulk(
+        &context.conn,
+        archive_id,
+        &[
+            TagDraft {
+                name: "长裙".into(),
+                category: Some("其他".into()),
+            },
+            TagDraft {
+                name: "全彩".into(),
+                category: Some("其他".into()),
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(again.added, 0);
+    assert_eq!(again.existing, 2);
+    assert_eq!(again.linked, 0);
+    assert_eq!(again.categorized, 1);
+    let attached = db::archive_tags(&context.conn, archive_id).unwrap();
+    assert_eq!(
+        attached
+            .iter()
+            .find(|tag| tag.name == "长裙")
+            .unwrap()
+            .category
+            .as_deref(),
+        Some("角色"),
+        "已有分类不能被后续导入覆盖"
+    );
+
+    assert!(db::add_tags_bulk(&context.conn, 999_999, &[]).is_err());
 }
 
 #[test]

@@ -2580,6 +2580,54 @@ svg {
   margin: 0;
   font-size: 10px;
   color: var(--faint);
+  line-height: 1.5;
+}
+
+.tag-bulk-hint code {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+/* 识别结果按大类汇总，粘贴完先看清楚会落到哪些分组。 */
+.tag-bulk-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag-bulk-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10.4px;
+  color: var(--text-soft);
+}
+
+.tag-bulk-group b {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tag-bulk-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  font-size: 10.2px;
+  color: var(--danger);
+  line-height: 1.45;
+}
+
+.tag-bulk-warn svg {
+  flex: none;
+  margin-top: 2px;
 }
 
 .tag-picker {

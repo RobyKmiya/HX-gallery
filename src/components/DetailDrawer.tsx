@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import { formatBytes, formatDateTime } from "../format";
-import type { ArchiveCardData, Collection, Tag } from "../types";
+import { parseTagInput, summarizeByCategory } from "../tags";
+import type { ArchiveCardData, BulkTagReport, Collection, Tag } from "../types";
 import {
   AlertIcon,
   BookIcon,
@@ -54,20 +55,6 @@ const SAVE_LABELS: Record<RatingSaveState, string> = {
 
 function clampRating(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value)));
-}
-
-function parseTagNames(raw: string): string[] {
-  const seen = new Set<string>();
-  const names: string[] = [];
-  for (const part of raw.split(/[\n\r,，;；、]+/)) {
-    const name = part.trim().replace(/^#/, "").trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    names.push(name);
-  }
-  return names;
 }
 
 const TAG_CATEGORY_ORDER = [
@@ -228,14 +215,17 @@ export default function DetailDrawer({
     [tagPickerOptions],
   );
 
-  const bulkTagNames = useMemo(
-    () => parseTagNames(bulkTagText),
-    [bulkTagText],
-  );
+  const bulkParsed = useMemo(() => parseTagInput(bulkTagText), [bulkTagText]);
   const bulkNewNames = useMemo(() => {
     const attached = new Set(tags.map((tag) => tag.name.toLowerCase()));
-    return bulkTagNames.filter((name) => !attached.has(name.toLowerCase()));
-  }, [bulkTagNames, tags]);
+    return bulkParsed.tags.filter(
+      (tag) => !attached.has(tag.name.toLowerCase()),
+    );
+  }, [bulkParsed, tags]);
+  const bulkCategorySummary = useMemo(
+    () => summarizeByCategory(bulkParsed.tags),
+    [bulkParsed],
+  );
 
   // Esc、遮罩、关闭按钮统一走带守卫的关闭入口，避免备注草稿被静默丢弃。
   // 用 ref 持有最新处理函数，保证 keydown 监听只注册一次且总能读到最新草稿状态。
@@ -330,44 +320,35 @@ export default function DetailDrawer({
     [commitRating],
   );
 
-  async function addTagNames(
-    names: string[],
-  ): Promise<{ added: number; skipped: number }> {
-    let nextTags = tags;
-    let added = 0;
-    let skipped = 0;
-
-    for (const name of names) {
-      const normalized = name.toLowerCase();
-      if (nextTags.some((tag) => tag.name.toLowerCase() === normalized)) {
-        skipped += 1;
-        continue;
-      }
-      const tag = await api.addTag(card.id, name);
-      if (nextTags.some((item) => item.id === tag.id)) {
-        skipped += 1;
-        continue;
-      }
-      nextTags = [...nextTags, tag].sort((left, right) =>
-        left.name.localeCompare(right.name, "zh"),
-      );
-      setTags(nextTags);
-      added += 1;
-    }
-
-    setKnownTags(await api.listTags());
+  /**
+   * 批量导入：一次 IPC、一个事务。
+   *
+   * 以前是「循环调 add_tag」——N 个标签 N 次往返，而且任意一条超长就把整个
+   * 循环抛出去，前面加进去的留在库里、后面的全丢，用户只看到一句「导入失败」。
+   * 现在后端按条收集失败原因，前端只负责提示。
+   */
+  async function importTags(
+    drafts: { name: string; category: string | null }[],
+  ): Promise<BulkTagReport> {
+    const report = await api.addTagsBulk(card.id, drafts);
+    const [refreshedTags, allTags] = await Promise.all([
+      api.listArchiveTags(card.id),
+      api.listTags(),
+    ]);
+    setTags(refreshedTags);
+    setKnownTags(allTags);
     await onTagsChanged();
-    return { added, skipped };
+    return report;
   }
 
   async function submitTags(raw: string) {
     if (tagBusy) return;
-    const names = parseTagNames(raw);
-    if (names.length === 0) return;
+    const { tags: drafts } = parseTagInput(raw);
+    if (drafts.length === 0) return;
 
     setTagBusy(true);
     try {
-      await addTagNames(names);
+      await importTags(drafts);
       setTagInput("");
     } catch (error) {
       onNotify(`添加标签失败：${String(error)}`, "error");
@@ -377,16 +358,27 @@ export default function DetailDrawer({
   }
 
   async function submitBulkTags() {
-    if (tagBusy || bulkTagNames.length === 0) return;
+    if (tagBusy || bulkParsed.tags.length === 0) return;
     setTagBusy(true);
     try {
-      const { added, skipped } = await addTagNames(bulkTagNames);
+      const report = await importTags(bulkParsed.tags);
+      const parts = [`已导入 ${report.linked} 个标签`];
+      if (report.added > 0) parts.push(`新建 ${report.added}`);
+      if (report.categorized > 0) parts.push(`补分类 ${report.categorized}`);
+
+      if (report.failed.length > 0) {
+        // 有失败就保留原文，方便用户改完再导一次。
+        const first = report.failed[0];
+        onNotify(
+          `${parts.join(" · ")}；${report.failed.length} 个未导入：${first.name}（${first.reason}）`,
+          "error",
+        );
+        return;
+      }
+
       setBulkTagText("");
       setBulkTagOpen(false);
-      onNotify(
-        `已导入 ${added} 个标签${skipped > 0 ? `，跳过 ${skipped} 个已存在` : ""}`,
-        "success",
-      );
+      onNotify(parts.join(" · "), "success");
     } catch (error) {
       onNotify(`批量导入标签失败：${String(error)}`, "error");
     } finally {
@@ -802,11 +794,11 @@ export default function DetailDrawer({
             <div className="tag-bulk-panel">
               <textarea
                 autoFocus
-                rows={4}
+                rows={5}
                 value={bulkTagText}
                 disabled={tagBusy}
                 placeholder={
-                  "每行一个标签，也可用逗号、分号、顿号分隔：\n全彩\n纯爱, 萝莉；AI、黑白"
+                  "直接粘贴标准 tag 格式，可带命名空间：\nfemale:big breasts, sole female\ncharacter:aoba utsumihikari, tachibanasensei\nartist:mountainhan\n\n也支持纯标签，每行一个或用逗号、分号、顿号分隔：\n全彩, 纯爱；萝莉、黑白"
                 }
                 onChange={(event) => setBulkTagText(event.target.value)}
                 onKeyDown={(event) => {
@@ -825,13 +817,27 @@ export default function DetailDrawer({
                   }
                 }}
               />
+              {bulkCategorySummary.length > 0 && (
+                <div className="tag-bulk-groups">
+                  {bulkCategorySummary.map(([label, count]) => (
+                    <span key={label} className="tag-bulk-group">
+                      {label}
+                      <b>{count}</b>
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="tag-bulk-foot">
                 <span>
-                  {bulkTagNames.length === 0
+                  {bulkParsed.tags.length === 0
                     ? "尚未识别到标签"
-                    : `识别 ${bulkTagNames.length} 个 · 新增 ${bulkNewNames.length} 个 · 已存在 ${
-                        bulkTagNames.length - bulkNewNames.length
-                      } 个`}
+                    : `识别 ${bulkParsed.tags.length} 个 · 新增 ${bulkNewNames.length} 个 · 已存在 ${
+                        bulkParsed.tags.length - bulkNewNames.length
+                      } 个${
+                        bulkParsed.rejected.length > 0
+                          ? ` · 跳过 ${bulkParsed.rejected.length} 个`
+                          : ""
+                      }`}
                 </span>
                 <button
                   type="button"
@@ -848,8 +854,21 @@ export default function DetailDrawer({
                 </button>
               </div>
               <p className="tag-bulk-hint">
-                Ctrl + Enter 导入 · Esc 收起；重复名称自动合并为同一个标签。
+                命名空间（female / character / artist / parody / language /
+                other …）会自动映射到大类，新标签直接落进对应分组；
+                <code>分类/子类: 标签</code> 可以指定路径。
               </p>
+              {bulkParsed.rejected.length > 0 && (
+                <p className="tag-bulk-warn">
+                  <AlertIcon width={12} height={12} />
+                  {bulkParsed.rejected.length} 个标签无法导入：
+                  {bulkParsed.rejected
+                    .slice(0, 3)
+                    .map((item) => `${item.name}（${item.reason}）`)
+                    .join("、")}
+                  {bulkParsed.rejected.length > 3 ? " 等" : ""}
+                </p>
+              )}
             </div>
           )}
 

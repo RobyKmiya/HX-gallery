@@ -187,6 +187,38 @@ pub struct Tag {
     pub count: i64,
 }
 
+/// 批量导入时的一条标签：名字 + 可选大类（已由前端把 `female:` 这类
+/// 命名空间映射成「女性」这种大类路径）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagDraft {
+    pub name: String,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkTagFailure {
+    pub name: String,
+    pub reason: String,
+}
+
+/// 批量导入结果。单条失败不会中断整批，所以这里按「成功多少 + 失败明细」回传。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkTagReport {
+    /// 本次新建（含从回收站恢复）的标签数。
+    pub added: i64,
+    /// 真正挂到这本画集上的数量。
+    pub linked: i64,
+    /// 库里本来就有的标签数。
+    pub existing: i64,
+    /// 顺带补齐了大类的标签数（只填空缺，不覆盖已有分类）。
+    pub categorized: i64,
+    pub failed: Vec<BulkTagFailure>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagTranslationInput {

@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   ArchivePage,
   ArchiveQuery,
+  BulkTagReport,
   Collection,
   ImportOptions,
   ImportReport,
@@ -13,6 +14,7 @@ import type {
   ScanReport,
   Tag,
   TagCategory,
+  TagDraft,
   TagGraph,
   TagTranslationInput,
   TrashedArchive,
@@ -59,6 +61,9 @@ export const api = {
 
   addTag: (archiveId: number, name: string) =>
     invoke<Tag>("add_tag", { archiveId, name }),
+
+  addTagsBulk: (archiveId: number, tags: TagDraft[]) =>
+    invoke<BulkTagReport>("add_tags_bulk", { archiveId, tags }),
 
   removeTag: (archiveId: number, tagId: number) =>
     invoke<void>("remove_tag", { archiveId, tagId }),

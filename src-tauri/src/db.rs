@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,12 +10,19 @@ use uuid::Uuid;
 
 use crate::fsutil;
 use crate::models::{
-    Collection, ReaderBookmark, Tag, TagCategory, TagEdge, TagGraph, TagTranslationInput,
-    TrashedArchive,
+    BulkTagFailure, BulkTagReport, Collection, ReaderBookmark, Tag, TagCategory, TagDraft, TagEdge,
+    TagGraph, TagTranslationInput, TrashedArchive,
 };
 use crate::translate;
 
 const SCHEMA_VERSION: i64 = 7;
+
+/// 标签名长度上限。
+///
+/// 原来是 40 —— 从 booru 复制出来的 `character:xxx yyy` 这类整行动辄四五十字符，
+/// 一条超长就会把整批导入打回（提示「标签最多 40 个字符」）。名字已经由前端
+/// 去掉命名空间，这里再放到 100，给长角色名留余量。
+pub const MAX_TAG_NAME: usize = 100;
 
 /// 并发写等待上限（毫秒）。桌面、CLI 与导入线程可能同时写同一个 WAL 库，
 /// 原来 5 秒在一次大批量导入期间很容易耗尽，导致部分文件写入失败。
@@ -1194,7 +1202,7 @@ pub fn remove_reader_bookmark(
 }
 
 pub fn add_tag(conn: &Connection, archive_id: i64, name: &str) -> Result<Tag, String> {
-    let name = normalize_label(name, 40, "标签")?;
+    let name = normalize_label(name, MAX_TAG_NAME, "标签")?;
     ensure_archive_exists(conn, archive_id)?;
 
     let existing: Option<(i64, Option<i64>, Option<i64>)> = conn
@@ -1257,6 +1265,154 @@ pub fn add_tag(conn: &Connection, archive_id: i64, name: &str) -> Result<Tag, St
     tag_by_id(conn, tag_id)
 }
 
+/// 已存在标签的关键列：(id, deleted_at, merged_into, category)。
+type ExistingTagRow = (i64, Option<i64>, Option<i64>, Option<String>);
+
+/// 批量导入标签：一条事务、一次 fsync，并且单条失败只记录不中断整批。
+///
+/// 与逐条调用 `add_tag` 的区别：
+/// - 事务：100 个标签从 100 次提交变成 1 次；
+/// - 容错：某条超长或分类非法时把它记进 `failed`，其余照常导入（原来第一条出错就整批回滚）；
+/// - 分类：`category` 不存在会顺路建出来；标签已有分类时<b>不覆盖</b>，只补空缺，
+///   避免一次粘贴把手工整理好的分类冲掉。
+pub fn add_tags_bulk(
+    conn: &Connection,
+    archive_id: i64,
+    drafts: &[TagDraft],
+) -> Result<BulkTagReport, String> {
+    ensure_archive_exists(conn, archive_id)?;
+    let transaction = begin_write(conn)?;
+    let mut report = BulkTagReport::default();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for draft in drafts {
+        let name = match normalize_label(&draft.name, MAX_TAG_NAME, "标签") {
+            Ok(name) => name,
+            Err(reason) => {
+                report.failed.push(BulkTagFailure {
+                    name: draft.name.clone(),
+                    reason,
+                });
+                continue;
+            }
+        };
+        if !seen.insert(name.to_lowercase()) {
+            continue;
+        }
+
+        // 分类路径先落库（不存在就建出来），失败只影响这一条。
+        let category = match draft
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(path) => match ensure_category_path(&transaction, path) {
+                Ok(canonical) => Some(canonical),
+                Err(reason) => {
+                    report.failed.push(BulkTagFailure {
+                        name: name.clone(),
+                        reason,
+                    });
+                    continue;
+                }
+            },
+            None => None,
+        };
+
+        let existing: Option<ExistingTagRow> = transaction
+            .query_row(
+                "SELECT id, deleted_at, merged_into, category FROM tags
+                 WHERE name = ?1 COLLATE NOCASE LIMIT 1",
+                params![name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| format!("查询标签失败: {e}"))?;
+
+        let tag_id = match existing {
+            Some((id, deleted_at, merged_into, current_category)) => {
+                report.existing += 1;
+                let merge_target = merged_into.and_then(|target| {
+                    transaction
+                        .query_row(
+                            "SELECT id FROM tags WHERE id = ?1 AND deleted_at IS NULL",
+                            params![target],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                });
+
+                let tag_id = match merge_target {
+                    Some(target) => target,
+                    None => {
+                        if deleted_at.is_some() {
+                            transaction
+                                .execute(
+                                    "UPDATE tags SET deleted_at = NULL, merged_into = NULL
+                                     WHERE id = ?1",
+                                    params![id],
+                                )
+                                .map_err(|e| format!("恢复回收站标签失败: {e}"))?;
+                            report.added += 1;
+                        }
+                        id
+                    }
+                };
+
+                if let Some(category) = category.as_deref() {
+                    let empty = current_category.as_deref().unwrap_or("").trim().is_empty();
+                    if empty {
+                        transaction
+                            .execute(
+                                "UPDATE tags SET category = ?1 WHERE id = ?2",
+                                params![category, tag_id],
+                            )
+                            .map_err(|e| format!("更新标签分类失败: {e}"))?;
+                        report.categorized += 1;
+                    }
+                }
+
+                tag_id
+            }
+            None => {
+                let translated = translate::translate_tag(&name).map(str::to_string);
+                let source = translated.as_ref().map(|_| "dictionary");
+                let translated_at = translated.as_ref().map(|_| fsutil::now_ms());
+                transaction
+                    .execute(
+                        "INSERT INTO tags(
+                            name, original_name, translated_name,
+                            translation_source, translated_at, category
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![name, name, translated, source, translated_at, category],
+                    )
+                    .map_err(|e| format!("创建标签失败: {e}"))?;
+                report.added += 1;
+                transaction.last_insert_rowid()
+            }
+        };
+
+        let linked = transaction
+            .execute(
+                "INSERT OR IGNORE INTO archive_tags(archive_id, tag_id) VALUES (?1, ?2)",
+                params![archive_id, tag_id],
+            )
+            .map_err(|e| format!("为画集添加标签失败: {e}"))?;
+        if linked > 0 {
+            report.linked += 1;
+        }
+    }
+
+    transaction
+        .commit()
+        .map_err(|e| format!("提交标签导入失败: {e}"))?;
+
+    Ok(report)
+}
+
 pub fn remove_tag(conn: &Connection, archive_id: i64, tag_id: i64) -> Result<(), String> {
     conn.execute(
         "DELETE FROM archive_tags WHERE archive_id = ?1 AND tag_id = ?2",
@@ -1273,7 +1429,7 @@ pub fn update_tag(
     name: &str,
     translated_name: Option<&str>,
 ) -> Result<Tag, String> {
-    let name = normalize_label(name, 40, "标签")?;
+    let name = normalize_label(name, MAX_TAG_NAME, "标签")?;
     let translated_name = translated_name
         .map(str::trim)
         .filter(|value| !value.is_empty())

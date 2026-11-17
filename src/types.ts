@@ -108,6 +108,25 @@ export interface TagEdge {
   weight: number;
 }
 
+/** 批量导入时送往后端的一条标签。category 是已映射好的大类路径。 */
+export interface TagDraft {
+  name: string;
+  category: string | null;
+}
+
+export interface BulkTagFailure {
+  name: string;
+  reason: string;
+}
+
+export interface BulkTagReport {
+  added: number;
+  linked: number;
+  existing: number;
+  categorized: number;
+  failed: BulkTagFailure[];
+}
+
 export interface TagGraph {
   nodes: Tag[];
   edges: TagEdge[];
