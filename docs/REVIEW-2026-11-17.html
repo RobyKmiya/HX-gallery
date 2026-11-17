@@ -69,7 +69,7 @@
 <div class="card">
   <strong>一句话结论：</strong>功能完成度非常高（M1–M23 全做完，交互细节甚至做到滚轮防连翻、封面预解码无闪烁），代码也有类型检查和集成测试兜底；但 <b>发布级工程化明显缺位</b>（无 Git、无 lint/CI、clippy 20 条警告、fmt 不统一），并且有几处 <b>会静默丢数据 / 直接退出进程</b> 的底层风险，主要集中在备份、图片解码、行错误处理。建议先修 P0/P1，再做手感与架构升级。
   <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:13px">
-    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准；<b>12.9 记录第三批</b>——阅读器改走 <code>gallery://</code> 自定义协议供图（不再传 43 MB 的 base64）、CSP 收口、大列表渲染三件（<code>87ff023</code>），并列出必须人工冒烟的三处运行时风险。
+    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准；<b>12.9 记录第三批</b>——阅读器改走 <code>gallery://</code> 自定义协议供图（不再传 43 MB 的 base64）、CSP 收口、大列表渲染三件（<code>87ff023</code>），并列出必须人工冒烟的三处运行时风险；<b>12.10 记录第四批</b>——按你的实测反馈修掉批量导入标签的识别问题：识别 <code>female:</code> / <code>character:</code> 这类命名空间并映射到大类、改成单事务导入、超长条目不再拖垮整批（<code>3ab267b</code>）。
   </div>
 </div>
 
@@ -646,11 +646,65 @@
 <b>本批新引入的两个权衡：</b>① 后端 LRU 与 JS 侧缓存可能不同步（前者按字节淘汰、后者按页数），未命中由 404 自愈兜底，代价是一次额外往返；② 页面响应带 <code>Cache-Control: no-store</code>，意思是 webview 不自己缓存页面，回头翻页一律落到后端 LRU——这是刻意的，避免「换库 / 换压缩包后仍显示旧页」。<b>两者都只在「大页 + 来回深度跳页」时才会被感知。</b>
 </div>
 
+<h3 id="batch4">12.10 第四批落地记录（<code>3ab267b</code>）：批量导入标签识别命名空间</h3>
+<div class="card">
+用户反馈：「批量导入标签时识别有误、识别孱弱无力；一般会给标准的 tag 格式，然后自动识别导入已有的大类里的小标签，或者在大类下创建新标签。」截图里粘贴的是 E-Hentai 原样的多行 <code>命名空间:标签</code>，界面上显示「识别 6 个 · 新增 4 个」，点导入却弹出 <b>「批量导入标签失败：标签最多 40 个字符」</b>，一个都没进去。
+</div>
+
+<p><b>一、根因不是「识别弱」，是根本没识别</b></p>
+<table>
+  <tr><th>现象</th><th>代码级原因</th></tr>
+  <tr><td>标签落进「未分类」，名字是 <code>character: aoba …</code> 这种</td><td><code>parseTagNames</code> 只是 <code>split(/[\n\r,，;；、]+/)</code>，<b>完全不认命名空间</b>。<code>character:</code> 连同冒号一起成为标签名的一部分。你库里已有的 <code>language: chinese</code>、<code>parody: blue archive</code> 就是上一轮用同一段代码导入留下的痕迹——两个都在「未分类」下</td></tr>
+  <tr><td>「识别 6 个」，其中一半是垃圾</td><td>换行被当分隔符，<code>character:</code> 后面折行的那截会变成一条独立标签；而真正的分隔符是<b>逗号</b>，导致该在哪里切开是反的</td></tr>
+  <tr><td>整批导入失败，只给一句含糊提示</td><td>前端 <code>for (const name of names) await api.addTag(...)</code> 逐条调 IPC，任意一条抛错就把整个循环抛出去；后端 <code>normalize_label(name, 40)</code> 卡在 40 字符。<code>character: aoba utsumihikari tachibananozomi</code> 正好 44 字符 → 前面已加的留在库里、后面的全丢</td></tr>
+</table>
+
+<p><b>二、解析规则（新增 <code>src/tags.ts</code>）</b></p>
+<table>
+  <tr><th>输入</th><th>识别结果</th><th>规则</th></tr>
+  <tr><td><code>female:big breasts, sole female</code></td><td>女性 / big breasts、女性 / sole female</td><td>命名空间映射到大类，标签只留小标签名</td></tr>
+  <tr><td><code>character:</code> 后换行接 <code>tachibanasensei</code></td><td>角色 / tachibanasensei（独立一条）</td><td>命名空间在空行之前对后续行<b>保持生效</b></td></tr>
+  <tr><td><code>very long hair</code></td><td>一个标签</td><td>标签内空格保留；Danbooru 的 <code>long_hair</code> 按下划线换空格</td></tr>
+  <tr><td><code>re:从零开始的异世界生活</code></td><td>一个标签（未分类）</td><td><b>只认白名单命名空间</b>与带 <code>/</code> 的路径，否则标签名自带的冒号会被劈成两半</td></tr>
+  <tr><td><code>角色/原神: 胡桃, 雷电影</code></td><td>角色/原神/胡桃、角色/原神/雷电影</td><td>显式分类路径，不存在会顺路创建</td></tr>
+  <tr><td>超过 100 字符</td><td>单独丢弃并显示原因</td><td>只在预览里提示，不阻断其余标签</td></tr>
+</table>
+<div class="note" style="margin-top:8px"><b>白名单映射：</b><code>female→女性</code>、<code>character→角色</code>、<code>artist/group/circle→作者</code>、<code>parody/copyright→原作</code>、<code>language→语言</code>、<code>mixed→混合</code>、<code>other/meta/cosplay→其他</code>；<code>male→男性</code>。中文键（<code>角色:</code>、<code>画师:</code>）同样生效。</div>
+
+<p><b>三、导入语义（新增 <code>add_tags_bulk</code>）</b></p>
+<table>
+  <tr><th>项</th><th>改动</th><th>理由</th></tr>
+  <tr><td>事务</td><td>一次 IPC + 一条 <code>BEGIN IMMEDIATE</code></td><td>100 个标签 100 次提交 → 1 次；顺带避免「导入到一半失败留下半套标签」</td></tr>
+  <tr><td>容错</td><td>单条失败记进 <code>failed</code>（名字 + 原因），其余照常导入</td><td>一条超长不该让整批作废；前端据此显示「N 个未导入：xxx（原因）」，并<b>保留原文</b>方便改完再导</td></tr>
+  <tr><td>分类</td><td>分类不存在则创建；标签<b>已有分类时不覆盖</b>，只补空缺</td><td>重复导入 / 换命名空间粘贴不应把手工整理好的分类冲掉</td></tr>
+  <tr><td>长度上限</td><td>标签名 40 → <b>100</b></td><td>长角色名（含姓氏全名）动辄四五十字符；界面上的 40 限制是历史值，没有其他约束依赖它</td></tr>
+  <tr><td>批内去重</td><td>大小写不敏感，首条生效</td><td>同一份文本里 <code>Full Color</code> / <code>full color</code> 不产生两条</td></tr>
+</table>
+
+<p><b>四、界面上能先看到什么</b></p>
+<div class="card">
+粘贴后立即显示三段信息，<b>导入前</b>就能判断识别对不对：① 大类统计 chip（<code>角色 2 · 作者 1 · 女性 3 · 其他 1</code>）；② 总数 / 新增 / 已存在；③ 超长条目单独一行红字说明原因。截图里那段文本现在的识别结果是 <b>7 个标签、4 个大类</b>，而不是「6 个里 4 个进未分类」。
+</div>
+
+<p><b>五、验证结果</b></p>
+<table>
+  <tr><th>检查</th><th>结果</th></tr>
+  <tr><td><code>cargo test --lib</code></td><td class="pass">23 passed / 0 failed / 1 ignored（22 → 23）。新增 1 个：分类正确落库、批内去重、超长条目只记失败不中断、重复导入不覆盖已有分类、<code>linked</code> 不重复计数</td></tr>
+  <tr><td>解析器用例（node 直跑编译产物）</td><td class="pass">7 组输入全部符合预期：截图原格式、E-Hentai 无空格格式、Danbooru 下划线、带冒号的标签名、中文分隔符、显式分类路径、超长 + 大小写重复</td></tr>
+  <tr><td><code>tsc --noEmit</code> / <code>npm run build</code></td><td class="pass">通过。产物 JS 380.27 → <b>382.74 KB</b>（+2.5 KB：解析器 + 分组预览）、CSS 69.11 → <b>69.71 KB</b></td></tr>
+  <tr><td><code>cargo clippy --all-targets</code></td><td class="pass">15 个告警位置（上批 16，<b>新增代码 0 条</b>；新写的一处 <code>type_complexity</code> 已用类型别名消掉）</td></tr>
+  <tr><td><code>rustfmt --check</code></td><td class="pass">新增函数与 <code>models.rs</code> 0 差异；<code>db.rs</code> 剩余 19 处差异与 HEAD 完全一致（都是基线老代码，未借机全量格式化）</td></tr>
+</table>
+
+<div class="note" style="margin-top:10px">
+<b>遗留（本批刻意不做）：</b>① 你库里那两个历史标签 <code>language: chinese</code>、<code>parody: blue archive</code> <b>不会自动改名</b>——改用户数据需要显式操作，建议在标签管理里重命名为 <code>chinese</code> / <code>blue archive</code> 并设分类，或直接删掉后重新粘贴（重贴只会生成干净的新标签）；② 从网页复制时若在长标签中间折行，换行仍会被当分隔符切出一个碎片标签（可见可删），要彻底解决得做成「预览里可编辑」，成本高于收益；③ 单行输入框的联想词仍按原始串匹配，输入 <code>female:xxx</code> 时不会提示已有的 <code>xxx</code>。
+</div>
+
 <div class="note" style="margin-top:10px">
 <b>仍然存在的已知缺口（第三批未触及）：</b>命令 ACL（需把 45 个命令拆进 plugin）；CLI 与桌面的跨进程并发仍只靠 <code>busy_timeout</code>；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未做 Unicode 规范化；M2（每次翻页 3 条 SQL）未合并；<code>translate.rs</code> 仍是 131 行的小词典（12.2 的升级方案未动）。
 </div>
 
-<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地三批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
+<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地四批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）、<b>第四批</b> <code>3ab267b</code>（批量标签解析命名空间 + <code>add_tags_bulk</code> 单事务导入，9 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
 
 </div>
 </body>
