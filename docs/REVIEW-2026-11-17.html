@@ -701,6 +701,10 @@
 </div>
 
 <div class="note" style="margin-top:10px">
+<b>本批暴露的一个流程问题（比 bug 本身更重要）：</b>改完第四批再冒烟时界面里仍是旧逻辑、报错照旧——因为 <code>src-tauri\target\release\archive-gallery.exe</code> 是 <b>17:53</b> 编译的，四批改动一行都不在里面。Tauri 的前端产物（<code>dist/</code>）是在编译时<b>嵌入二进制</b>的，<code>npm run build</code> 只更新磁盘上的 <code>dist/</code>，不重启旧进程就永远看不到变化。<br><b>重建命令必须带特性开关：</b><code>cargo build --release --bin archive-gallery --features tauri/custom-protocol</code>。漏掉 <code>custom-protocol</code> 时 <code>tauri</code> crate 的 <code>dev</code> 判定为真，程序会去连 <code>http://localhost:1420</code>（<code>devUrl</code>）而不是读内嵌资源，表现是白屏。用 <code>npm run tauri build</code> 则由 CLI 自动带上该特性，也是本项目原本的构建方式。<b>本次已按正确方式重建并核对：二进制内嵌的是新产物（<code>index-E8qUo15-.js</code> / <code>index-BMD4sEs7.css</code>）。</b>
+</div>
+
+<div class="note" style="margin-top:10px">
 <b>仍然存在的已知缺口（第三批未触及）：</b>命令 ACL（需把 45 个命令拆进 plugin）；CLI 与桌面的跨进程并发仍只靠 <code>busy_timeout</code>；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未做 Unicode 规范化；M2（每次翻页 3 条 SQL）未合并；<code>translate.rs</code> 仍是 131 行的小词典（12.2 的升级方案未动）。
 </div>
 
