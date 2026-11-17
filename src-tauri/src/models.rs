@@ -96,8 +96,15 @@ pub struct ReaderPage {
     pub data_url: String,
 }
 
+/// 画集列表查询参数。
+///
+/// 这些字段全部来自前端 IPC（运行时 JSON），因此：
+/// - 开启 `deny_unknown_fields`：字段名拼错（如 pageSize 写成 pagesize）会立刻报错，
+///   而不是静默退回默认值、表现成「筛选没生效」；
+/// - 数量与长度上限在 `library::query_archives` 里统一夹紧，避免超长 `IN (...)`、
+///   超长 FTS 短语与超深 OFFSET。
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArchiveQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,

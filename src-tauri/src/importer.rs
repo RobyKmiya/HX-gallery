@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -18,6 +18,19 @@ struct Candidate {
     base: PathBuf,
 }
 
+/// 写入一条画集记录所需的字段。参数较多，集中成一个结构体避免调用处错位。
+struct ArchiveInsert<'a> {
+    rel_path: &'a str,
+    file_name: &'a str,
+    extension: &'a str,
+    file_size: i64,
+    file_mtime: i64,
+    content_hash: &'a str,
+    page_count: i64,
+    cover_key: Option<&'a str>,
+    inspection_error: Option<&'a str>,
+}
+
 pub fn import_blocking(
     app: &AppHandle,
     root: &Path,
@@ -30,7 +43,27 @@ pub fn import_blocking(
     })
 }
 
+/// 导入入口：自行打开一条「只做连接配置、不跑迁移」的工作连接。
 pub fn import_with_progress<F>(
+    root: &Path,
+    covers_dir: &Path,
+    inputs: Vec<PathBuf>,
+    options: ImportOptions,
+    on_progress: F,
+) -> ImportReport
+where
+    F: FnMut(ImportProgress),
+{
+    let connection = match db::open_worker_connection(root) {
+        Ok(connection) => connection,
+        Err(error) => return import_failure(root, error),
+    };
+    import_on_connection(&connection, root, covers_dir, inputs, options, on_progress)
+}
+
+/// 复用调用方已打开的连接导入（桌面命令与 CLI 走这条路径）。
+pub fn import_on_connection<F>(
+    connection: &Connection,
     root: &Path,
     covers_dir: &Path,
     inputs: Vec<PathBuf>,
@@ -43,24 +76,11 @@ where
     let started = Instant::now();
     let mut errors = Vec::new();
     let candidates = collect_candidates(&inputs, &mut errors);
-    let total = candidates.len();
 
-    let library = match db::open_library(root) {
-        Ok(library) => library,
-        Err(error) => {
-            return ImportReport {
-                imported: 0,
-                skipped: 0,
-                failed: 1,
-                errors: vec![ImportErrorItem {
-                    file: root.to_string_lossy().to_string(),
-                    message: error.clone(),
-                }],
-                message: format!("无法打开库：{error}"),
-            };
-        }
-    };
-    let connection = library.conn;
+    // 收集阶段（路径不存在、格式不支持等）已经失败的条目也要计入总数，
+    // 否则进度里会出现「失败数 > 总数」的矛盾读数。
+    let collected_failures = errors.len();
+    let total = candidates.len() + collected_failures;
 
     let temp_root = root
         .join(".gallery")
@@ -81,7 +101,7 @@ where
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
-    let mut failed = errors.len();
+    let mut failed = collected_failures;
     let preserve_structure = options.preserve_structure.unwrap_or(false);
 
     emit_progress(
@@ -96,6 +116,7 @@ where
     );
 
     for (index, candidate) in candidates.iter().enumerate() {
+        let current = index + 1 + collected_failures;
         let display_name = candidate
             .source
             .file_name()
@@ -105,7 +126,7 @@ where
         emit_progress(
             &mut on_progress,
             "processing",
-            index + 1,
+            current,
             total,
             &display_name,
             imported,
@@ -143,8 +164,7 @@ where
         }
 
         let mut temporary_path: Option<PathBuf> = None;
-        let (content_hash, copied_size) = if let Some(relative) = &relative_source {
-            let _ = relative;
+        let (content_hash, copied_size) = if source_in_library {
             match fsutil::hash_file(&candidate.source) {
                 Ok(hash) => (hash, file_size as u64),
                 Err(error) => {
@@ -187,19 +207,29 @@ where
             continue;
         }
 
-        match db::find_duplicate(&connection, &content_hash) {
+        match db::find_duplicate(connection, &content_hash) {
             Ok(Some(existing_id)) => {
                 if let Some(temp) = temporary_path.take() {
                     let _ = fs::remove_file(temp);
                 }
                 if let Some(collection_id) = options.add_to_collection {
-                    let _ = db::add_to_collection(&connection, collection_id, existing_id);
+                    // 原来这里用 `let _ =` 吞掉了错误：用户以为已加入收藏夹，实际没有。
+                    if let Err(error) =
+                        db::add_to_collection(connection, collection_id, existing_id)
+                    {
+                        failed += 1;
+                        errors.push(ImportErrorItem {
+                            file: display_name.clone(),
+                            message: format!("重复文件未能加入收藏夹: {error}"),
+                        });
+                        continue;
+                    }
                 }
                 skipped += 1;
                 emit_progress(
                     &mut on_progress,
                     "skipped",
-                    index + 1,
+                    current,
                     total,
                     &display_name,
                     imported,
@@ -236,7 +266,7 @@ where
             }
         } else {
             let relative_target = target_relative(candidate, preserve_structure);
-            let target = match unique_target(&connection, root, &relative_target) {
+            let target = match unique_target(connection, root, &relative_target) {
                 Ok(target) => target,
                 Err(error) => {
                     if let Some(temp) = temporary_path.take() {
@@ -265,7 +295,16 @@ where
                 }
             }
 
-            let temp = temporary_path.take().expect("temporary path missing");
+            // 外部文件必然已经复制出临时文件；这里用显式分支替代原来的 expect()，
+            // 避免未来重构破坏隐含不变式时直接 panic（release 下 panic = abort）。
+            let Some(temp) = temporary_path.take() else {
+                failed += 1;
+                errors.push(ImportErrorItem {
+                    file: candidate.source.to_string_lossy().to_string(),
+                    message: "内部状态异常：缺少导入临时文件".to_string(),
+                });
+                continue;
+            };
             if let Err(error) = fs::rename(&temp, &target) {
                 let _ = fs::remove_file(&temp);
                 failed += 1;
@@ -304,34 +343,21 @@ where
             .map(|value| value.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
 
-        let inserted = db::insert_archive(
-            &connection,
-            &relative_path,
-            &file_name,
-            &extension,
+        let insert = ArchiveInsert {
+            rel_path: &relative_path,
+            file_name: &file_name,
+            extension: &extension,
             file_size,
             file_mtime,
-            &content_hash,
-            inspection.page_count,
-            inspection.cover_key.as_deref(),
-            inspection.error.as_deref(),
-            fsutil::now_ms(),
-        );
+            content_hash: &content_hash,
+            page_count: inspection.page_count,
+            cover_key: inspection.cover_key.as_deref(),
+            inspection_error: inspection.error.as_deref(),
+        };
 
-        match inserted {
-            Ok(archive_id) => {
-                if let Some(collection_id) = options.add_to_collection {
-                    if let Err(error) =
-                        db::add_to_collection(&connection, collection_id, archive_id)
-                    {
-                        errors.push(ImportErrorItem {
-                            file: file_name.clone(),
-                            message: error,
-                        });
-                    }
-                }
-                imported += 1;
-            }
+        // 写库与加入收藏夹在同一个事务里：任一步失败都回滚，不会留下半成品记录。
+        match insert_archive_atomic(connection, &insert, options.add_to_collection) {
+            Ok(_) => imported += 1,
             Err(error) => {
                 if !source_in_library {
                     let _ = fs::remove_file(&target);
@@ -347,7 +373,7 @@ where
         emit_progress(
             &mut on_progress,
             "processed",
-            index + 1,
+            current,
             total,
             &display_name,
             imported,
@@ -381,6 +407,50 @@ where
         errors,
         message,
     }
+}
+
+fn import_failure(root: &Path, error: String) -> ImportReport {
+    ImportReport {
+        imported: 0,
+        skipped: 0,
+        failed: 1,
+        errors: vec![ImportErrorItem {
+            file: root.to_string_lossy().to_string(),
+            message: error.clone(),
+        }],
+        message: format!("无法打开库：{error}"),
+    }
+}
+
+fn insert_archive_atomic(
+    connection: &Connection,
+    insert: &ArchiveInsert<'_>,
+    collection_id: Option<i64>,
+) -> Result<i64, String> {
+    let transaction = db::begin_write(connection)?;
+    let archive_id = db::insert_archive(
+        &transaction,
+        insert.rel_path,
+        insert.file_name,
+        insert.extension,
+        insert.file_size,
+        insert.file_mtime,
+        insert.content_hash,
+        insert.page_count,
+        insert.cover_key,
+        insert.inspection_error,
+        fsutil::now_ms(),
+    )?;
+
+    if let Some(collection_id) = collection_id {
+        db::add_to_collection(&transaction, collection_id, archive_id)
+            .map_err(|error| format!("加入收藏夹失败: {error}"))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("提交导入记录失败: {error}"))?;
+    Ok(archive_id)
 }
 
 fn collect_candidates(inputs: &[PathBuf], errors: &mut Vec<ImportErrorItem>) -> Vec<Candidate> {
@@ -503,11 +573,7 @@ fn target_relative(candidate: &Candidate, preserve_structure: bool) -> PathBuf {
     PathBuf::from(fsutil::sanitize_name(&file_name, false))
 }
 
-fn unique_target(
-    connection: &rusqlite::Connection,
-    root: &Path,
-    relative: &Path,
-) -> Result<PathBuf, String> {
+fn unique_target(connection: &Connection, root: &Path, relative: &Path) -> Result<PathBuf, String> {
     for suffix in 1..10_000 {
         let candidate_relative = if suffix == 1 {
             relative.to_path_buf()

@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -13,6 +15,44 @@ use crate::models::{
 use crate::translate;
 
 const SCHEMA_VERSION: i64 = 7;
+
+/// 并发写等待上限（毫秒）。桌面、CLI 与导入线程可能同时写同一个 WAL 库，
+/// 原来 5 秒在一次大批量导入期间很容易耗尽，导致部分文件写入失败。
+pub const BUSY_TIMEOUT_MS: u32 = 30_000;
+
+/// 单条 `IN (...)` 绑定的参数个数上限。SQLite 默认变量上限为 32766，
+/// 这里取更小的批次，既避开上限也避免超长语句。
+const IN_CHUNK: usize = 400;
+
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(ErrorCode::DatabaseBusy) | Some(ErrorCode::DatabaseLocked)
+    )
+}
+
+/// 以 `BEGIN IMMEDIATE` 开始写事务，并对「数据库被占用」做指数退避重试。
+///
+/// 用 IMMEDIATE 而不是默认的 DEFERRED：进入事务时立刻拿写锁，拿不到可以安全重试；
+/// 否则会在读完数据、执行第一条写语句时才报 busy，此时已无法重试。
+pub fn begin_write(conn: &Connection) -> Result<Transaction<'_>, String> {
+    let mut delay = std::time::Duration::from_millis(50);
+    let mut last = String::from("无法开始写事务");
+    for attempt in 0..6 {
+        match Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+            Ok(transaction) => return Ok(transaction),
+            Err(error) => {
+                last = format!("无法开始写事务: {error}");
+                if !is_busy(&error) || attempt == 5 {
+                    break;
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(800));
+            }
+        }
+    }
+    Err(last)
+}
 
 const FULL_TEXT_SCHEMA: &str = r#"
     CREATE VIRTUAL TABLE IF NOT EXISTS archives_fts USING fts5(
@@ -74,13 +114,7 @@ pub fn open_library(root: &Path) -> Result<LibraryContext, String> {
 
     let mut meta = load_or_create_meta(&root, &gallery_dir)?;
     let db_path = gallery_dir.join("library.db");
-    let conn = Connection::open(&db_path).map_err(|e| format!("无法打开数据库: {e}"))?;
-
-    let _: String = conn
-        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-        .map_err(|e| format!("无法启用 WAL: {e}"))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
-        .map_err(|e| format!("无法启用外键: {e}"))?;
+    let conn = open_connection(&db_path)?;
 
     migrate(&conn, &gallery_dir)?;
     sync_meta_schema(&gallery_dir, &mut meta)?;
@@ -91,6 +125,51 @@ pub fn open_library(root: &Path) -> Result<LibraryContext, String> {
         library_name: meta.name,
         conn,
     })
+}
+
+/// 打开一个已完成迁移的库连接，<b>不</b>执行迁移与建表 DDL。
+///
+/// 供导入、扫描、CLI 子命令等后台任务使用：库结构已由主连接在打开库时升级完毕，
+/// 后台任务再跑一遍 `CREATE VIRTUAL TABLE` / `CREATE TRIGGER` 会写 `sqlite_master`、
+/// 抢写锁，导致多进程并发启动时随机 `database is locked`。
+pub fn open_worker_connection(root: &Path) -> Result<Connection, String> {
+    let db_path = root.join(".gallery").join("library.db");
+    if !db_path.exists() {
+        return Err(format!(
+            "{} 还不是已初始化的画廊库，请先在应用中打开该目录",
+            root.to_string_lossy()
+        ));
+    }
+    open_connection(&db_path)
+}
+
+fn open_connection(db_path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(db_path).map_err(|e| format!("无法打开数据库: {e}"))?;
+    configure_connection(&conn)?;
+    Ok(conn)
+}
+
+fn configure_connection(conn: &Connection) -> Result<(), String> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .map_err(|e| format!("无法启用 WAL: {e}"))?;
+    // SQLite 在无法切换日志模式时不报错，只返回当前模式字符串。丢弃返回值会让
+    // 后续所有「WAL 支持并发读」的假设悄悄失效。
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(format!(
+            "数据库未能进入 WAL 模式（当前为 {mode}），可能有其它进程正在写入"
+        ));
+    }
+
+    // synchronous = NORMAL 在 WAL 下只在 checkpoint 时 fsync，写入吞吐提升明显且不会损坏库；
+    // wal_autocheckpoint 让 WAL 随写入自动回收，避免大批量导入后无限膨胀。
+    conn.execute_batch(&format!(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};
+         PRAGMA synchronous = NORMAL;
+         PRAGMA wal_autocheckpoint = 1000;"
+    ))
+    .map_err(|e| format!("无法配置数据库连接: {e}"))
 }
 
 fn sync_meta_schema(gallery_dir: &Path, meta: &mut LibraryMeta) -> Result<(), String> {
@@ -105,11 +184,37 @@ fn sync_meta_schema(gallery_dir: &Path, meta: &mut LibraryMeta) -> Result<(), St
     fs::write(&path, raw).map_err(|e| format!("无法更新 library.json: {e}"))
 }
 
+/// `library_id` 会被拼进封面缓存目录（`cache/covers/<library_id>`）。
+/// 手工编辑或被篡改的 `library.json` 里若含 `..` 或路径分隔符，
+/// `create_dir_all` 就会在缓存目录之外创建目录并把封面写到那里。
+fn is_safe_library_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+}
+
 fn load_or_create_meta(root: &Path, gallery_dir: &Path) -> Result<LibraryMeta, String> {
     let path = gallery_dir.join("library.json");
     if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|e| format!("无法读取 library.json: {e}"))?;
-        return serde_json::from_str(&raw).map_err(|e| format!("library.json 格式错误: {e}"));
+        let mut meta: LibraryMeta =
+            serde_json::from_str(&raw).map_err(|e| format!("library.json 格式错误: {e}"))?;
+
+        if !is_safe_library_id(&meta.library_id) {
+            // 不因此拒绝打开库（否则一个手滑的字段就让库永久打不开），
+            // 改为换成新的 UUID 并落盘；旧封面目录会失联，下次扫描自动重建。
+            let fresh = Uuid::new_v4().to_string();
+            eprintln!(
+                "library.json 的 library_id 不合法（{:?}），已重新生成为 {fresh}",
+                meta.library_id
+            );
+            meta.library_id = fresh;
+            let raw = serde_json::to_string_pretty(&meta)
+                .map_err(|e| format!("无法生成 library.json: {e}"))?;
+            fs::write(&path, raw).map_err(|e| format!("无法更新 library.json: {e}"))?;
+        }
+
+        return Ok(meta);
     }
 
     let name = root
@@ -144,14 +249,26 @@ fn migrate(conn: &Connection, gallery_dir: &Path) -> Result<(), String> {
     }
 
     if version == 0 {
-        create_schema(conn)?;
-        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+        // 新库：建表 + 写版本号放在同一事务里，避免中断后留下「有表但 user_version 仍为 0」的库。
+        let transaction = begin_write(conn)?;
+        create_schema(&transaction)?;
+        transaction
+            .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| format!("写入数据库版本失败: {e}"))?;
+        transaction
+            .commit()
+            .map_err(|e| format!("提交建库事务失败: {e}"))?;
     } else if version < SCHEMA_VERSION {
+        // VACUUM INTO 不能在事务内执行，备份必须留在事务外。
         backup_database(conn, gallery_dir, version)?;
-        upgrade_schema(conn)?;
-        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+        let transaction = begin_write(conn)?;
+        upgrade_schema(&transaction)?;
+        transaction
+            .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| format!("写入数据库版本失败: {e}"))?;
+        transaction
+            .commit()
+            .map_err(|e| format!("提交升级事务失败: {e}"))?;
     }
 
     ensure_full_text(conn)
@@ -402,24 +519,45 @@ fn add_column_if_missing(
 }
 
 fn ensure_full_text(conn: &Connection) -> Result<(), String> {
-    let existed: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'archives_fts'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("检查全文索引失败: {e}"))?;
+    let table_exists = object_exists(conn, "table", "archives_fts")?;
+    let mut triggers_ok = true;
+    for name in ["archives_fts_ai", "archives_fts_ad", "archives_fts_au"] {
+        triggers_ok &= object_exists(conn, "trigger", name)?;
+    }
 
-    conn.execute_batch(FULL_TEXT_SCHEMA)
-        .map_err(|e| format!("创建全文索引失败: {e}"))?;
+    // 原来的实现每次 open_library 都无条件执行这段 DDL：即使全是 IF NOT EXISTS，
+    // 只要表/触发器已存在就不会真正新建，但表结构缺失时又必须补建。这里只在缺失时执行。
+    if !table_exists || !triggers_ok {
+        conn.execute_batch(FULL_TEXT_SCHEMA)
+            .map_err(|e| format!("创建全文索引失败: {e}"))?;
+        conn.execute_batch("INSERT INTO archives_fts(archives_fts) VALUES('rebuild');")
+            .map_err(|e| format!("重建全文索引失败: {e}"))?;
+        return Ok(());
+    }
 
-    if existed == 0 {
+    // 外部内容表的索引不会自动跟随 content 表恢复（备份还原、异常退出都可能留下
+    // 空索引或半截索引），而此时搜索会静默失效。integrity-check 会逐行比对索引与
+    // content 表，不一致时报错，这里据此重建。
+    if let Err(error) =
+        conn.execute_batch("INSERT INTO archives_fts(archives_fts) VALUES('integrity-check');")
+    {
+        eprintln!("full-text index check failed ({error}), rebuilding");
         conn.execute_batch("INSERT INTO archives_fts(archives_fts) VALUES('rebuild');")
             .map_err(|e| format!("重建全文索引失败: {e}"))?;
     }
 
     Ok(())
+}
+
+fn object_exists(conn: &Connection, kind: &str, name: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![kind, name],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查 {kind} {name} 失败: {e}"))?;
+    Ok(count > 0)
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
@@ -630,6 +768,45 @@ pub fn set_missing(conn: &Connection, id: i64, missing: bool) -> Result<(), Stri
     )
     .map_err(|e| format!("更新缺失状态失败: {e}"))?;
     Ok(())
+}
+
+/// 批量标记缺失。扫描一本书一次 `UPDATE` 会让上千条记录产生上千次提交，
+/// 这里分批用一条语句完成，并把整批放进同一个写事务。
+/// 返回真正被改成「缺失」的行数（原本已标记的不重复计数）。
+pub fn set_missing_many(conn: &Connection, ids: &[i64]) -> Result<usize, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let transaction = begin_write(conn)?;
+    let mut changed = 0usize;
+    for chunk in ids.chunks(IN_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql =
+            format!("UPDATE archives SET missing = 1 WHERE missing = 0 AND id IN ({placeholders})");
+        changed += transaction
+            .execute(&sql, rusqlite::params_from_iter(chunk.iter()))
+            .map_err(|e| format!("批量标记缺失失败: {e}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("提交缺失标记失败: {e}"))?;
+
+    Ok(changed)
+}
+
+/// 彻底删除画集后，检查同一封面文件是否仍被其它记录（含回收站中的记录）引用。
+/// 封面按内容哈希命名，正常情况下不会共享，但迁移异常或数据被手工改动时可能共用，
+/// 直接删文件会让另一条记录的封面一起丢失。
+pub fn cover_key_in_use(conn: &Connection, cover_key: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archives WHERE cover_key = ?1",
+            params![cover_key],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查封面引用失败: {e}"))?;
+    Ok(count > 0)
 }
 
 pub fn delete_archive(conn: &Connection, archive_id: i64) -> Result<(), String> {

@@ -14,6 +14,17 @@ use crate::fsutil;
 use crate::models::{ArchiveCard, ArchiveGroup, ArchivePage, ArchiveQuery, ScanReport};
 use crate::paths;
 
+/// 默认每页数量（与前端 48/页 的默认档一致）。
+const DEFAULT_PAGE_SIZE: u32 = 48;
+/// 单页最多返回多少条。
+const MAX_PAGE_SIZE: u32 = 200;
+/// 页码上限。OFFSET 随页码线性增长，过深的翻页等于全表扫描。
+const MAX_QUERY_PAGE: u32 = 10_000;
+/// 标签筛选最多参与多少个标签。
+const MAX_TAG_FILTERS: usize = 200;
+/// 搜索词最大长度，避免超长词展开成海量 trigram 查询。
+const MAX_SEARCH_LEN: usize = 128;
+
 pub fn scan_blocking(app: &AppHandle, root: &Path, library_id: &str) -> ScanReport {
     let started = Instant::now();
     let covers_dir = match paths::covers_dir(app, library_id) {
@@ -23,15 +34,27 @@ pub fn scan_blocking(app: &AppHandle, root: &Path, library_id: &str) -> ScanRepo
     scan_with_covers(root, &covers_dir)
 }
 
+/// 扫描入口：自行打开一条「只做连接配置、不跑迁移」的工作连接。
 pub fn scan_with_covers(root: &Path, covers_dir: &Path) -> ScanReport {
     let started = Instant::now();
-    let mut errors = Vec::new();
+    match db::open_worker_connection(root) {
+        Ok(connection) => scan_once(&connection, root, covers_dir, started),
+        Err(error) => scan_failure(error, started.elapsed().as_millis()),
+    }
+}
 
-    let library = match db::open_library(root) {
-        Ok(library) => library,
-        Err(error) => return scan_failure(error, started.elapsed().as_millis()),
-    };
-    let connection = &library.conn;
+/// 复用调用方已打开的连接扫描（桌面命令与 CLI 走这条路径，避免同进程开第二条连接）。
+pub fn scan_connection(connection: &Connection, root: &Path, covers_dir: &Path) -> ScanReport {
+    scan_once(connection, root, covers_dir, Instant::now())
+}
+
+fn scan_once(
+    connection: &Connection,
+    root: &Path,
+    covers_dir: &Path,
+    started: Instant,
+) -> ScanReport {
+    let mut errors = Vec::new();
 
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(root)
@@ -235,6 +258,7 @@ pub fn scan_with_covers(root: &Path, covers_dir: &Path) -> ScanReport {
     }
 
     let mut missing = 0usize;
+    let mut to_mark: Vec<i64> = Vec::new();
     let existing_rows: Vec<(i64, String, i64)> = {
         let mut statement = match connection
             .prepare("SELECT id, rel_path, missing FROM archives WHERE deleted_at IS NULL")
@@ -274,11 +298,14 @@ pub fn scan_with_covers(root: &Path, covers_dir: &Path) -> ScanReport {
 
     for (id, relative, was_missing) in existing_rows {
         if !found_relative.contains(&relative) && was_missing == 0 {
-            if let Err(error) = db::set_missing(connection, id, true) {
-                errors.push(format!("标记缺失失败 {relative}: {error}"));
-            } else {
-                missing += 1;
-            }
+            to_mark.push(id);
+        }
+    }
+
+    if !to_mark.is_empty() {
+        match db::set_missing_many(connection, &to_mark) {
+            Ok(changed) => missing = changed,
+            Err(error) => errors.push(format!("标记缺失失败（{} 项）: {error}", to_mark.len())),
         }
     }
 
@@ -330,14 +357,37 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// 规整搜索词：去掉控制字符、合并连续空白、限长。
+///
+/// 搜索词会被拼成 FTS5 短语查询，控制字符（如 NUL）会让 MATCH 直接报错，
+/// 而错误会冒泡成整个页面查询失败，所以先在这里清洗掉。
+fn normalize_search(value: &str) -> Option<String> {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_SEARCH_LEN)
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
 pub fn query_archives(
     connection: &Connection,
     root: &Path,
     covers_dir: &Path,
     query: &ArchiveQuery,
 ) -> Result<ArchivePage, String> {
-    let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(48).clamp(12, 200);
+    // page 直接决定 OFFSET，放任超大值会让 SQLite 扫描并丢弃海量行；
+    // page_size 也被用来拼接 LIMIT，这里统一夹紧（与前端 12–200 的档位一致）。
+    let page = query.page.unwrap_or(1).clamp(1, MAX_QUERY_PAGE);
+    let page_size = query
+        .page_size
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(12, MAX_PAGE_SIZE);
     let offset = (page.saturating_sub(1) as i64) * page_size as i64;
 
     let sort = match query.sort.as_deref() {
@@ -377,6 +427,11 @@ pub fn query_archives(
         for id in ids {
             if *id > 0 && !tag_ids.contains(id) {
                 tag_ids.push(*id);
+                // 标签筛选最终会拼成 IN (...) ，没有上限时一次请求就能生成
+                // 触发 SQLite 表达式/长度上限的语句。
+                if tag_ids.len() >= MAX_TAG_FILTERS {
+                    break;
+                }
             }
         }
     }
@@ -467,12 +522,8 @@ pub fn query_archives(
         conditions.push("a.missing != 0".to_string());
     }
 
-    if let Some(search) = query
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(search) = query.search.as_deref().and_then(normalize_search) {
+        // 3 字以上走 trigram 全文索引；1–2 字 trigram 无法命中，退回 LIKE。
         if search.chars().count() >= 3 {
             let escaped = search.replace('"', "\"\"");
             conditions.push(
@@ -480,7 +531,7 @@ pub fn query_archives(
             );
             params.push(Value::Text(format!("\"{escaped}\"")));
         } else {
-            let like = format!("%{}%", escape_like(search));
+            let like = format!("%{}%", escape_like(&search));
             conditions.push(
                 "(COALESCE(a.title, '') LIKE ? ESCAPE '\\'
                   OR a.file_name LIKE ? ESCAPE '\\'
@@ -516,27 +567,19 @@ pub fn query_archives(
         .unwrap_or(false);
     let preferred_tag_order = if !group_by_tag {
         String::new()
-    } else if query
-        .tag_ids
-        .as_ref()
-        .map(|ids| !ids.is_empty())
-        .unwrap_or(false)
+    } else if !tag_ids.is_empty()
         && !query
             .tag_mode
             .as_deref()
             .map(|mode| mode.eq_ignore_ascii_case("exclude"))
             .unwrap_or(false)
     {
-        let ids = query
-            .tag_ids
-            .as_ref()
-            .map(|ids| {
-                ids.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
+        // 用过滤后的 tag_ids（去重、去非法值、限长），与筛选条件保持同一口径。
+        let ids = tag_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         format!("CASE WHEN t.id IN ({ids}) THEN 0 ELSE 1 END, ")
     } else {
         String::new()

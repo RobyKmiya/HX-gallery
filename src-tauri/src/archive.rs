@@ -248,3 +248,12 @@ fn save_jpeg(image: &DynamicImage, destination: &Path) -> Result<(), String> {
 pub fn covers_dir_for(cache_dir: &Path, library_id: &str) -> PathBuf {
     cache_dir.join("covers").join(library_id)
 }
+
+/// 封面文件名固定为「内容哈希 + .jpg」。删除封面之前校验形态，
+/// 避免被篡改的 `cover_key`（含 `..` 或路径分隔符）拼出缓存目录之外的路径。
+pub(crate) fn is_cover_key(key: &str) -> bool {
+    let Some(stem) = key.strip_suffix(".jpg") else {
+        return false;
+    };
+    !stem.is_empty() && stem.len() <= 64 && stem.chars().all(|ch| ch.is_ascii_hexdigit())
+}

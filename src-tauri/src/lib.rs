@@ -9,8 +9,8 @@ mod reader;
 pub mod translate;
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -20,6 +20,9 @@ use models::{
     ReaderBookmark, ReaderInfo, ReaderPage, ScanReport, Tag, TagCategory, TagGraph,
     TagTranslationInput, TrashedArchive,
 };
+
+/// 一次导入最多接受多少个入口路径，避免单次 IPC 传入超大数组。
+const MAX_IMPORT_INPUTS: usize = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AppSettings {
@@ -32,8 +35,20 @@ struct AppInner {
     startup_error: Option<String>,
 }
 
+/// 应用状态。
+///
+/// 用 `Arc<Mutex<..>>` 而不是裸 `Mutex`：Tauri 命令需要把状态搬进 `spawn_blocking`
+/// 的闭包里执行，`State<'_, _>` 带生命周期，只有可克隆的状态句柄能跨线程使用。
 pub struct AppState {
-    inner: Mutex<AppInner>,
+    inner: Arc<Mutex<AppInner>>,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl AppState {
@@ -53,10 +68,7 @@ impl AppState {
             if initialized {
                 match db::open_library(&library_path) {
                     Ok(library) => {
-                        eprintln!(
-                            "opened library at {}",
-                            library.root.to_string_lossy()
-                        );
+                        eprintln!("opened library at {}", library.root.to_string_lossy());
                         inner.library = Some(library);
                     }
                     Err(error) => {
@@ -70,9 +82,28 @@ impl AppState {
         }
 
         Self {
-            inner: Mutex::new(inner),
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
+
+    fn lock(&self) -> Result<MutexGuard<'_, AppInner>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "应用状态已损坏，请重启应用".to_string())
+    }
+}
+
+/// 导入 / 扫描的进程内互斥。
+///
+/// 此前连点两次「导入」或导入中再点「扫描」会各开一条连接同时写库，
+/// 轻则大量 `database is locked`，重则扫描把刚导入的文件当成缺失。
+/// CLI 是独立进程，靠 SQLite 的写锁 + busy_timeout 协调。
+static MAINTENANCE: Mutex<()> = Mutex::new(());
+
+fn try_maintenance() -> Result<MutexGuard<'static, ()>, String> {
+    MAINTENANCE
+        .try_lock()
+        .map_err(|_| "已有导入或扫描正在进行，请等它完成".to_string())
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -86,12 +117,20 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn read_settings(app: &AppHandle) -> AppSettings {
     let Ok(path) = settings_path(app) else {
+        eprintln!("failed to resolve settings path");
         return AppSettings::default();
     };
-    let Ok(raw) = fs::read_to_string(path) else {
+    let Ok(raw) = fs::read_to_string(&path) else {
         return AppSettings::default();
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    match serde_json::from_str(&raw) {
+        Ok(settings) => settings,
+        Err(error) => {
+            // 静默退回默认值会让「上次的库」凭空消失，至少留下线索。
+            eprintln!("settings.json 解析失败（{}）: {error}", path.to_string_lossy());
+            AppSettings::default()
+        }
+    }
 }
 
 fn write_settings(app: &AppHandle, settings: &AppSettings) {
@@ -99,21 +138,29 @@ fn write_settings(app: &AppHandle, settings: &AppSettings) {
         eprintln!("failed to resolve settings path");
         return;
     };
-    match serde_json::to_string_pretty(settings) {
-        Ok(raw) => {
-            if let Err(error) = fs::write(path, raw) {
-                eprintln!("failed to write settings: {error}");
-            }
+    let raw = match serde_json::to_string_pretty(settings) {
+        Ok(raw) => raw,
+        Err(error) => {
+            eprintln!("failed to serialize settings: {error}");
+            return;
         }
-        Err(error) => eprintln!("failed to serialize settings: {error}"),
+    };
+
+    // 先写同目录临时文件再 rename：避免写到一半（崩溃/断电）留下半截 JSON，
+    // 下次启动读失败后又被静默当成「从未选过库」。
+    let temp = path.with_extension("json.tmp");
+    if let Err(error) = fs::write(&temp, raw) {
+        eprintln!("failed to write settings: {error}");
+        return;
+    }
+    if let Err(error) = fs::rename(&temp, &path) {
+        eprintln!("failed to replace settings: {error}");
+        let _ = fs::remove_file(&temp);
     }
 }
 
 fn build_library_state(state: &AppState) -> Result<LibraryState, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
+    let inner = state.lock()?;
 
     if let Some(library) = &inner.library {
         let (archive_count, total_size, missing_count) = db::stats(&library.conn)?;
@@ -139,42 +186,105 @@ fn build_library_state(state: &AppState) -> Result<LibraryState, String> {
     }
 }
 
-#[tauri::command]
-fn get_library_state(state: State<'_, AppState>) -> Result<LibraryState, String> {
-    build_library_state(&state)
+fn with_library<T>(
+    state: &AppState,
+    op: impl FnOnce(&db::LibraryContext) -> Result<T, String>,
+) -> Result<T, String> {
+    let inner = state.lock()?;
+    let library = inner
+        .library
+        .as_ref()
+        .ok_or_else(|| "请先选择库目录".to_string())?;
+    op(library)
+}
+
+fn with_library_mut<T>(
+    state: &AppState,
+    op: impl FnOnce(&mut db::LibraryContext) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut inner = state.lock()?;
+    let library = inner
+        .library
+        .as_mut()
+        .ok_or_else(|| "请先选择库目录".to_string())?;
+    op(library)
+}
+
+/// 在阻塞线程里执行一次库操作。
+///
+/// Tauri 2 里同步命令跑在主线程，而 `query_archives`、`tag_graph` 这类查询可能
+/// 扫全表；一旦在主线程持锁执行，整个界面会直接冻结。所有碰数据库的命令都走这里。
+async fn run_blocking<T, F>(state: State<'_, AppState>, op: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppState) -> Result<T, String> + Send + 'static,
+{
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || op(&state))
+        .await
+        .map_err(|error| format!("后台任务异常结束: {error}"))?
+}
+
+/// 校验用户选的库目录：必须是已存在的绝对路径目录。
+///
+/// 原来只判空，`open_library` 会 `create_dir_all`，等于允许在任意路径下新建
+/// `.gallery` 数据库目录。库目录由目录选择器给出，必然已存在，这里不放行「顺手创建」。
+fn validate_library_dir(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("库目录不能为空".to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    if !candidate.is_absolute() {
+        return Err("库目录必须是绝对路径".to_string());
+    }
+    if !candidate.is_dir() {
+        return Err(format!(
+            "目录不存在或不是文件夹：{}",
+            candidate.to_string_lossy()
+        ));
+    }
+
+    Ok(candidate)
 }
 
 #[tauri::command]
-fn open_library(
+async fn get_library_state(state: State<'_, AppState>) -> Result<LibraryState, String> {
+    run_blocking(state, build_library_state).await
+}
+
+#[tauri::command]
+async fn open_library(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<LibraryState, String> {
-    if path.trim().is_empty() {
-        return Err("库目录不能为空".to_string());
-    }
+    let target = validate_library_dir(&path)?;
+    let state_handle = state.inner().clone();
 
-    let library = db::open_library(Path::new(&path))?;
-    let display_path = library.root.to_string_lossy().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = db::open_library(&target)?;
+        let display_path = library.root.to_string_lossy().to_string();
 
-    {
-        let mut inner = state
-            .inner
-            .lock()
-            .map_err(|_| "应用状态已损坏".to_string())?;
-        inner.library = Some(library);
-        inner.last_library_path = Some(display_path.clone());
-        inner.startup_error = None;
-    }
+        {
+            let mut inner = state_handle.lock()?;
+            inner.library = Some(library);
+            inner.last_library_path = Some(display_path.clone());
+            inner.startup_error = None;
+        }
 
-    write_settings(
-        &app,
-        &AppSettings {
-            library_path: Some(display_path),
-        },
-    );
+        write_settings(
+            &app,
+            &AppSettings {
+                library_path: Some(display_path),
+            },
+        );
 
-    build_library_state(&state)
+        build_library_state(&state_handle)
+    })
+    .await
+    .map_err(|error| format!("打开库任务异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -184,32 +294,37 @@ async fn import_paths(
     paths: Vec<String>,
     options: ImportOptions,
 ) -> Result<ImportReport, String> {
-    let (root, covers_dir) = {
-        let inner = state
-            .inner
-            .lock()
-            .map_err(|_| "应用状态已损坏".to_string())?;
+    if paths.is_empty() {
+        return Err("没有要导入的路径".to_string());
+    }
+    if paths.len() > MAX_IMPORT_INPUTS {
+        return Err(format!("一次最多导入 {MAX_IMPORT_INPUTS} 个路径"));
+    }
+
+    let (root, library_id) = {
+        let inner = state.lock()?;
         let library = inner
             .library
             .as_ref()
             .ok_or_else(|| "请先选择库目录".to_string())?;
-        let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-        (library.root.clone(), covers_dir)
+        (library.root.clone(), library.library_id.clone())
     };
 
     let input_paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
 
-    tauri::async_runtime::spawn_blocking(move || {
-        importer::import_blocking(
+    tauri::async_runtime::spawn_blocking(move || -> Result<ImportReport, String> {
+        let _guard = try_maintenance()?;
+        let covers_dir = paths::covers_dir(&app, &library_id)?;
+        Ok(importer::import_blocking(
             &app,
             &root,
             &covers_dir,
             input_paths,
             options,
-        )
+        ))
     })
     .await
-    .map_err(|error| format!("导入任务异常结束: {error}"))
+    .map_err(|error| format!("导入任务异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -218,10 +333,7 @@ async fn scan_library(
     state: State<'_, AppState>,
 ) -> Result<ScanReport, String> {
     let (root, library_id) = {
-        let inner = state
-            .inner
-            .lock()
-            .map_err(|_| "应用状态已损坏".to_string())?;
+        let inner = state.lock()?;
         let library = inner
             .library
             .as_ref()
@@ -229,592 +341,484 @@ async fn scan_library(
         (library.root.clone(), library.library_id.clone())
     };
 
-    tauri::async_runtime::spawn_blocking(move || {
-        library::scan_blocking(&app, &root, &library_id)
+    tauri::async_runtime::spawn_blocking(move || -> Result<ScanReport, String> {
+        let _guard = try_maintenance()?;
+        Ok(library::scan_blocking(&app, &root, &library_id))
     })
     .await
-    .map_err(|error| format!("扫描任务异常结束: {error}"))
+    .map_err(|error| format!("扫描任务异常结束: {error}"))?
 }
 
 #[tauri::command]
-fn set_rating(state: State<'_, AppState>, id: i64, rating: i64) -> Result<i64, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-
-    db::set_rating(&library.conn, id, rating)?;
-    Ok(rating)
+async fn set_rating(
+    state: State<'_, AppState>,
+    id: i64,
+    rating: i64,
+) -> Result<i64, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_rating(&library.conn, id, rating)?;
+            Ok(rating)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::list_tags(&library.conn)
+async fn list_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
+    run_blocking(state, |state| {
+        with_library(state, |library| db::list_tags(&library.conn))
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_tag_categories(state: State<'_, AppState>) -> Result<Vec<TagCategory>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::list_tag_categories(&library.conn)
+async fn list_tag_categories(state: State<'_, AppState>) -> Result<Vec<TagCategory>, String> {
+    run_blocking(state, |state| {
+        with_library(state, |library| db::list_tag_categories(&library.conn))
+    })
+    .await
 }
 
 #[tauri::command]
-fn create_tag_category(
+async fn create_tag_category(
     state: State<'_, AppState>,
     parent_path: Option<String>,
     name: String,
 ) -> Result<TagCategory, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::create_tag_category(&library.conn, parent_path.as_deref(), &name)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::create_tag_category(&library.conn, parent_path.as_deref(), &name)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn rename_tag_category(
+async fn rename_tag_category(
     state: State<'_, AppState>,
     path: String,
     new_name: String,
 ) -> Result<Vec<TagCategory>, String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::rename_tag_category(&mut library.conn, &path, &new_name)
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::rename_tag_category(&mut library.conn, &path, &new_name)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn move_tag_category(
+async fn move_tag_category(
     state: State<'_, AppState>,
     path: String,
     new_parent_path: Option<String>,
 ) -> Result<Vec<TagCategory>, String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::move_tag_category(&mut library.conn, &path, new_parent_path.as_deref())
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::move_tag_category(&mut library.conn, &path, new_parent_path.as_deref())
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn delete_tag_category(
+async fn delete_tag_category(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<Vec<TagCategory>, String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::delete_tag_category(&mut library.conn, &path)
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::delete_tag_category(&mut library.conn, &path)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_tag_category(
+async fn set_tag_category(
     state: State<'_, AppState>,
     tag_id: i64,
     category: Option<String>,
 ) -> Result<Tag, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::set_tag_category(&library.conn, tag_id, category.as_deref())
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_tag_category(&library.conn, tag_id, category.as_deref())
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_archive_tags(
+async fn list_archive_tags(
     state: State<'_, AppState>,
     archive_id: i64,
 ) -> Result<Vec<Tag>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::archive_tags(&library.conn, archive_id)
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::archive_tags(&library.conn, archive_id))
+    })
+    .await
 }
 
 #[tauri::command]
-fn add_tag(
+async fn add_tag(
     state: State<'_, AppState>,
     archive_id: i64,
     name: String,
 ) -> Result<Tag, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::add_tag(&library.conn, archive_id, &name)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::add_tag(&library.conn, archive_id, &name)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_tag(
+async fn remove_tag(
     state: State<'_, AppState>,
     archive_id: i64,
     tag_id: i64,
 ) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::remove_tag(&library.conn, archive_id, tag_id)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::remove_tag(&library.conn, archive_id, tag_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn update_tag(
+async fn update_tag(
     state: State<'_, AppState>,
     tag_id: i64,
     name: String,
     translated_name: Option<String>,
 ) -> Result<Tag, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::update_tag(
-        &library.conn,
-        tag_id,
-        &name,
-        translated_name.as_deref(),
-    )
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::update_tag(
+                &library.conn,
+                tag_id,
+                &name,
+                translated_name.as_deref(),
+            )
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn delete_tag(state: State<'_, AppState>, tag_id: i64) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::delete_tag(&library.conn, tag_id)
+async fn delete_tag(state: State<'_, AppState>, tag_id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::delete_tag(&library.conn, tag_id))
+    })
+    .await
 }
 
 #[tauri::command]
-fn tag_graph(
+async fn tag_graph(
     state: State<'_, AppState>,
     min_weight: Option<i64>,
     limit: Option<usize>,
 ) -> Result<TagGraph, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::tag_graph(
-        &library.conn,
-        min_weight.unwrap_or(1),
-        limit.unwrap_or(300),
-    )
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::tag_graph(
+                &library.conn,
+                min_weight.unwrap_or(1),
+                limit.unwrap_or(300).clamp(1, 2_000),
+            )
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn delete_archive(state: State<'_, AppState>, archive_id: i64) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::delete_archive(&library.conn, archive_id)
+async fn delete_archive(state: State<'_, AppState>, archive_id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::delete_archive(&library.conn, archive_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn restore_archive(state: State<'_, AppState>, archive_id: i64) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::restore_archive(&library.conn, archive_id)
+async fn restore_archive(state: State<'_, AppState>, archive_id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::restore_archive(&library.conn, archive_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn purge_archive(
+async fn purge_archive(
     app: AppHandle,
     state: State<'_, AppState>,
     archive_id: i64,
 ) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-    let cover_key = db::purge_archive(&library.conn, archive_id)?;
-    if let Some(key) = cover_key {
-        let _ = fs::remove_file(covers_dir.join(key));
-    }
-    Ok(())
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            let cover_key = db::purge_archive(&library.conn, archive_id)?;
+            if let Some(key) = cover_key {
+                // 先确认没有其它记录（含回收站）还在用这个封面，再删；
+                // 同时校验 key 形态，避免被篡改的 cover_key 拼出缓存目录之外的路径。
+                if archive::is_cover_key(&key) && !db::cover_key_in_use(&library.conn, &key)? {
+                    let _ = fs::remove_file(covers_dir.join(&key));
+                }
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_deleted_archives(
+async fn list_deleted_archives(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<TrashedArchive>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-    db::list_deleted_archives(&library.conn, Some(&covers_dir))
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            db::list_deleted_archives(&library.conn, Some(&covers_dir))
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_deleted_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::list_deleted_tags(&library.conn)
+async fn list_deleted_tags(state: State<'_, AppState>) -> Result<Vec<Tag>, String> {
+    run_blocking(state, |state| {
+        with_library(state, |library| db::list_deleted_tags(&library.conn))
+    })
+    .await
 }
 
 #[tauri::command]
-fn restore_tag(state: State<'_, AppState>, tag_id: i64) -> Result<Tag, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::restore_tag(&library.conn, tag_id)
+async fn restore_tag(state: State<'_, AppState>, tag_id: i64) -> Result<Tag, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::restore_tag(&library.conn, tag_id))
+    })
+    .await
 }
 
 #[tauri::command]
-fn purge_tag(state: State<'_, AppState>, tag_id: i64) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::purge_tag(&library.conn, tag_id)
+async fn purge_tag(state: State<'_, AppState>, tag_id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::purge_tag(&library.conn, tag_id))
+    })
+    .await
 }
 
 #[tauri::command]
-fn merge_tags(
+async fn merge_tags(
     state: State<'_, AppState>,
     source_ids: Vec<i64>,
     target_id: i64,
 ) -> Result<Tag, String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::merge_tags(&mut library.conn, &source_ids, target_id)
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::merge_tags(&mut library.conn, &source_ids, target_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_tag_translations(
+async fn set_tag_translations(
     state: State<'_, AppState>,
     updates: Vec<TagTranslationInput>,
 ) -> Result<usize, String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::set_tag_translations_batch(&mut library.conn, &updates)
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::set_tag_translations_batch(&mut library.conn, &updates)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_note(
+async fn set_note(
     state: State<'_, AppState>,
     id: i64,
     note: Option<String>,
 ) -> Result<Option<String>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::set_note(&library.conn, id, note.as_deref())
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_note(&library.conn, id, note.as_deref())
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_collections(
+async fn list_collections(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<Collection>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-    db::list_collections(&library.conn, Some(&covers_dir))
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            db::list_collections(&library.conn, Some(&covers_dir))
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn create_collection(
+async fn create_collection(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<Collection, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::create_collection(&library.conn, &name)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::create_collection(&library.conn, &name)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_archive_collections(
+async fn list_archive_collections(
     state: State<'_, AppState>,
     archive_id: i64,
 ) -> Result<Vec<i64>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::archive_collections(&library.conn, archive_id)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::archive_collections(&library.conn, archive_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_archive_collection(
+async fn set_archive_collection(
     state: State<'_, AppState>,
     archive_id: i64,
     collection_id: i64,
     member: bool,
 ) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::set_archive_collection(&library.conn, archive_id, collection_id, member)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_archive_collection(&library.conn, archive_id, collection_id, member)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn rename_collection(
+async fn rename_collection(
     state: State<'_, AppState>,
     collection_id: i64,
     name: String,
 ) -> Result<Collection, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::rename_collection(&library.conn, collection_id, &name)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::rename_collection(&library.conn, collection_id, &name)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn delete_collection(state: State<'_, AppState>, collection_id: i64) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::delete_collection(&library.conn, collection_id)
+async fn delete_collection(
+    state: State<'_, AppState>,
+    collection_id: i64,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::delete_collection(&library.conn, collection_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_deleted_collections(
+async fn list_deleted_collections(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<Collection>, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-    db::list_deleted_collections(&library.conn, Some(&covers_dir))
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            db::list_deleted_collections(&library.conn, Some(&covers_dir))
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn restore_collection(
+async fn restore_collection(
     app: AppHandle,
     state: State<'_, AppState>,
     collection_id: i64,
 ) -> Result<Collection, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-    db::restore_collection(&library.conn, collection_id, Some(&covers_dir))
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            db::restore_collection(&library.conn, collection_id, Some(&covers_dir))
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn purge_collection(state: State<'_, AppState>, collection_id: i64) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::purge_collection(&library.conn, collection_id)
+async fn purge_collection(
+    state: State<'_, AppState>,
+    collection_id: i64,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::purge_collection(&library.conn, collection_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn reorder_collections(
+async fn reorder_collections(
     state: State<'_, AppState>,
     ordered_ids: Vec<i64>,
 ) -> Result<(), String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::reorder_collections(&mut library.conn, &ordered_ids)
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::reorder_collections(&mut library.conn, &ordered_ids)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_collection_cover(
+async fn set_collection_cover(
     state: State<'_, AppState>,
     collection_id: i64,
     archive_id: Option<i64>,
 ) -> Result<Collection, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::set_collection_cover(&library.conn, collection_id, archive_id)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_collection_cover(&library.conn, collection_id, archive_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn add_archives_to_collection(
+async fn add_archives_to_collection(
     state: State<'_, AppState>,
     collection_id: i64,
     archive_ids: Vec<i64>,
 ) -> Result<usize, String> {
-    let mut inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_mut()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::add_archives_to_collection(&mut library.conn, collection_id, &archive_ids)
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            db::add_archives_to_collection(&mut library.conn, collection_id, &archive_ids)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -823,10 +827,7 @@ async fn open_reader(
     archive_id: i64,
 ) -> Result<ReaderInfo, String> {
     let (root, source, bookmarks) = {
-        let inner = state
-            .inner
-            .lock()
-            .map_err(|_| "应用状态已损坏".to_string())?;
+        let inner = state.lock()?;
         let library = inner
             .library
             .as_ref()
@@ -861,10 +862,7 @@ async fn read_reader_page(
     index: i64,
 ) -> Result<ReaderPage, String> {
     let (root, source) = {
-        let inner = state
-            .inner
-            .lock()
-            .map_err(|_| "应用状态已损坏".to_string())?;
+        let inner = state.lock()?;
         let library = inner
             .library
             .as_ref()
@@ -895,10 +893,7 @@ async fn read_reader_thumbnail(
     max_edge: Option<u32>,
 ) -> Result<ReaderPage, String> {
     let (root, source) = {
-        let inner = state
-            .inner
-            .lock()
-            .map_err(|_| "应用状态已损坏".to_string())?;
+        let inner = state.lock()?;
         let library = inner
             .library
             .as_ref()
@@ -922,74 +917,60 @@ async fn read_reader_thumbnail(
 }
 
 #[tauri::command]
-fn set_reading_progress(
+async fn set_reading_progress(
     state: State<'_, AppState>,
     archive_id: i64,
     page: i64,
 ) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::set_reading_progress(&library.conn, archive_id, page)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_reading_progress(&library.conn, archive_id, page)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn add_reader_bookmark(
+async fn add_reader_bookmark(
     state: State<'_, AppState>,
     archive_id: i64,
     page: i64,
 ) -> Result<ReaderBookmark, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::add_reader_bookmark(&library.conn, archive_id, page)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::add_reader_bookmark(&library.conn, archive_id, page)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_reader_bookmark(
+async fn remove_reader_bookmark(
     state: State<'_, AppState>,
     archive_id: i64,
     bookmark_id: i64,
 ) -> Result<(), String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-    db::remove_reader_bookmark(&library.conn, archive_id, bookmark_id)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::remove_reader_bookmark(&library.conn, archive_id, bookmark_id)
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-fn query_archives(
+async fn query_archives(
     app: AppHandle,
     state: State<'_, AppState>,
     query: ArchiveQuery,
 ) -> Result<ArchivePage, String> {
-    let inner = state
-        .inner
-        .lock()
-        .map_err(|_| "应用状态已损坏".to_string())?;
-    let library = inner
-        .library
-        .as_ref()
-        .ok_or_else(|| "请先选择库目录".to_string())?;
-
-    let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-
-    library::query_archives(&library.conn, &library.root, &covers_dir, &query)
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            library::query_archives(&library.conn, &library.root, &covers_dir, &query)
+        })
+    })
+    .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1057,4 +1038,3 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests;
-

@@ -26,6 +26,9 @@ impl Fixture {
         let covers = base.join("covers");
         fs::create_dir_all(&library).unwrap();
         fs::create_dir_all(&source).unwrap();
+        // 与真实使用顺序一致：先「打开库」（建库 + 迁移 + 建全文索引），再导入/扫描。
+        // 导入与扫描现在只开工作连接、不再顺带建库，所以测试夹具必须先初始化。
+        db::open_library(&library).expect("初始化测试库失败");
         Self {
             base,
             library,
@@ -757,6 +760,8 @@ fn tags_and_collections_persist() {
 fn migrates_v1_tags_to_translated_schema() {
     let fixture = Fixture::new();
     let gallery = fixture.library.join(".gallery");
+    // 该用例要造一个 v1 库，先清掉夹具初始化好的 v7 库。
+    let _ = fs::remove_dir_all(&gallery);
     fs::create_dir_all(&gallery).unwrap();
 
     {
@@ -1564,4 +1569,195 @@ fn archive_trash_lifecycle() {
         )
         .unwrap();
     assert_eq!(tag_links, 0);
+}
+
+#[test]
+fn scan_marks_missing_in_one_batch_and_is_idempotent() {
+    let fixture = Fixture::new();
+    let zip_a = fixture.source.join("A.cbz");
+    let zip_b = fixture.source.join("B.cbz");
+    write_zip(&zip_a, &["001.png"], 3);
+    write_zip(&zip_b, &["001.png"], 4);
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip_a, zip_b],
+        ImportOptions::default(),
+        |_| {},
+    );
+
+    let mut files = archive_files(&fixture.library);
+    files.sort();
+    assert_eq!(files.len(), 2);
+    fs::remove_file(&files[0]).unwrap();
+
+    let first = library::scan_with_covers(&fixture.library, &fixture.covers);
+    assert_eq!(
+        first.missing, 1,
+        "第一次扫描应标记 1 个缺失：{}",
+        first.message
+    );
+
+    // 已经标记过的不应重复计数（批量标记语句带 missing = 0 条件）
+    let second = library::scan_with_covers(&fixture.library, &fixture.covers);
+    assert_eq!(
+        second.missing, 0,
+        "第二次扫描不应重复标记：{}",
+        second.message
+    );
+}
+
+#[test]
+fn worker_connection_requires_initialized_library() {
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.library.join(".gallery")).unwrap();
+
+    // 导入/扫描只开工作连接，不再顺带建库：未初始化的目录必须明确报错，
+    // 而不是在任意路径下悄悄生成 .gallery/library.db。
+    let error = db::open_worker_connection(&fixture.library).unwrap_err();
+    assert!(
+        error.contains("已初始化的画廊库"),
+        "意外的错误信息：{error}"
+    );
+}
+
+#[test]
+fn library_json_with_unsafe_id_is_regenerated() {
+    let fixture = Fixture::new();
+    let path = fixture.library.join(".gallery").join("library.json");
+    let raw = fs::read_to_string(&path).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    // library_id 会被拼进封面缓存目录，含 .. 时可以写出缓存目录之外
+    value["library_id"] = serde_json::json!("../../escape");
+    fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let context = db::open_library(&fixture.library).unwrap();
+    assert!(
+        !context.library_id.contains("..") && !context.library_id.contains('/'),
+        "library_id 未被清洗：{}",
+        context.library_id
+    );
+    assert!(
+        context
+            .library_id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+    );
+}
+
+#[test]
+fn archive_query_rejects_unknown_field_typos() {
+    // 字段名拼错（pageSize -> pagesize）必须报错，而不是静默取默认值后
+    // 表现成「筛选没生效」。
+    let error = serde_json::from_str::<ArchiveQuery>(r#"{"pagesize": 24}"#).unwrap_err();
+    assert!(error.to_string().contains("unknown field"), "{error}");
+    assert!(serde_json::from_str::<ArchiveQuery>(r#"{"pageSize": 24}"#).is_ok());
+}
+
+#[test]
+fn concurrent_writes_wait_for_the_lock_instead_of_failing() {
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let holder_path = fixture.library.clone();
+
+    // 另一条连接先拿走写锁并持有 700ms
+    let holder = std::thread::spawn(move || {
+        let connection = db::open_worker_connection(&holder_path).unwrap();
+        let transaction = db::begin_write(&connection).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO collections(name, is_default, created_at, sort_order)
+                 VALUES('占用中的收藏', 0, 0, 99)",
+                [],
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        transaction.commit().unwrap();
+    });
+
+    std::thread::sleep(Duration::from_millis(120));
+    let other = db::open_worker_connection(&fixture.library).unwrap();
+    let started = Instant::now();
+    let transaction =
+        db::begin_write(&other).expect("应当等待写锁，而不是立刻报 database is locked");
+    let waited = started.elapsed();
+    transaction.rollback().unwrap();
+    holder.join().unwrap();
+
+    assert!(
+        waited >= Duration::from_millis(300),
+        "没有发生等待，说明写锁没有被真正持有过：{waited:?}"
+    );
+}
+
+#[test]
+#[ignore = "性能基线，需手动运行：cargo test --lib -- --ignored bench_open_and_deep_paging --nocapture"]
+fn bench_open_and_deep_paging() {
+    use std::time::Instant;
+
+    let fixture = Fixture::new();
+    let context = db::open_library(&fixture.library).unwrap();
+
+    let transaction = db::begin_write(&context.conn).unwrap();
+    for index in 0..10_000i64 {
+        transaction
+            .execute(
+                "INSERT INTO archives
+                   (rel_path, file_name, ext, file_size, file_mtime, page_count, title, rating, added_at)
+                 VALUES (?1, ?2, 'zip', 4096, 0, 12, ?3, 60, ?4)",
+                rusqlite::params![
+                    format!("dir/{index}.zip"),
+                    format!("画集 {index}.zip"),
+                    format!("标题 {index}"),
+                    index
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+
+    let started = Instant::now();
+    let reopened = db::open_library(&fixture.library).unwrap();
+    println!(
+        "open_library（含迁移检查 + 全文索引完整性检查，1 万条）: {:?}",
+        started.elapsed()
+    );
+
+    let started = Instant::now();
+    let worker = db::open_worker_connection(&fixture.library).unwrap();
+    println!(
+        "open_worker_connection（仅连接 + PRAGMA）: {:?}",
+        started.elapsed()
+    );
+    drop(worker);
+
+    let first = ArchiveQuery {
+        page: Some(1),
+        page_size: Some(48),
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let page =
+        library::query_archives(&reopened.conn, &fixture.library, &fixture.covers, &first).unwrap();
+    println!(
+        "第 1 页：{} 条 / total={}，{:?}",
+        page.items.len(),
+        page.total,
+        started.elapsed()
+    );
+
+    let deep = ArchiveQuery {
+        page: Some(200),
+        page_size: Some(48),
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let page =
+        library::query_archives(&reopened.conn, &fixture.library, &fixture.covers, &deep).unwrap();
+    println!(
+        "第 200 页（OFFSET 9552）：{} 条，{:?}",
+        page.items.len(),
+        started.elapsed()
+    );
 }

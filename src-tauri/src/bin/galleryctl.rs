@@ -269,10 +269,13 @@ fn run(cli: Cli) -> Result<Value, String> {
             read_statuses,
             missing,
         } => {
+            // 原来这里传的是 Path::new("")，返回给调用方的 coverPath 只有裸文件名，
+            // 没有目录前缀，等于不可用。与 scan / import 一样解析真实缓存目录。
+            let covers_dir = default_covers_dir(&library)?;
             let page = library::query_archives(
                 &library.conn,
                 &library.root,
-                Path::new(""),
+                &covers_dir,
                 &ArchiveQuery {
                     page: Some(page),
                     page_size: Some(limit),
@@ -312,7 +315,7 @@ fn run(cli: Cli) -> Result<Value, String> {
             fs::create_dir_all(&covers_dir)
                 .map_err(|e| format!("无法创建封面缓存目录: {e}"))?;
             eprintln!("scanning {} ...", library.root.to_string_lossy());
-            let report = library::scan_with_covers(&library.root, &covers_dir);
+            let report = library::scan_connection(&library.conn, &library.root, &covers_dir);
             serde_json::to_value(report).map_err(|e| format!("序列化扫描结果失败: {e}"))?
         }
         Command::Import {
@@ -326,7 +329,8 @@ fn run(cli: Cli) -> Result<Value, String> {
             };
             fs::create_dir_all(&covers_dir)
                 .map_err(|e| format!("无法创建封面缓存目录: {e}"))?;
-            let report = importer::import_with_progress(
+            let report = importer::import_on_connection(
+                &library.conn,
                 &library.root,
                 &covers_dir,
                 paths,
