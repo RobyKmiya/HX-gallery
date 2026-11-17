@@ -307,6 +307,8 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_archives_missing ON archives(missing);
         CREATE INDEX IF NOT EXISTS idx_archives_deleted_at ON archives(deleted_at);
         CREATE INDEX IF NOT EXISTS idx_archives_title ON archives(title COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_archives_page_count ON archives(page_count);
+        CREATE INDEX IF NOT EXISTS idx_archives_last_read_at ON archives(last_read_at);
 
         CREATE TABLE IF NOT EXISTS collections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -497,6 +499,23 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
              ON reader_bookmarks(archive_id, page);",
     )
     .map_err(|e| format!("创建索引失败: {e}"))?;
+
+    // 排序里的「页数」「最近阅读」原来没有索引，深翻页要整表排序后再 OFFSET。
+    // 极旧版本（v1）的 archives 可能连这两列都没有，那就跳过——不能凭空
+    // 假设它们的表结构，索引只服务于列确实存在的库。
+    for (column, index) in [
+        ("page_count", "idx_archives_page_count"),
+        ("last_read_at", "idx_archives_last_read_at"),
+    ] {
+        if !has_column(conn, "archives", column)? {
+            continue;
+        }
+        conn.execute(
+            &format!("CREATE INDEX IF NOT EXISTS {index} ON archives({column})"),
+            [],
+        )
+        .map_err(|e| format!("创建 {column} 索引失败: {e}"))?;
+    }
 
     backfill_translations(conn)?;
     backfill_tag_categories(conn)?;

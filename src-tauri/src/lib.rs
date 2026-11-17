@@ -1,9 +1,11 @@
 mod archive;
+mod asset_protocol;
 pub mod db;
 pub mod fsutil;
 pub mod importer;
 pub mod library;
 pub mod models;
+mod pagecache;
 mod paths;
 mod reader;
 pub mod translate;
@@ -17,7 +19,7 @@ use tauri::{AppHandle, Manager, State};
 
 use models::{
     ArchivePage, ArchiveQuery, Collection, ImportOptions, ImportReport, LibraryState,
-    ReaderBookmark, ReaderInfo, ReaderPage, ScanReport, Tag, TagCategory, TagGraph,
+    ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb, ScanReport, Tag, TagCategory, TagGraph,
     TagTranslationInput, TrashedArchive,
 };
 
@@ -821,46 +823,11 @@ async fn add_archives_to_collection(
     .await
 }
 
-#[tauri::command]
-async fn open_reader(
-    state: State<'_, AppState>,
-    archive_id: i64,
-) -> Result<ReaderInfo, String> {
-    let (root, source, bookmarks) = {
-        let inner = state.lock()?;
-        let library = inner
-            .library
-            .as_ref()
-            .ok_or_else(|| "请先选择库目录".to_string())?;
-        (
-            library.root.clone(),
-            db::archive_source(&library.conn, archive_id)?,
-            db::reader_bookmarks(&library.conn, archive_id)?,
-        )
-    };
-
-    if source.missing {
-        return Err("文件缺失，无法阅读".to_string());
-    }
-
-    let path = fsutil::join_rel(&root, &source.rel_path)
-        .ok_or_else(|| "画集文件路径无效".to_string())?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut info = reader::reader_info(&path, source.last_page)?;
-        info.bookmarks = bookmarks;
-        Ok::<_, String>(info)
-    })
-    .await
-    .map_err(|error| format!("阅读任务异常结束: {error}"))?
-}
-
-#[tauri::command]
-async fn read_reader_page(
-    state: State<'_, AppState>,
-    archive_id: i64,
-    index: i64,
-) -> Result<ReaderPage, String> {
+/// 把画集 id 解析成磁盘上的压缩包路径。
+///
+/// 阅读相关的命令都要先走这一步：路径只从数据库里取，配合 `join_rel`
+/// 的校验，避免把 IPC 传来的字符串当成文件路径。
+fn archive_file_path(state: &AppState, archive_id: i64) -> Result<PathBuf, String> {
     let (root, source) = {
         let inner = state.lock()?;
         let library = inner
@@ -877,12 +844,61 @@ async fn read_reader_page(
         return Err("文件缺失，无法阅读".to_string());
     }
 
-    let path = fsutil::join_rel(&root, &source.rel_path)
-        .ok_or_else(|| "画集文件路径无效".to_string())?;
+    fsutil::join_rel(&root, &source.rel_path).ok_or_else(|| "画集文件路径无效".to_string())
+}
 
-    tauri::async_runtime::spawn_blocking(move || reader::read_page(&path, index))
-        .await
-        .map_err(|error| format!("读取页面异常结束: {error}"))?
+#[tauri::command]
+async fn open_reader(
+    state: State<'_, AppState>,
+    archive_id: i64,
+) -> Result<ReaderInfo, String> {
+    let (path, last_page, bookmarks) = {
+        let inner = state.lock()?;
+        let library = inner
+            .library
+            .as_ref()
+            .ok_or_else(|| "请先选择库目录".to_string())?;
+        let source = db::archive_source(&library.conn, archive_id)?;
+        if source.missing {
+            return Err("文件缺失，无法阅读".to_string());
+        }
+        let path = fsutil::join_rel(&library.root, &source.rel_path)
+            .ok_or_else(|| "画集文件路径无效".to_string())?;
+        (
+            path,
+            source.last_page,
+            db::reader_bookmarks(&library.conn, archive_id)?,
+        )
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        reader::remember_archive(archive_id, &path);
+        let mut info = reader::reader_info(&path, last_page)?;
+        info.bookmarks = bookmarks;
+        Ok::<_, String>(info)
+    })
+    .await
+    .map_err(|error| format!("阅读任务异常结束: {error}"))?
+}
+
+/// 预热一页并返回元信息。
+///
+/// 图片字节留在后端缓存里，由 `gallery://` 协议取用；这里负责把
+/// 「解压 + 解码 + TIFF 转码」放到阻塞线程上，界面不会因此停顿。
+#[tauri::command]
+async fn read_reader_page(
+    state: State<'_, AppState>,
+    archive_id: i64,
+    index: i64,
+) -> Result<ReaderPage, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = archive_file_path(&state, archive_id)?;
+        reader::remember_archive(archive_id, &path);
+        reader::read_page(&path, index)
+    })
+    .await
+    .map_err(|error| format!("读取页面异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -891,29 +907,14 @@ async fn read_reader_thumbnail(
     archive_id: i64,
     index: i64,
     max_edge: Option<u32>,
-) -> Result<ReaderPage, String> {
-    let (root, source) = {
-        let inner = state.lock()?;
-        let library = inner
-            .library
-            .as_ref()
-            .ok_or_else(|| "请先选择库目录".to_string())?;
-        (
-            library.root.clone(),
-            db::archive_source(&library.conn, archive_id)?,
-        )
-    };
-
-    if source.missing {
-        return Err("文件缺失，无法阅读".to_string());
-    }
-
-    let path = fsutil::join_rel(&root, &source.rel_path)
-        .ok_or_else(|| "画集文件路径无效".to_string())?;
-
-    tauri::async_runtime::spawn_blocking(move || reader::read_thumbnail(&path, index, max_edge))
-        .await
-        .map_err(|error| format!("读取缩略图异常结束: {error}"))?
+) -> Result<ReaderThumb, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = archive_file_path(&state, archive_id)?;
+        reader::read_thumbnail(&path, index, max_edge)
+    })
+    .await
+    .map_err(|error| format!("读取缩略图异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -978,6 +979,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .register_uri_scheme_protocol("gallery", asset_protocol::serve)
         .setup(|app| {
             let state = AppState::new(app.handle());
             app.manage(state);

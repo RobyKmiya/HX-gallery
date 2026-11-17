@@ -1389,7 +1389,15 @@ fn reader_reads_pages_and_persists_progress() {
 
     let first = crate::reader::read_page(&path, 0).unwrap();
     assert_eq!(first.name, "2.png");
-    assert!(first.data_url.starts_with("data:image/png;base64,"));
+
+    // 页面字节留在后端缓存里，前端只按 URL 取图，不再走 base64 IPC。
+    let payload = crate::reader::cached_page(&path, 0).expect("读过的页应已预热");
+    assert_eq!(payload.mime, "image/png");
+    assert!(!payload.bytes.is_empty());
+    assert!(
+        crate::reader::cached_page(&path, 2).is_none(),
+        "没读过的页不应出现在缓存里"
+    );
 
     let last = crate::reader::read_page(&path, 2).unwrap();
     assert_eq!(last.name, "page1.png");
@@ -1643,6 +1651,24 @@ fn library_json_with_unsafe_id_is_regenerated() {
             .chars()
             .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
     );
+}
+
+#[test]
+fn migration_creates_indexes_for_the_sort_dropdown() {
+    // 「页数」「最近阅读」两个排序键原来没有索引，深翻页要整表排序后再 OFFSET。
+    let fixture = Fixture::new();
+    let context = db::open_library(&fixture.library).unwrap();
+    let indexed: i64 = context
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index'
+               AND name IN ('idx_archives_page_count', 'idx_archives_last_read_at')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 2);
 }
 
 #[test]

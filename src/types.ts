@@ -64,7 +64,17 @@ export interface ReaderBookmark {
   createdAt: number;
 }
 
+/**
+ * 单页元信息。图片本身由 `gallery://` 协议提供（见 api.readerPageUrl），
+ * 不再随 IPC 传输 base64。
+ */
 export interface ReaderPage {
+  index: number;
+  name: string;
+}
+
+/** 缩略图体积小，继续内联成 data URL，省一次协议往返。 */
+export interface ReaderThumb {
   index: number;
   name: string;
   dataUrl: string;

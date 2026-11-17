@@ -764,19 +764,19 @@ export default function LibraryView({
         if (token !== queryTokenRef.current) return;
 
         if (replace) {
-          if (itemsRef.current.length > 0) {
-            await preloadCoverImages(result.items);
-            if (requestId !== requestIdRef.current) return;
-            if (token !== queryTokenRef.current) return;
-            decodedPagesRef.current.add(targetPage);
-          } else {
-            void preloadCoverImages(result.items).then(() =>
-              decodedPagesRef.current.add(targetPage),
-            );
-          }
           pageCacheRef.current.set(targetPage, result);
           trimPageCache(pageCacheRef.current, targetPage);
+          /*
+           * 先换页、再预热封面。
+           *
+           * 原来是「等这一页所有封面 load + decode 完（最多 900ms）才提交」，
+           * 于是按方向键 / 滚轮翻页时，界面会先卡住一段时间再整页刷新。
+           * 卡片自己的 `<img>` 本来就是 eager，提交后逐个显示即可；预热只是
+           * 给下一批页码提前拉图，不该挡在提交前面。
+           */
+          decodedPagesRef.current.add(targetPage);
           commitPage(result, targetPage);
+          void preloadCoverImages(result.items);
           prefetchAround(targetPage, result.total);
         } else {
           setGroupCounts(

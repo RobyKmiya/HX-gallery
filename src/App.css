@@ -986,6 +986,14 @@ svg {
   cursor: pointer;
   transition: transform 0.18s ease, border-color 0.18s ease,
     box-shadow 0.18s ease;
+  /*
+   * 滚动模式会把上千张卡叠在 DOM 里。`content-visibility: auto` 让浏览器跳过
+   * 视口外卡片的布局与绘制（DOM 仍在，Ctrl+F / 无障碍不受影响），
+   * `contain-intrinsic-size` 给首帧一个 3:4 封面的近似高度，避免滚动条抖动；
+   * 卡片一旦渲染过，浏览器会用实测高度替换估计值。
+   */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 300px;
 }
 
 .archive-card:hover,

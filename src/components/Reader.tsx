@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -6,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
-import { api } from "../api";
+import { api, readerPageUrl } from "../api";
 import type {
   ArchiveCardData,
   ReaderBookmark,
@@ -65,7 +66,7 @@ interface ReaderThumbProps {
   onSelect: (index: number) => void;
 }
 
-function ReaderThumb({
+function ReaderThumbView({
   archiveId,
   index,
   active,
@@ -149,6 +150,13 @@ function ReaderThumb({
   );
 }
 
+/**
+ * 缩略图侧栏会把整本的每一页都挂出来，翻页时若整列重渲染，
+ * 几百个按钮 + 交叉观察器一起抖动。props 全是标量或稳定引用，
+ * 浅比较即可把开销压到「只有当前页那张变」。
+ */
+const ReaderThumb = memo(ReaderThumbView);
+
 export default function Reader({
   card,
   onClose,
@@ -168,6 +176,11 @@ export default function Reader({
   >({});
   const [dragging, setDragging] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  /**
+   * 取图 URL 的版本号。只有重试时递增：换掉 URL 才能摆脱 webview 里
+   * 已经记成「加载失败」的那张图（协议层缓存未命中时会返回 404）。
+   */
+  const [assetToken, setAssetToken] = useState(0);
   const [openToken, setOpenToken] = useState(0);
   const [spread, setSpread] = useState(() => {
     try {
@@ -187,6 +200,8 @@ export default function Reader({
   const thumbCacheRef = useRef<Map<number, string>>(new Map());
   const inflightRef = useRef<Map<number, Promise<ReaderPage>>>(new Map());
   const decodedRef = useRef<Map<number, Promise<void>>>(new Map());
+  /** 每页每次打开只自动自愈一次，避免 404 → 重试 → 404 的死循环。 */
+  const recoveredRef = useRef<Set<number>>(new Set());
   const requestSeqRef = useRef(0);
   const infoRef = useRef<ReaderInfo | null>(null);
   const pageRef = useRef(1);
@@ -227,39 +242,43 @@ export default function Reader({
     [card.id],
   );
 
-  const preparePage = useCallback((data: ReaderPage): Promise<void> => {    const existing = decodedRef.current.get(data.index);
-    if (existing) return existing;
+  const preparePage = useCallback(
+    (data: ReaderPage): Promise<void> => {
+      const existing = decodedRef.current.get(data.index);
+      if (existing) return existing;
 
-    const promise = new Promise<void>((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (typeof image.decode === "function") {
-          image.decode().then(
-            () => resolve(),
-            () => resolve(),
-          );
-        } else {
-          resolve();
-        }
-      };
-      const image = new Image();
-      image.decoding = "sync";
-      image.onload = finish;
-      image.onerror = () => {
-        if (!settled) {
+      const promise = new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
           settled = true;
-          resolve();
-        }
-      };
-      image.src = data.dataUrl;
-      if (image.complete) finish();
-    });
+          if (typeof image.decode === "function") {
+            image.decode().then(
+              () => resolve(),
+              () => resolve(),
+            );
+          } else {
+            resolve();
+          }
+        };
+        const image = new Image();
+        image.decoding = "sync";
+        image.onload = finish;
+        image.onerror = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+        image.src = readerPageUrl(card.id, data.index, assetToken);
+        if (image.complete) finish();
+      });
 
-    decodedRef.current.set(data.index, promise);
-    return promise;
-  }, []);
+      decodedRef.current.set(data.index, promise);
+      return promise;
+    },
+    [card.id, assetToken],
+  );
 
   const resetStageScroll = () => {
     const stage = stageRef.current;
@@ -372,6 +391,11 @@ export default function Reader({
       // Local storage may be unavailable; the mode still works for this session.
     }
   }, [spread]);
+
+  // 换页后重新给「自愈」机会：上一次失败的页再回来时可以再试一次。
+  useEffect(() => {
+    recoveredRef.current.clear();
+  }, [page, card.id]);
 
   useEffect(() => {
     if (!info || info.pageCount === 0) return;
@@ -690,10 +714,29 @@ export default function Reader({
     }
     for (const index of [page, page + 1]) {
       cacheRef.current.delete(index);
-      inflightRef.current.delete(index);
-      decodedRef.current.delete(index);
     }
+    // URL 里带 token，换 token 后旧的解码结果全部作废。
+    inflightRef.current.clear();
+    decodedRef.current.clear();
+    setAssetToken((value) => value + 1);
     setReloadToken((value) => value + 1);
+  };
+
+  /**
+   * 图片加载失败时先自愈一次。
+   *
+   * 协议层只在后端缓存未命中时返回 404（例如页面被 LRU 淘汰），此时重新走
+   * 一遍命令就能把页面重新预热并换 URL 取到图。同一次打开里每页只自愈一次，
+   * 再失败就走错误态，交给用户点「重试」。
+   */
+  const handleImageError = (index: number) => {
+    if (recoveredRef.current.has(index)) {
+      setLoading(false);
+      setError("页面图片加载失败，请重试");
+      return;
+    }
+    recoveredRef.current.add(index);
+    retry();
   };
 
   const handleImageLoad = useCallback(
@@ -950,16 +993,21 @@ export default function Reader({
             (spread ? (
               <div className="reader-spread">
                 <img
-                  src={pageData.dataUrl}
+                  src={readerPageUrl(card.id, pageData.index, assetToken)}
                   alt={pageData.name}
                   style={imageStyleFor(pageData)}
                   decoding="sync"
                   draggable={false}
                   onLoad={(event) => handleImageLoad(pageData.index, event)}
+                  onError={() => handleImageError(pageData.index)}
                 />
                 {visibleSecond && (
                   <img
-                    src={visibleSecond.dataUrl}
+                    src={readerPageUrl(
+                      card.id,
+                      visibleSecond.index,
+                      assetToken,
+                    )}
                     alt={visibleSecond.name}
                     style={imageStyleFor(visibleSecond)}
                     decoding="sync"
@@ -967,17 +1015,19 @@ export default function Reader({
                     onLoad={(event) =>
                       handleImageLoad(visibleSecond.index, event)
                     }
+                    onError={() => handleImageError(visibleSecond.index)}
                   />
                 )}
               </div>
             ) : (
               <img
-                src={pageData.dataUrl}
+                src={readerPageUrl(card.id, pageData.index, assetToken)}
                 alt={pageData.name}
                 style={imageStyleFor(pageData)}
                 decoding="sync"
                 draggable={false}
                 onLoad={(event) => handleImageLoad(pageData.index, event)}
+                onError={() => handleImageError(pageData.index)}
               />
             ))}
 

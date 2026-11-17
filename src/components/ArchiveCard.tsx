@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { assetUrl } from "../api";
 import { formatBytes, formatDate, formatDateTime } from "../format";
 import type { ArchiveCardData } from "../types";
@@ -22,7 +22,15 @@ interface ArchiveCardProps {
   eager?: boolean;
 }
 
-export default function ArchiveCard({
+/**
+ * 单张画集卡片。
+ *
+ * 用 `memo` 包住：滚动模式一次能挂上千张卡，而父组件的状态（搜索框输入、
+ * 选中集合、Toast、浮层开关…）每次变化都会重渲染整棵树。这里的 props 全是
+ * 稳定引用（卡片对象来自同一份 `items`，回调是 `useState` 的 setter 或
+ * `useCallback`），所以浅比较几乎总能短路，只重渲染真正变化的那几张。
+ */
+function ArchiveCard({
   card,
   onOpen,
   selectionMode = false,
@@ -191,3 +199,7 @@ export default function ArchiveCard({
     </article>
   );
 }
+
+ArchiveCard.displayName = "ArchiveCard";
+
+export default memo(ArchiveCard);

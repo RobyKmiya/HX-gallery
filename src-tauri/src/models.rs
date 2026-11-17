@@ -88,9 +88,24 @@ pub struct ReaderBookmark {
     pub created_at: i64,
 }
 
+/// 单页元信息。
+///
+/// 图片本身不再随 IPC 返回：`read_reader_page` 只负责把页面字节解码/转码后
+/// 放进后端缓存，前端用 `gallery://localhost/page/<archiveId>/<index>` 取图。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReaderPage {
+    pub index: i64,
+    pub name: String,
+}
+
+/// 缩略图。
+///
+/// 缩略图只有十几 KB，继续直接内联成 data URL：省一次协议往返，
+/// 也能复用现有的懒加载 + JS 侧缓存逻辑。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderThumb {
     pub index: i64,
     pub name: String,
     pub data_url: String,

@@ -4,17 +4,24 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use zip::ZipArchive;
 
 use crate::archive::{
     PAGE_DECODE_ALLOC, THUMB_DECODE_ALLOC, decode_image, is_ignored_entry, is_image_name,
 };
 use crate::fsutil;
-use crate::models::{ReaderInfo, ReaderPage};
+use crate::models::{ReaderInfo, ReaderPage, ReaderThumb};
+use crate::pagecache::{ByteCache, Cached};
 
 const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 页面字节缓存预算。至少能装下两页上限大小的图，避免大图把自己挤出去。
+const PAGE_CACHE_BUDGET: usize = 96 * 1024 * 1024;
+const THUMB_CACHE_BUDGET: usize = 24 * 1024 * 1024;
+/// 记住多少个「正在读」的压缩包路径，供自定义协议解析。
+const MAX_REMEMBERED_ARCHIVES: usize = 32;
 
 #[derive(Clone, Debug)]
 struct ReaderEntry {
@@ -32,6 +39,42 @@ fn manifest_cache() -> &'static Mutex<HashMap<PathBuf, Manifest>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn page_cache() -> &'static Mutex<ByteCache> {
+    static CACHE: OnceLock<Mutex<ByteCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ByteCache::new(PAGE_CACHE_BUDGET)))
+}
+
+fn thumb_cache() -> &'static Mutex<ByteCache> {
+    static CACHE: OnceLock<Mutex<ByteCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ByteCache::new(THUMB_CACHE_BUDGET)))
+}
+
+/// 已打开的画集 id → 压缩包路径。
+///
+/// 自定义协议处理器运行在 webview 的 UI 线程上，不能在那里查数据库
+/// （库状态锁可能被长时间导入占着，会直接卡住界面）。这里只放命令层
+/// 已经解析过的结果，协议层拿到就是一次哈希查找。
+fn archive_paths() -> &'static Mutex<HashMap<i64, PathBuf>> {
+    static PATHS: OnceLock<Mutex<HashMap<i64, PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn remember_archive(archive_id: i64, path: &Path) {
+    if let Ok(mut paths) = archive_paths().lock() {
+        if paths.len() >= MAX_REMEMBERED_ARCHIVES && !paths.contains_key(&archive_id) {
+            paths.clear();
+        }
+        paths.insert(archive_id, path.to_path_buf());
+    }
+}
+
+pub fn remembered_archive(archive_id: i64) -> Option<PathBuf> {
+    archive_paths()
+        .lock()
+        .ok()
+        .and_then(|paths| paths.get(&archive_id).cloned())
+}
+
 fn file_stamp(path: &Path) -> Result<(i64, u64), String> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -41,6 +84,15 @@ fn file_stamp(path: &Path) -> Result<(i64, u64), String> {
         }
     })?;
     Ok((fsutil::modified_ms(&metadata), metadata.len()))
+}
+
+/// 缓存键带上文件大小与修改时间：体积没有变化就不可能换了内容。
+fn cache_key(kind: &str, path: &Path, index: i64, suffix: &str) -> Result<String, String> {
+    let (modified, size) = file_stamp(path)?;
+    Ok(format!(
+        "{kind}|{}|{index}|{suffix}|{modified}|{size}",
+        path.to_string_lossy()
+    ))
 }
 
 fn build_entries(archive: &mut ZipArchive<File>) -> Vec<ReaderEntry> {
@@ -112,40 +164,81 @@ pub fn reader_info(path: &Path, last_page: i64) -> Result<ReaderInfo, String> {
     })
 }
 
+/// 把一页准备进后端缓存，返回它的元信息。
+///
+/// 解码 / TIFF 转码都在调用方（阻塞线程）完成，协议取图时只是内存读取，
+/// 因此 webview 的 UI 线程不会因为解码大图而卡顿。
 pub fn read_page(path: &Path, page_index: i64) -> Result<ReaderPage, String> {
-    let (name, bytes) = read_page_bytes(path, page_index)?;
-    let extension = name
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let payload = page_payload(path, page_index)?;
+    Ok(ReaderPage {
+        index: page_index,
+        name: payload.name.clone(),
+    })
+}
 
-    let (bytes, mime) = if matches!(extension.as_str(), "tif" | "tiff") {
+/// 取页面字节：命中缓存直接返回，未命中则解压 + 解码 + 转码后写回缓存。
+pub fn page_payload(path: &Path, page_index: i64) -> Result<Cached, String> {
+    let key = cache_key("page", path, page_index, "")?;
+
+    if let Ok(mut cache) = page_cache().lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return Ok(hit);
+    }
+
+    let payload = extract_page(path, page_index)?;
+
+    if let Ok(mut cache) = page_cache().lock() {
+        cache.insert(key, payload.clone());
+    }
+
+    Ok(payload)
+}
+
+/// 只查缓存，不做任何解压或解码。协议层用它判断是否已预热。
+pub fn cached_page(path: &Path, page_index: i64) -> Option<Cached> {
+    let key = cache_key("page", path, page_index, "").ok()?;
+    page_cache().lock().ok()?.get(&key)
+}
+
+fn extract_page(path: &Path, page_index: i64) -> Result<Cached, String> {
+    let (name, bytes) = read_page_bytes(path, page_index)?;
+    let extension = extension_of(&name);
+
+    if matches!(extension.as_str(), "tif" | "tiff") {
         let image = decode_image(&bytes, PAGE_DECODE_ALLOC)?;
         let mut encoded = Vec::new();
         image
-            .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
             .map_err(|error| format!("页面图片转码失败: {error}"))?;
-        (encoded, "image/png")
-    } else {
-        (bytes, mime_for(&extension))
-    };
+        return Ok(Cached::new(name, "image/png", encoded));
+    }
 
-    Ok(ReaderPage {
-        index: page_index,
-        name,
-        data_url: format!("data:{mime};base64,{}", STANDARD.encode(&bytes)),
-    })
+    Ok(Cached::new(name, mime_for(&extension), bytes))
 }
 
 pub fn read_thumbnail(
     path: &Path,
     page_index: i64,
     max_edge: Option<u32>,
-) -> Result<ReaderPage, String> {
-    let (name, bytes) = read_page_bytes(path, page_index)?;
+) -> Result<ReaderThumb, String> {
     let edge = max_edge.unwrap_or(180).clamp(64, 512);
+    let key = cache_key("thumb", path, page_index, &edge.to_string())?;
 
+    if let Ok(mut cache) = thumb_cache().lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return Ok(ReaderThumb {
+            index: page_index,
+            name: hit.name.clone(),
+            data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(&*hit.bytes)),
+        });
+    }
+
+    let (name, bytes) = read_page_bytes(path, page_index)?;
     let image = decode_image(&bytes, THUMB_DECODE_ALLOC)?;
     let thumbnail = image.thumbnail(edge, edge);
 
@@ -155,7 +248,14 @@ pub fn read_thumbnail(
         .encode_image(&thumbnail.to_rgb8())
         .map_err(|error| format!("缩略图编码失败: {error}"))?;
 
-    Ok(ReaderPage {
+    if let Ok(mut cache) = thumb_cache().lock() {
+        cache.insert(
+            key,
+            Cached::new(name.clone(), "image/jpeg", encoded.clone()),
+        );
+    }
+
+    Ok(ReaderThumb {
         index: page_index,
         name,
         data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(&encoded)),
@@ -200,6 +300,13 @@ fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, Vec<u8>), St
     }
 
     Ok((entry.name.clone(), bytes))
+}
+
+fn extension_of(name: &str) -> String {
+    name.rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn mime_for(extension: &str) -> &'static str {

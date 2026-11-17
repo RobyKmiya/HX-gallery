@@ -9,6 +9,7 @@ import type {
   ReaderBookmark,
   ReaderInfo,
   ReaderPage,
+  ReaderThumb,
   ScanReport,
   Tag,
   TagCategory,
@@ -143,11 +144,12 @@ export const api = {
   openReader: (archiveId: number) =>
     invoke<ReaderInfo>("open_reader", { archiveId }),
 
+  /** 预热一页：后端解压/解码后放进缓存，图片由 readerPageUrl 提供。 */
   readReaderPage: (archiveId: number, index: number) =>
     invoke<ReaderPage>("read_reader_page", { archiveId, index }),
 
   readReaderThumbnail: (archiveId: number, index: number, maxEdge?: number) =>
-    invoke<ReaderPage>("read_reader_thumbnail", {
+    invoke<ReaderThumb>("read_reader_thumbnail", {
       archiveId,
       index,
       maxEdge: maxEdge ?? null,
@@ -165,4 +167,30 @@ export const api = {
 
 export function assetUrl(path: string): string {
   return convertFileSrc(path);
+}
+
+/**
+ * `gallery://` 自定义协议的 URL 前缀。
+ *
+ * Windows / Android 的 webview 只认 http(s)，Tauri 把自定义协议映射成
+ * `http://<scheme>.localhost`；其余平台用 `<scheme>://localhost`。
+ */
+const GALLERY_ORIGIN =
+  typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
+    ? "http://gallery.localhost"
+    : "gallery://localhost";
+
+/**
+ * 阅读器页面 URL。
+ *
+ * `token` 只用于重试时强制 webview 重新请求（换 URL 才能摆脱上一次失败的
+ * 图片状态），正常翻页始终是 0。
+ */
+export function readerPageUrl(
+  archiveId: number,
+  index: number,
+  token = 0,
+): string {
+  const suffix = `/page/${archiveId}/${index}`;
+  return token ? `${GALLERY_ORIGIN}${suffix}?t=${token}` : `${GALLERY_ORIGIN}${suffix}`;
 }
