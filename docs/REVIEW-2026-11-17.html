@@ -69,7 +69,7 @@
 <div class="card">
   <strong>一句话结论：</strong>功能完成度非常高（M1–M23 全做完，交互细节甚至做到滚轮防连翻、封面预解码无闪烁），代码也有类型检查和集成测试兜底；但 <b>发布级工程化明显缺位</b>（无 Git、无 lint/CI、clippy 20 条警告、fmt 不统一），并且有几处 <b>会静默丢数据 / 直接退出进程</b> 的底层风险，主要集中在备份、图片解码、行错误处理。建议先修 P0/P1，再做手感与架构升级。
   <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:13px">
-    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>。
+    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准。
   </div>
 </div>
 
@@ -278,7 +278,7 @@
 </div>
 
 <div class="issue i1">
-  <div class="t"><span class="badge b1">新增 P1</span> B2. 多连接 + 逐条 autocommit + 无 busy 重试，产品承诺的「CLI 与桌面可同时用」未兑现</div>
+  <div class="t"><span class="badge b1">新增 P1</span> B2. 多连接 + 逐条 autocommit + 无 busy 重试，产品承诺的「CLI 与桌面可同时用」未兑现 <span style="color:var(--muted)">（第二批已处理：busy 30 s + 退避重试 + 后台工作连接 + 进程内互斥，见 12.8）</span></div>
   <div class="loc"><code>lib.rs:202-237</code>、<code>importer.rs:48 / 307</code>、<code>library.rs:30 / 270</code>、<code>db.rs:82</code>、<code>AGENT_API.md:175</code></div>
   <p>桌面 <code>AppInner</code> 常驻一条连接；<code>import_blocking</code>/<code>scan_blocking</code> 内部<b>再次</b> <code>db::open_library()</code> 开第二条；CLI 又是第三个进程，且 CLI 的 <code>Scan</code>/<code>Import</code> 会在自己进程内再开一条。每个文件的写都是独立 autocommit（<code>insert_archive</code> 单个 execute、<code>set_missing</code> 逐个 UPDATE），只设了 <code>busy_timeout = 5000</code> 且无重试；全项目仅迁移备份处做过一次 checkpoint。</p>
   <p><b>后果：</b>并发导入时 5 秒后返回 <code>database is locked</code>，错误被转成字符串塞进 <code>errors</code>，表现为「部分文件导入失败」；每条事务都 fsync WAL 并触发 3 个 FTS 触发器，千级文件导入时 WAL 膨胀、速度骤降。文档明确写了「桌面应用与 CLI 可以同时使用」，这是实现与承诺的差距。</p>
@@ -286,25 +286,27 @@
 </div>
 
 <div class="issue i1">
-  <div class="t"><span class="badge b1">新增 P1</span> B3. 每次开库都执行写 schema 的 DDL，并发启动会抢写锁</div>
+  <div class="t"><span class="badge b1">新增 P1</span> B3. 每次开库都执行写 schema 的 DDL，并发启动会抢写锁 <span style="color:var(--muted)">（第二批已修复：只在缺失时建表 + integrity-check，见 12.8）</span></div>
   <div class="loc"><code>db.rs:85 → 135-158 → 390-409</code></div>
   <p><code>migrate()</code> 每次 <code>open_library</code> 都调用 <code>ensure_full_text()</code>，而后者<b>无条件</b> <code>execute_batch(FULL_TEXT_SCHEMA)</code>（含 <code>CREATE VIRTUAL TABLE</code> + 3 个 <code>CREATE TRIGGER</code>）。即使带 <code>IF NOT EXISTS</code>，这些仍是写 <code>sqlite_master</code> 的 DDL。叠加 B2 的多进程/多连接，桌面启动、CLI 启动、导入任务同时打开库时可能随机 <code>database is locked</code>，导致启动失败。另外 FTS 表已存在但内容为空或损坏时不会 rebuild（只有 <code>existed == 0</code> 才重建），搜索会静默失效。</p>
   <div class="fix"><b>建议：</b>先查 <code>sqlite_master</code>，仅当表/触发器确实缺失时才执行 DDL；启动时做一次 <code>INSERT INTO archives_fts(archives_fts) VALUES('integrity-check')</code>，失败则 rebuild。<b>同时修正 P0-1 的备份方案与迁移事务化（见 P1-10）。</b></div>
 </div>
 
 <div class="issue i1">
-  <div class="t"><span class="badge b1">新增 P1</span> B4. 自有命令无 ACL + 路径校验缺失（<b>与 CSP 解耦，独立按 P1 处理</b>）</div>
+  <div class="t"><span class="badge b1">新增 P1</span> B4. 自有命令无 ACL + 路径校验缺失（<b>与 CSP 解耦，独立按 P1 处理</b>） <span style="color:var(--muted)">（第二批已修路径与引用校验，命令 ACL 待做，见 12.8）</span></div>
   <div class="loc"><code>tauri.conf.json:24-30</code>、<code>capabilities/default.json:6-10</code>、<code>lib.rs:148-213 / 1005-1053</code>、<code>db.rs:108-133</code>、<code>archive.rs:186-188</code></div>
   <p><b>按复核意见与第三章第 14 条（CSP）拆开：这不是 CSP 的「深化」，而是一个无需注入前提即可成立的独立权限面问题。</b>Tauri 2 中自己写的 <code>#[tauri::command]</code> <b>不受 capabilities 权限约束</b>，40+ 命令（含 <code>purge_archive</code>/<code>purge_tag</code>/<code>purge_collection</code>/<code>open_library</code>/<code>import_paths</code>）前端可无条件调用。<code>open_library(path)</code> 只判空、<code>import_paths(paths)</code> 无路径白名单；<code>library.json</code> 的 <code>library_id</code> 直接 <code>serde_json::from_str</code> 读入后拼进 <code>cache_dir.join("covers").join(library_id)</code> 并 <code>create_dir_all</code>。</p>
   <p><b>后果：</b>webview 内任意脚本可换库、导入任意路径、彻底删除数据；被篡改的 <code>library_id = "../../..."</code> 可让封面写出 <code>$APPCACHE</code> 之外。<code>purge_archive</code>（<code>lib.rs:511-516</code>）还直接 <code>remove_file(covers_dir.join(key))</code>，既不检查是否有其它记录共用同一 <code>cover_key</code>，也不校验 key 格式。</p>
   <div class="fix"><b>建议（按复核意见拆成四项，均与连接层同在 <code>lib.rs</code>）：</b>① <b>命令边界</b>——为 <code>purge_*</code> / <code>open_library</code> / <code>import_paths</code> 定义自定义 permission 并按窗口授权，路径做规范化与库目录白名单校验；② <b>数据校验</b>——<code>library.json.library_id</code> 读入时校验为 UUID / 安全字符（拒绝 <code>..</code>、分隔符、绝对前缀），版本状态只认 <code>PRAGMA user_version</code>；③ <b>删封面</b>——先 <code>SELECT COUNT(*) FROM archives WHERE cover_key = ?</code> 确认无其它引用，并校验 key 为 <code>hex + .jpg</code>；④ asset scope 收紧到 <code>$APPCACHE/covers/**</code>。<b>CSP 属纵深防御、已降为 P2（见第三章第 14 条修订），随阅读器通道重构收口，不列在本条范围。</b></div>
 </div>
 
+<div class="note" style="margin-top:12px"><b>本章的处理状态（第二批 <code>fcea7c6</code> 已落地，详见 <a href="#batch2">12.8</a>）：</b>「严重」三项（同步命令跑主线程 + 全局锁、导入/扫描各自开连接与逐条提交无重试、迁移与 FTS DDL 不在事务内）与 B1（CLI <code>coverPath</code>）、B2、B3，以及 B4 的路径 / 引用校验部分<b>均已修复</b>；B4 的「命令 ACL」需要把 45 个命令拆进 plugin 才能生效，<b>未做</b>；M2（每次翻页 3 条 SQL）与 M3（<code>page_count</code> / <code>last_read_at</code> 缺索引）<b>未做</b>，且实测显示 1 万条规模下深翻页只比首页慢 6 ms，优先级应让位于前端大列表渲染。</div>
+
 <h3>其余补充（P2，均已回查源码）</h3>
 <div class="card">
 <ul>
   <li><b>图片上限的精确事实</b>（深化 P0-3）：已核对 <code>image-0.25.10</code> 源码，<code>load_from_memory</code> 内部是 <code>ImageReader::with_guessed_format()?.decode()</code>，用的是 <code>Limits::default()</code> —— <code>max_alloc = 512MB</code>、<b>宽高无上限</b>，且便捷函数无法传自定义 Limits。修复必须换成 <code>ImageReader::new(Cursor::new(bytes)).set_limits(...)</code> 并先读 <code>dimensions()</code> 校验。</li>
-  <li><code>db.rs:79-81</code> <b>WAL 切换结果未校验</b>：SQLite 无法切换时返回当前模式字符串而不报错，代码丢弃返回值；若实际跑在 rollback 模式，后续所有 WAL 并发假设与 checkpoint 逻辑全部失效。应断言返回值为 <code>"wal"</code>。</li>
+  <li><code>db.rs:79-81</code> <b>WAL 切换结果未校验</b>：SQLite 无法切换时返回当前模式字符串而不报错，代码丢弃返回值；若实际跑在 rollback 模式，后续所有 WAL 并发假设与 checkpoint 逻辑全部失效。应断言返回值为 <code>"wal"</code>。<b>第二批已修复。</b></li>
   <li><b>FTS 健壮性</b>（<code>library.rs:463-486</code>）：搜索词无长度上限，trigram 下超长短语展开成海量 AND 链；FTS 报错不会降级到 LIKE，而是让整页查询失败；同一个含 FTS 子查询的 <code>filter</code> 在分组、COUNT、主查询里重复执行 3 次。建议限长 128 字符、剔除控制字符、失败回退 LIKE。</li>
   <li><b>索引缺口</b>（<code>db.rs:184-192</code>）：<code>page_count</code>、<code>last_read_at</code> 排序，<code>last_page/page_count</code> 阅读状态过滤，以及 <code>deleted_at IS NULL</code> 都无可用索引；<code>tag_graph</code>（<code>db.rs:1729-1762</code>）自连接是 O(k²)，单本挂 k 个标签就产生 k(k-1)/2 行中间结果，<code>LIMIT</code> 在聚合之后才生效。建议补复合索引并给共现计算加前置过滤。</li>
   <li><b>路径保真问题</b>：<code>fsutil.rs:143</code> 用 <code>to_string_lossy()</code> 把 <code>OsStr</code> 存成 DB 的 <code>rel_path</code>，非 UTF-8 文件名导入后永远打不开；<code>importer.rs:538-544</code> 的 <code>relative_of</code> 在词法比较失败后改用 <code>canonicalize</code>，会把符号链接解析到真实目标、误判 <code>source_in_library = true</code> 从而走进「不复制」分支。建议 DB 存原始字节、用 <code>symlink_metadata</code> 显式拒绝链接。</li>
@@ -455,9 +457,9 @@
   <tr><td><b>A′ · 依赖源码核对</b></td><td>读第三方 registry 源码</td><td><code>image-0.25.10</code> 的 <code>Limits::default()</code>：<code>max_alloc 512MB</code>、宽高无上限、便捷函数无法传自定义 Limits（P0-3 / 第十章）</td><td>静态可复核</td></tr>
   <tr><td><b>A″ · 引擎 / 纯函数实测</b></td><td>跑了可复现的小实验</td><td>SQLite FTS5 trigram：「妄想 秘話」带空格搜不到（第四章）；<b>本轮新增</b>：<code>translate.rs</code> 词典命中率脚本（12.2）</td><td>本轮新增项可复现</td></tr>
   <tr><td><b>B · 静态代码事实</b></td><td>逐行可核对，无推断成分</td><td>所有行号、SQL、<code>DEFAULT 60</code>、<code>csp: null</code>、<code>Path::new("")</code>、<code>noteDirty</code>、<code>filter_map(Result::ok)</code> 8 处、0 处 <code>React.memo</code> / <code>prefers-reduced-motion</code> / <code>aria-haspopup</code></td><td class="pass">你已抽查，全部属实</td></tr>
-  <tr><td><b>C · 静态推断，未运行时验证</b></td><td>由代码路径 + 依赖行为推导，方向可信但<b>没有量化</b></td><td><b>「换页最多白等 900 ms」</b>（F3-a）、43 MB IPC 造成的卡顿与内存尖峰、滚动模式大库掉帧、WAL 膨胀与 <code>database is locked</code> 的具体表现、OOM 触发条件、三套封面预载的常驻内存、虚拟列表与 memo 的收益幅度</td><td class="fail">均未实测</td></tr>
+  <tr><td><b>C · 静态推断，未运行时验证</b></td><td>由代码路径 + 依赖行为推导，方向可信但<b>没有量化</b></td><td><b>「换页最多白等 900 ms」</b>（F3-a）、43 MB IPC 造成的卡顿与内存尖峰、滚动模式大库掉帧、OOM 触发条件、三套封面预载的常驻内存、虚拟列表与 memo 的收益幅度<br><b>注：第二批起「深翻页耗时」与「开库启动开销」已从 C 级升级为实测</b>（1 万条记录：首页 9.7 ms / 第 200 页 15.7 ms、<code>open_library</code> 43 ms，见 12.8），并补了双连接并发写的实测用例</td><td class="fail">前端侧的 C 级结论仍未实测</td></tr>
 </table>
-<div class="note" style="margin-top:10px"><b>为什么没做运行时验证：</b>正式版正在运行、真实库 <code>F:\Hthings\BENZI</code> 不可触碰、不能执行 scan / import / purge。所以本报告的性质是<b>静态代码审查 + 工具链体检 + 少量纯函数实测</b>，不是性能或体验实测；凡属 C 级的结论都应理解为「按代码路径应当发生」，而非「测到了」。<br><b>建议补的运行时验证：</b>① 建临时测试库（不碰真实库），造 1 万条记录 + 千页本子 + 一张 8000×8000 扫描图；② 用 React DevTools Profiler / <code>performance.now()</code> 量换页 P50/P95、勾选 50 项的重渲染耗时、滚动模式 DOM 节点数与堆内存；③ 用两个进程并发导入量 <code>SQLITE_BUSY</code> 失败率与 WAL 大小；④ 补完并发 / 迁移失败用例后复跑 <code>cargo test</code>。拿到数字再决定 F3 与 P1-6 的实际优先级。</div>
+<div class="note" style="margin-top:10px"><b>为什么没做运行时验证：</b>正式版正在运行、真实库 <code>F:\Hthings\BENZI</code> 不可触碰、不能对真实库执行 scan / import / purge。所以本报告的性质是<b>静态代码审查 + 工具链体检 + 少量纯函数实测</b>，不是性能或体验实测；凡属 C 级的结论都应理解为「按代码路径应当发生」，而非「测到了」。<br><b>第二批补充的验证手段（可复现）：</b>① 用系统临时目录建 1 万条记录的测试库，量 <code>open_library</code>、首屏、深翻页耗时（<code>bench_open_and_deep_paging</code>，<code>#[ignore]</code> 保留）；② 双连接持锁 700 ms 的并发写用例，验证「等待而非失败」；③ 临时库上的 CLI 端到端冒烟（init → import → scan → search → 重复导入）。<br><b>仍需补的运行时验证：</b>① 造千页本子 + 一张 8000×8000 扫描图，量换页 P50/P95；② 用 React DevTools Profiler 量勾选 50 项的重渲染耗时、滚动模式 DOM 节点数与堆内存；③ 用两个进程并发导入量 <code>SQLITE_BUSY</code> 失败率与 WAL 大小。拿到数字再决定 F3 与 P1-6 的实际优先级。</div>
 
 <h3>12.5 复核意见 → 报告修订对照</h3>
 <table>
@@ -480,7 +482,7 @@
   <tr><td><b>1 · 前端并行</b></td><td><b>F1 关闭守卫 + F2 统一模态层（同一次提交）</b>：Esc / 遮罩走同一入口、焦点陷阱与恢复、模态栈、Reader 快捷键排除 BUTTON 与修饰键、popover 补 Esc</td><td>唯一真实丢用户输入的问题；与后端并行、无数据迁移风险</td></tr>
   <tr><td><b>1a</b></td><td><b>P0-1 备份一致性</b>（<code>VACUUM INTO</code> / backup API）+ <b>P0-2</b> 去掉 8 处 <code>filter_map(Result::ok)</code></td><td>不可逆、无提示的静默数据丢失，最优先</td></tr>
   <tr><td><b>1b</b></td><td><b>P0-3</b> 图片解码 <code>Limits</code> + 先读 <code>dimensions()</code>、移除命令路径 <code>expect</code>；<b>P0-4</b> 封面 <code>.tmp</code> + rename 原子写</td><td>按复核意见下调到静默丢数据两项之后</td></tr>
-  <tr><td><b>2</b></td><td><b>连接与任务层一次重构</b>：统一连接、批量事务、busy 重试、checkpoint 管理、命令 async 化、去掉每次开库的 DDL；<b>尾部追加 B4</b>：命令 permission / 路径白名单 / <code>library_id</code> / <code>cover_key</code> 校验 + DTO 入参上限</td><td>共同根因；B4 与它同在 <code>lib.rs</code>，一次改完</td></tr>
+  <tr><td><b>2</b></td><td><b>连接与任务层一次重构</b>：后台工作连接（不跑迁移/DDL）、批量事务、busy 重试、checkpoint 管理、命令 async 化、去掉每次开库的 DDL；<b>尾部追加 B4</b>：路径白名单 / <code>library_id</code> / <code>cover_key</code> 校验 + DTO 入参上限 <span style="color:var(--muted)">（命令 ACL 需拆插件，未做）</span></td><td><b>已完成（<code>fcea7c6</code>），见 <a href="#batch2">12.8</a></b>；B4 与它同在 <code>lib.rs</code>，一次改完</td></tr>
   <tr><td><b>3</b></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + <b>CSP 收口</b>；随后 F3 大列表性能三件套</td><td>CSP 已降 P2，随数据通道顺手做</td></tr>
   <tr><td><b>4</b></td><td>settings 原子写、迁移事务化、导入可取消与任务隔离、CLI <code>coverPath</code>、F4/F5 与批量 IPC、确认 / 撤销 <span style="color:var(--muted)">（默认评分 60 已确认保留，不在范围）</span></td><td>状态与手感收口</td></tr>
   <tr><td><b>5</b></td><td>词典命中率升级（12.2）、IPC 契约生成（12.3）、质量门禁与 CI、组件 / CSS 拆分、视觉与无障碍、发布链路</td><td>补遗项与长期维护</td></tr>
@@ -512,7 +514,71 @@
 </table>
 <div class="note" style="margin-top:10px"><b>仍未验证：</b>12.4 的 C 级结论（换页延迟、43 MB IPC 卡顿、大库掉帧、WAL 膨胀）依旧只是静态推断，本批没有做应用运行时 / 性能压测。<b>剩余批次</b>按 12.6：第 2 步连接与任务层重构 + B4 命令 ACL / 路径校验（同在 <code>lib.rs</code>，一次改完）；第 3 步阅读器数据通道 + CSP 收口 + F3 大列表；第 4 步状态同步、settings、迁移事务、CLI coverPath、批量 IPC；第 5 步词典升级、契约生成、门禁与拆分。<b>第 2 / 3 步动工前应先按 12.4 建临时测试库打性能基线。</b></div>
 
-<footer>本报告基于 2026-11-17 的工程快照；审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有应用运行时 / 性能压测 / 真实库操作验证</b>，证据等级与未验证边界见 12.4。第一批改进已落地（提交 <code>fbde767</code>），改动范围为 5 个源码文件、根 <code>.gitignore</code> 与本报告；未修改评分数据与筛选逻辑、未访问 <code>F:\Hthings\BENZI</code> 与 <code>.gallery/library.db</code>、未删除任何文件、未执行 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。</footer>
+<h3 id="batch2">12.8 第二批落地记录（<code>fcea7c6</code>）：连接与任务层 + B4 入口校验</h3>
+<div class="card">
+按 12.6 的「2 → 连接与任务层一次重构 + B4」执行。本批改动 8 个源码文件（+1103 / −621 行），<b>没有</b>改动前端、数据库结构、评分语义、<code>F:\Hthings\BENZI</code> 与真实库文件，也未重新打包。
+</div>
+
+<p><b>一个刻意的方案偏离，先说清楚：</b>原计划写的是「统一连接」。落地时改成「<b>后台任务用独立的工作连接</b>」，理由是先前的诊断有一半是对的、一半需要修正：</p>
+<div class="card">
+<ul>
+  <li><b>对的部分：</b>每次 <code>open_library</code> 都跑迁移与 FTS DDL，是并发启动锁冲突的真正来源——已改成 <code>open_worker_connection()</code>，只开连接 + 配 PRAGMA，<b>不跑迁移、不建表</b>。</li>
+  <li><b>需要修正：</b>「多连接」本身不是缺陷。WAL 的设计就是「一写多读」，导入时界面仍要能查询、翻页、改评分。若真合并成一条连接并由 <code>Mutex</code> 串行化，一次千级文件导入会让整个 UI 阻塞到导入结束——那是把「偶发锁冲突」换成了「必然卡死」。</li>
+  <li><b>所以真正该修的三件事</b>变成了：① 后台任务不再重复跑 DDL；② <code>busy_timeout</code> 5s → 30s + <code>BEGIN IMMEDIATE</code> 指数退避重试；③ 同进程内导入/扫描互斥，杜绝「自己和自己抢锁」。</li>
+</ul>
+</div>
+
+<table>
+  <tr><th>项</th><th>文件</th><th>改动</th></tr>
+  <tr><td><b>连接配置</b></td><td><code>db.rs::configure_connection</code></td><td><code>journal_mode = WAL</code> 的返回值改为<b>校验</b>（原来直接丢弃：切不过去时 SQLite 只返回当前模式而不报错）；<code>busy_timeout</code> 5000 → 30000；新增 <code>synchronous = NORMAL</code>（WAL 下只在 checkpoint fsync，导入吞吐提升且不损库）与 <code>wal_autocheckpoint = 1000</code>（WAL 随写入自动回收）。</td></tr>
+  <tr><td><b>工作连接</b></td><td><code>db.rs::open_worker_connection</code><br><code>library.rs::scan_connection</code><br><code>importer.rs::import_on_connection</code></td><td>导入 / 扫描 / CLI 子命令不再各自 <code>open_library</code>（也不再顺带建库、跑迁移、建 FTS）。未初始化的目录会明确报「还不是已初始化的画廊库」，而不是在任意路径下悄悄生成 <code>.gallery</code>。</td></tr>
+  <tr><td><b>写事务</b></td><td><code>db.rs::begin_write</code></td><td><code>BEGIN IMMEDIATE</code> + 6 次指数退避（50ms→800ms）重试。<b>为什么必须是 IMMEDIATE：</b>默认的 DEFERRED 会先读后写，等第一条写语句才发现拿不到锁，此时已无法安全重试。</td></tr>
+  <tr><td><b>迁移事务化</b></td><td><code>db.rs::migrate</code></td><td>建表 / 升级 / 写 <code>user_version</code> 整段包进一个写事务，中断不会留下「有表但版本没推进」的半升级库；<code>VACUUM INTO</code> 备份按 SQLite 限制留在事务外（顺序：备份 → 事务 → 提交）。</td></tr>
+  <tr><td><b>FTS DDL</b></td><td><code>db.rs::ensure_full_text</code></td><td>先查 <code>sqlite_master</code>，只在表或 3 个触发器缺失时才建并 rebuild；结构完整时改为做一次 <code>integrity-check</code>（外部内容表的索引不会随 content 表自动恢复，索引坏了搜索会静默失效），失败才 rebuild。</td></tr>
+  <tr><td><b>缺失标记</b></td><td><code>db.rs::set_missing_many</code><br><code>library.rs</code></td><td>扫描一本书原来逐条 <code>UPDATE</code>（上千条 = 上千次提交），改为按 400 个一批的单条 <code>WHERE id IN (...)</code>，整批一个事务；<code>missing = 0</code> 条件保证重复扫描不重复计数。</td></tr>
+  <tr><td><b>导入原子性</b></td><td><code>importer.rs::insert_archive_atomic</code></td><td>「写库 + 加入收藏夹」放进同一事务：收藏夹关联失败会回滚并删除已移入的文件，不再留下「导入了但不在收藏夹」的半成品；重复文件分支的 <code>let _ =</code> 吞错改为计入失败；<code>expect("temporary path missing")</code> 改为显式分支（<code>panic = "abort"</code> 下 panic 等于整个进程退出）。</td></tr>
+  <tr><td><b>进度计数</b></td><td><code>importer.rs</code></td><td>收集阶段的失败（路径不存在、格式不支持）计入 <code>total</code>，不再出现「失败数 &gt; 总数」；进度 <code>current</code> 同步偏移。</td></tr>
+  <tr><td><b>命令 async 化</b></td><td><code>lib.rs</code>（45 个命令）</td><td><code>AppState</code> 改为 <code>Arc&lt;Mutex&lt;..&gt;&gt;</code> 以便跨线程搬运；全部命令 <code>async fn</code> + <code>spawn_blocking</code>，主线程不再执行 SQL。同步命令跑主线程是「查询一慢整个界面冻结」的直接原因。</td></tr>
+  <tr><td><b>互斥</b></td><td><code>lib.rs::try_maintenance</code></td><td>进程内导入/扫描互斥：连点两次「导入」或导入中再点「扫描」会明确返回「已有导入或扫描正在进行」，而不是各开一条连接互抢写锁、把刚导入的文件扫成缺失。</td></tr>
+  <tr><td><b>路径校验</b></td><td><code>lib.rs::validate_library_dir</code></td><td><code>open_library</code> 从「只判空」改为：非空 + 绝对路径 + <b>目录必须已存在</b>。原来会 <code>create_dir_all</code>，等于允许在任意路径下新建 <code>.gallery</code> 数据库目录。</td></tr>
+  <tr><td><b>library_id</b></td><td><code>db.rs::is_safe_library_id</code></td><td>读 <code>library.json</code> 时校验为 hex/UUID 形态；非法则换成新 UUID 并落盘（而不是拒绝打开库，让一个手滑字段永久锁死库）。堵住 <code>library_id = "../../..."</code> 让 <code>create_dir_all</code> 写到缓存目录之外。</td></tr>
+  <tr><td><b>删封面</b></td><td><code>db.rs::cover_key_in_use</code><br><code>archive.rs::is_cover_key</code></td><td><code>purge_archive</code> 删文件前先 <code>SELECT COUNT(*)</code> 确认没有其它记录（含回收站）引用同一封面，并校验 key 为 <code>hex + .jpg</code>，避免被篡改的 <code>cover_key</code> 删到缓存目录外的文件。</td></tr>
+  <tr><td><b>入参上限</b></td><td><code>library.rs</code>、<code>models.rs</code>、<code>lib.rs</code></td><td><code>page</code> ≤ 10000、<code>page_size</code> 12–200、<code>tag_ids</code> ≤ 200、搜索词去控制字符 + 限 128 字；<code>tag_graph</code> 的 <code>limit</code> 夹到 1–2000；一次导入的路径数 ≤ 20000；<code>ArchiveQuery</code> 加 <code>deny_unknown_fields</code>（字段名拼错立刻报错，而不是静默退回默认值、表现成「筛选没生效」）。</td></tr>
+  <tr><td><b>settings 原子写</b></td><td><code>lib.rs::write_settings</code></td><td>写临时文件再 <code>rename</code>，并给读写失败补上 <code>eprintln</code>：原来是 <code>fs::write</code> 直写 + 失败仅静默，中断会留下半截 JSON 被当成「从未选过库」。</td></tr>
+  <tr><td><b>CLI coverPath</b></td><td><code>galleryctl.rs</code></td><td><code>search</code> 原来传 <code>Path::new("")</code>，返回给 AI 工作流的 <code>coverPath</code> 只有裸文件名；改为与 scan/import 同一套 <code>default_covers_dir()</code>。scan/import 也改为复用主连接，不再同进程开第二条。</td></tr>
+</table>
+
+<p><b>实测数据（本批新增的可复现基准）</b></p>
+<table>
+  <tr><th>指标</th><th>数值</th><th>说明</th></tr>
+  <tr><td><code>open_library</code>（1 万条记录）</td><td>43 ms</td><td>含迁移检查 + FTS <code>integrity-check</code>；同库 <code>open_worker_connection</code> 仅 12 ms，即完整性检查约 <b>31 ms</b>——只发生在启动/切库，可接受</td></tr>
+  <tr><td>第 1 页（<code>page_size=48</code>）</td><td>9.7 ms</td><td>含分组聚合 + <code>COUNT(*)</code></td></tr>
+  <tr><td>第 200 页（<code>OFFSET 9552</code>）</td><td>15.7 ms</td><td><b>修正了原报告的一个判断</b>：1 万条规模下深翻页只比首页慢 6 ms，「OFFSET 越翻越慢」在真实量级上还不到体感阈值，优先度应低于大列表渲染（F3）</td></tr>
+  <tr><td>CLI 端到端</td><td class="pass">通过</td><td><code>init → import → scan → search → 重复导入</code> 全通；<code>coverPath</code> 已是绝对路径；重复导入正确返回「跳过重复 1」</td></tr>
+</table>
+
+<p><b>验证结果</b></p>
+<table>
+  <tr><th>检查</th><th>结果</th></tr>
+  <tr><td><code>cargo test --lib</code></td><td class="pass"><b>17 passed</b> / 0 failed / 1 ignored（原 12 个 + 新增 5 个）。新增用例：扫描缺失幂等、工作连接拒绝未初始化库、<code>library.json</code> 非法 <code>library_id</code> 被重建、<code>ArchiveQuery</code> 拒绝未知字段、<b>双连接并发写会等待而不是立刻失败</b>（真的持锁 700 ms，实测发生了等待）</td></tr>
+  <tr><td>性能基准</td><td>以 <code>#[ignore]</code> 保留为 <code>bench_open_and_deep_paging</code>，可随时用 <code>cargo test --lib -- --ignored bench_open_and_deep_paging --nocapture</code> 复跑</td></tr>
+  <tr><td><code>cargo clippy --all-targets</code></td><td class="pass">15 个告警位置（基线 16），本批<b>没有新增</b>，反而是把 <code>lib.rs</code> 重写后少了一条</td></tr>
+  <tr><td><code>cargo fmt --check</code></td><td class="pass">差异 82 → <b>76</b>（<code>lib.rs</code> 重写顺带减少 6 处）；本批新增代码的 11 处格式建议已全部手动修正，仍未跑全量 <code>cargo fmt</code></td></tr>
+  <tr><td><code>tsc --noEmit</code> / <code>npm run build</code></td><td class="pass">通过；本批未动前端，产物与上批一致（JS 379.77 KB / CSS 69.06 KB）</td></tr>
+</table>
+
+<div class="note" style="margin-top:10px">
+<b>本批没做的三件事，以及为什么：</b>
+<ol>
+  <li><b>命令 ACL（B4 的第 ① 项）</b>——Tauri 2 中自有 <code>#[tauri::command]</code> 不受 capabilities 约束，自定义 permission 只对<b>插件</b>命令生效。要真正 ACL 化，得把 45 个命令拆进一个内部 plugin，是一次结构性改动，不宜和连接层混在一批。本批先做了「入口校验」（路径、<code>library_id</code>、<code>cover_key</code>、入参上限），把「可被任意脚本滥用」收窄成「可被任意脚本调用但参数受约束」。</li>
+  <li><b>整批导入的大事务</b>——没有做。文件复制与哈希是 IO，若包在事务里会全程持有写锁，界面侧任何写操作都要等到导入结束；而每条 insert 本身已是单语句原子。真正需要原子性的「写库 + 收藏夹」这一组已经用事务包住了。</li>
+  <li><b>FTS 出错回退 LIKE</b>——搜索词已做控制字符清洗与限长，拼出的必然是合法的 FTS5 短语，命中非法输入导致报错的路径基本被堵死；完整的「查询失败后整条语句降级重试」需要在 <code>query_archives</code> 里做二次执行，留到第 3 步随阅读器通道一起改。</li>
+</ol>
+<b>仍然存在的已知缺口：</b>CLI 与桌面跨进程并发仍只靠 <code>busy_timeout</code>（没有文件锁，只是从 5 s 提到 30 s 并有退避重试）；<code>page_count</code> / <code>last_read_at</code> 仍缺索引、深翻页仍是 OFFSET；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未规范化。
+</div>
+
+<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地两批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
+
 </div>
 </body>
 </html>
