@@ -1,0 +1,811 @@
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use rusqlite::types::Value;
+use rusqlite::{params, Connection, OptionalExtension};
+use tauri::AppHandle;
+use walkdir::WalkDir;
+
+use crate::archive;
+use crate::db;
+use crate::fsutil;
+use crate::models::{ArchiveCard, ArchiveGroup, ArchivePage, ArchiveQuery, ScanReport};
+use crate::paths;
+
+pub fn scan_blocking(app: &AppHandle, root: &Path, library_id: &str) -> ScanReport {
+    let started = Instant::now();
+    let covers_dir = match paths::covers_dir(app, library_id) {
+        Ok(dir) => dir,
+        Err(error) => return scan_failure(error, started.elapsed().as_millis()),
+    };
+    scan_with_covers(root, &covers_dir)
+}
+
+pub fn scan_with_covers(root: &Path, covers_dir: &Path) -> ScanReport {
+    let started = Instant::now();
+    let mut errors = Vec::new();
+
+    let library = match db::open_library(root) {
+        Ok(library) => library,
+        Err(error) => return scan_failure(error, started.elapsed().as_millis()),
+    };
+    let connection = &library.conn;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.file_name().to_string_lossy() != ".gallery")
+    {
+        match entry {
+            Ok(entry) => {
+                if entry.file_type().is_file() && archive::is_supported_archive(entry.path()) {
+                    files.push(entry.into_path());
+                }
+            }
+            Err(error) => errors.push(format!("遍历目录失败: {error}")),
+        }
+    }
+
+    let found = files.len();
+    let mut found_relative = HashSet::new();
+    let mut added = 0usize;
+    let mut updated = 0usize;
+
+    for path in files {
+        let relative = match fsutil::rel_to_string(root, &path) {
+            Some(relative) => relative,
+            None => {
+                errors.push(format!("无法计算相对路径: {}", path.to_string_lossy()));
+                continue;
+            }
+        };
+
+        found_relative.insert(relative.clone());
+
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                errors.push(format!("无法读取文件信息 {}: {error}", path.to_string_lossy()));
+                continue;
+            }
+        };
+
+        let file_size = metadata.len() as i64;
+        let file_mtime = fsutil::modified_ms(&metadata);
+
+        let existing: Option<(i64, String, i64, i64, Option<String>, i64)> = match connection
+            .query_row(
+                "SELECT id, COALESCE(content_hash, ''), file_size, file_mtime, cover_key, missing
+                 FROM archives WHERE rel_path = ?1",
+                params![relative],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+        {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(format!("查询索引失败 {}: {error}", path.to_string_lossy()));
+                continue;
+            }
+        };
+
+        if let Some((id, old_hash, old_size, old_mtime, old_cover, missing)) = existing {
+            let cover_missing = old_cover
+                .as_deref()
+                .map(|key| !covers_dir.join(key).exists())
+                .unwrap_or(true);
+
+            if file_size != old_size || file_mtime != old_mtime {
+                let content_hash = match fsutil::hash_file(&path) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        errors.push(format!("计算文件哈希失败 {}: {error}", path.to_string_lossy()));
+                        continue;
+                    }
+                };
+
+                let inspection = archive::inspect_archive(&path, &covers_dir, &content_hash);
+                let file_name = file_name_of(&path);
+                let extension = extension_of(&path);
+
+                match db::update_archive_content(
+                    connection,
+                    id,
+                    &relative,
+                    &file_name,
+                    &extension,
+                    file_size,
+                    file_mtime,
+                    &content_hash,
+                    inspection.page_count,
+                    inspection.cover_key.as_deref(),
+                    inspection.error.as_deref(),
+                ) {
+                    Ok(()) => updated += 1,
+                    Err(error) => errors.push(format!("更新索引失败 {}: {error}", file_name)),
+                }
+            } else if cover_missing || missing != 0 {
+                let content_hash = if old_hash.is_empty() {
+                    match fsutil::hash_file(&path) {
+                        Ok(hash) => hash,
+                        Err(error) => {
+                            errors.push(format!(
+                                "计算文件哈希失败 {}: {error}",
+                                path.to_string_lossy()
+                            ));
+                            continue;
+                        }
+                    }
+                } else {
+                    old_hash
+                };
+
+                let inspection = archive::inspect_archive(&path, &covers_dir, &content_hash);
+                let file_name = file_name_of(&path);
+                let extension = extension_of(&path);
+
+                match db::update_archive_content(
+                    connection,
+                    id,
+                    &relative,
+                    &file_name,
+                    &extension,
+                    file_size,
+                    file_mtime,
+                    &content_hash,
+                    inspection.page_count,
+                    inspection.cover_key.as_deref(),
+                    inspection.error.as_deref(),
+                ) {
+                    Ok(()) => updated += 1,
+                    Err(error) => errors.push(format!("更新封面失败 {}: {error}", file_name)),
+                }
+            }
+
+            continue;
+        }
+
+        let content_hash = match fsutil::hash_file(&path) {
+            Ok(hash) => hash,
+            Err(error) => {
+                errors.push(format!("计算文件哈希失败 {}: {error}", path.to_string_lossy()));
+                continue;
+            }
+        };
+
+        let duplicate = match db::find_duplicate(connection, &content_hash) {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(format!("检查重复失败 {}: {error}", path.to_string_lossy()));
+                continue;
+            }
+        };
+
+        let inspection = archive::inspect_archive(&path, &covers_dir, &content_hash);
+        let file_name = file_name_of(&path);
+        let extension = extension_of(&path);
+
+        if let Some(id) = duplicate {
+            match db::update_archive_content(
+                connection,
+                id,
+                &relative,
+                &file_name,
+                &extension,
+                file_size,
+                file_mtime,
+                &content_hash,
+                inspection.page_count,
+                inspection.cover_key.as_deref(),
+                inspection.error.as_deref(),
+            ) {
+                Ok(()) => updated += 1,
+                Err(error) => errors.push(format!("更新移动文件失败 {}: {error}", file_name)),
+            }
+        } else {
+            match db::insert_archive(
+                connection,
+                &relative,
+                &file_name,
+                &extension,
+                file_size,
+                file_mtime,
+                &content_hash,
+                inspection.page_count,
+                inspection.cover_key.as_deref(),
+                inspection.error.as_deref(),
+                fsutil::now_ms(),
+            ) {
+                Ok(_) => added += 1,
+                Err(error) => errors.push(format!("写入索引失败 {}: {error}", file_name)),
+            }
+        }
+    }
+
+    let mut missing = 0usize;
+    let existing_rows: Vec<(i64, String, i64)> = {
+        let mut statement = match connection
+            .prepare("SELECT id, rel_path, missing FROM archives WHERE deleted_at IS NULL")
+        {
+            Ok(statement) => statement,
+            Err(error) => {
+                errors.push(format!("读取缺失记录失败: {error}"));
+                return ScanReport {
+                    found,
+                    added,
+                    updated,
+                    missing,
+                    errors,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    message: "扫描完成，但检查缺失文件失败".to_string(),
+                };
+            }
+        };
+
+        match statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        }) {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(error) => {
+                errors.push(format!("读取缺失记录失败: {error}"));
+                Vec::new()
+            }
+        }
+    };
+
+    for (id, relative, was_missing) in existing_rows {
+        if !found_relative.contains(&relative) && was_missing == 0 {
+            if let Err(error) = db::set_missing(connection, id, true) {
+                errors.push(format!("标记缺失失败 {relative}: {error}"));
+            } else {
+                missing += 1;
+            }
+        }
+    }
+
+    let elapsed_ms = started.elapsed().as_millis();
+    let message = format!(
+        "扫描完成：发现 {found}，新增 {added}，更新 {updated}，缺失 {missing}，用时 {:.1}s",
+        elapsed_ms as f64 / 1000.0
+    );
+
+    ScanReport {
+        found,
+        added,
+        updated,
+        missing,
+        errors,
+        elapsed_ms,
+        message,
+    }
+}
+
+fn scan_failure(message: String, elapsed_ms: u128) -> ScanReport {
+    ScanReport {
+        found: 0,
+        added: 0,
+        updated: 0,
+        missing: 0,
+        errors: vec![message.clone()],
+        elapsed_ms,
+        message: format!("扫描失败：{message}"),
+    }
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "未命名".to_string())
+}
+
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+pub fn query_archives(
+    connection: &Connection,
+    root: &Path,
+    covers_dir: &Path,
+    query: &ArchiveQuery,
+) -> Result<ArchivePage, String> {
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(48).clamp(12, 200);
+    let offset = (page.saturating_sub(1) as i64) * page_size as i64;
+
+    let sort = match query.sort.as_deref() {
+        Some("file_mtime") => "a.file_mtime",
+        Some("rating") => "a.rating",
+        Some("file_size") => "a.file_size",
+        Some("title") => "COALESCE(NULLIF(a.title, ''), a.file_name) COLLATE NOCASE",
+        Some("page_count") => "a.page_count",
+        Some("last_read_at") => "a.last_read_at",
+        _ => "a.added_at",
+    };
+
+    let direction = if query
+        .direction
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("asc"))
+        .unwrap_or(false)
+    {
+        "ASC"
+    } else {
+        "DESC"
+    };
+
+    let mut conditions: Vec<String> = vec!["a.deleted_at IS NULL".to_string()];
+
+    if let Some(collection_id) = query.collection_id {
+        conditions.push(format!(
+            "EXISTS (
+                SELECT 1 FROM collection_archives ca
+                WHERE ca.archive_id = a.id AND ca.collection_id = {collection_id}
+            )"
+        ));
+    }
+
+    let mut tag_ids: Vec<i64> = Vec::new();
+    if let Some(ids) = query.tag_ids.as_ref() {
+        for id in ids {
+            if *id > 0 && !tag_ids.contains(id) {
+                tag_ids.push(*id);
+            }
+        }
+    }
+
+    if !tag_ids.is_empty() {
+        let list = tag_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mode = query
+            .tag_mode
+            .as_deref()
+            .unwrap_or("and")
+            .to_ascii_lowercase();
+
+        match mode.as_str() {
+            "or" => conditions.push(format!(
+                "a.id IN (
+                    SELECT at.archive_id FROM archive_tags at
+                    JOIN tags t ON t.id = at.tag_id AND t.deleted_at IS NULL
+                    WHERE at.tag_id IN ({list})
+                )"
+            )),
+            "exclude" => conditions.push(format!(
+                "a.id NOT IN (
+                    SELECT at.archive_id FROM archive_tags at
+                    JOIN tags t ON t.id = at.tag_id AND t.deleted_at IS NULL
+                    WHERE at.tag_id IN ({list})
+                )"
+            )),
+            _ => conditions.push(format!(
+                "a.id IN (
+                    SELECT at.archive_id FROM archive_tags at
+                    JOIN tags t ON t.id = at.tag_id AND t.deleted_at IS NULL
+                    WHERE at.tag_id IN ({list})
+                    GROUP BY at.archive_id
+                    HAVING COUNT(DISTINCT at.tag_id) = {}
+                )",
+                tag_ids.len()
+            )),
+        }
+    }
+
+    let mut params: Vec<Value> = Vec::new();
+    if let Some(buckets) = query.rating_buckets.as_ref() {
+        let mut buckets: Vec<i64> = buckets
+            .iter()
+            .copied()
+            .filter(|bucket| (0..=5).contains(bucket))
+            .collect();
+        buckets.sort_unstable();
+        buckets.dedup();
+        if !buckets.is_empty() {
+            let list = buckets
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!(
+                "(CASE WHEN a.rating <= 0 THEN 0 ELSE (a.rating + 19) / 20 END) IN ({list})"
+            ));
+        }
+    }
+
+    if let Some(statuses) = query.read_statuses.as_ref() {
+        let has = |name: &str| {
+            statuses
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(name))
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        if has("unread") {
+            parts.push("a.last_page <= 0");
+        }
+        if has("reading") {
+            parts.push("(a.last_page > 0 AND a.page_count > 0 AND a.last_page < a.page_count)");
+        }
+        if has("finished") {
+            parts.push("(a.page_count > 0 AND a.last_page >= a.page_count)");
+        }
+        if !parts.is_empty() {
+            conditions.push(format!("({})", parts.join(" OR ")));
+        }
+    }
+
+    if query.missing_only.unwrap_or(false) {
+        conditions.push("a.missing != 0".to_string());
+    }
+
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if search.chars().count() >= 3 {
+            let escaped = search.replace('"', "\"\"");
+            conditions.push(
+                "a.id IN (SELECT rowid FROM archives_fts WHERE archives_fts MATCH ?)".to_string(),
+            );
+            params.push(Value::Text(format!("\"{escaped}\"")));
+        } else {
+            let like = format!("%{}%", escape_like(search));
+            conditions.push(
+                "(COALESCE(a.title, '') LIKE ? ESCAPE '\\'
+                  OR a.file_name LIKE ? ESCAPE '\\'
+                  OR COALESCE(a.note, '') LIKE ? ESCAPE '\\')"
+                    .to_string(),
+            );
+            params.push(Value::Text(like.clone()));
+            params.push(Value::Text(like.clone()));
+            params.push(Value::Text(like));
+        }
+    }
+
+    let filter = if conditions.is_empty() {
+        "1=1".to_string()
+    } else {
+        conditions.join(" AND ")
+    };
+
+    let group_by_rating = query
+        .group
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("rating"))
+        .unwrap_or(false);
+    let group_by_tag = query
+        .group
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("tag"))
+        .unwrap_or(false);
+    let group_by_collection = query
+        .group
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("collection"))
+        .unwrap_or(false);
+    let preferred_tag_order = if !group_by_tag {
+        String::new()
+    } else if query
+        .tag_ids
+        .as_ref()
+        .map(|ids| !ids.is_empty())
+        .unwrap_or(false)
+        && !query
+            .tag_mode
+            .as_deref()
+            .map(|mode| mode.eq_ignore_ascii_case("exclude"))
+            .unwrap_or(false)
+    {
+        let ids = query
+            .tag_ids
+            .as_ref()
+            .map(|ids| {
+                ids.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        format!("CASE WHEN t.id IN ({ids}) THEN 0 ELSE 1 END, ")
+    } else {
+        String::new()
+    };
+
+    let tag_join = if group_by_tag {
+        format!(
+            r#"
+            LEFT JOIN (
+                SELECT archive_id, tag_id, label, category FROM (
+                    SELECT at.archive_id,
+                           t.id AS tag_id,
+                           COALESCE(NULLIF(t.translated_name, ''), t.name) AS label,
+                           t.category AS category,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY at.archive_id
+                               ORDER BY {preferred_tag_order}
+                                        COALESCE(NULLIF(t.translated_name, ''), t.name) COLLATE NOCASE,
+                                        t.id
+                           ) AS rn
+                    FROM archive_tags at
+                    JOIN tags t ON t.id = at.tag_id AND t.deleted_at IS NULL
+                )
+                WHERE rn = 1
+            ) pt ON pt.archive_id = a.id
+            "#
+        )
+    } else {
+        String::new()
+    };
+
+    let collection_join = if group_by_collection {
+        // When browsing one collection, its members should group under it even
+        // if they also belong to an earlier-ordered collection.
+        let preferred_collection_order = query
+            .collection_id
+            .map(|id| format!("CASE WHEN c.id = {id} THEN 0 ELSE 1 END, "))
+            .unwrap_or_default();
+        format!(
+            r#"
+            LEFT JOIN (
+                SELECT archive_id, collection_id, label, is_default, sort_order FROM (
+                    SELECT ca.archive_id,
+                           c.id AS collection_id,
+                           c.name AS label,
+                           c.is_default AS is_default,
+                           c.sort_order AS sort_order,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ca.archive_id
+                               ORDER BY {preferred_collection_order}
+                                        c.is_default DESC,
+                                        c.sort_order ASC,
+                                        c.created_at ASC,
+                                        c.id ASC
+                           ) AS rn
+                    FROM collection_archives ca
+                    JOIN collections c ON c.id = ca.collection_id AND c.deleted_at IS NULL
+                )
+                WHERE rn = 1
+            ) pc ON pc.archive_id = a.id
+            "#
+        )
+    } else {
+        String::new()
+    };
+
+    let groups = if group_by_rating {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT CASE WHEN a.rating <= 0 THEN 0 ELSE (a.rating + 19) / 20 END AS bucket,
+                        COUNT(*)
+                 FROM archives a
+                 WHERE {filter}
+                 GROUP BY bucket
+                 ORDER BY bucket {direction}"
+            ))
+            .map_err(|error| format!("准备分组查询失败: {error}"))?;
+
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(params.iter().cloned()),
+                |row| {
+                    Ok(ArchiveGroup {
+                        bucket: row.get(0)?,
+                        count: row.get(1)?,
+                        label: None,
+                        category: None,
+                    })
+                },
+            )
+            .map_err(|error| format!("查询分组失败: {error}"))?;
+
+        Some(rows.filter_map(Result::ok).collect::<Vec<_>>())
+    } else if group_by_tag {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT COALESCE(pt.tag_id, 0) AS bucket,
+                        COUNT(*),
+                        MAX(pt.label),
+                        MAX(pt.category)
+                 FROM archives a
+                 {tag_join}
+                 WHERE {filter}
+                 GROUP BY COALESCE(pt.tag_id, 0)
+                 ORDER BY (COALESCE(pt.tag_id, 0) = 0), MAX(pt.label) COLLATE NOCASE"
+            ))
+            .map_err(|error| format!("准备标签分组查询失败: {error}"))?;
+
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(params.iter().cloned()),
+                |row| {
+                    Ok(ArchiveGroup {
+                        bucket: row.get(0)?,
+                        count: row.get(1)?,
+                        label: row.get(2)?,
+                        category: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|error| format!("查询标签分组失败: {error}"))?;
+
+        Some(rows.filter_map(Result::ok).collect::<Vec<_>>())
+    } else if group_by_collection {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT COALESCE(pc.collection_id, 0) AS bucket,
+                        COUNT(*),
+                        MAX(pc.label)
+                 FROM archives a
+                 {collection_join}
+                 WHERE {filter}
+                 GROUP BY COALESCE(pc.collection_id, 0)
+                 ORDER BY (COALESCE(pc.collection_id, 0) = 0),
+                          MAX(pc.is_default) DESC,
+                          MIN(pc.sort_order),
+                          MAX(pc.label) COLLATE NOCASE"
+            ))
+            .map_err(|error| format!("准备收藏夹分组查询失败: {error}"))?;
+
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(params.iter().cloned()),
+                |row| {
+                    Ok(ArchiveGroup {
+                        bucket: row.get(0)?,
+                        count: row.get(1)?,
+                        label: row.get(2)?,
+                        category: None,
+                    })
+                },
+            )
+            .map_err(|error| format!("查询收藏夹分组失败: {error}"))?;
+
+        Some(rows.filter_map(Result::ok).collect::<Vec<_>>())
+    } else {
+        None
+    };
+
+    let total: i64 = connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM archives a WHERE {filter}"),
+            rusqlite::params_from_iter(params.iter().cloned()),
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计画集数量失败: {error}"))?;
+
+    params.push(Value::Integer(page_size as i64));
+    params.push(Value::Integer(offset));
+
+    let group_order = if group_by_rating {
+        format!("a.rating {direction}, ")
+    } else if group_by_tag {
+        "(COALESCE(pt.tag_id, 0) = 0), pt.label COLLATE NOCASE, ".to_string()
+    } else if group_by_collection {
+        "(COALESCE(pc.collection_id, 0) = 0), pc.is_default DESC, pc.sort_order, pc.label COLLATE NOCASE, "
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let group_columns = if group_by_tag {
+        "COALESCE(pt.tag_id, 0), pt.label, pt.category"
+    } else if group_by_collection {
+        "COALESCE(pc.collection_id, 0), pc.label, NULL"
+    } else {
+        "NULL, NULL, NULL"
+    };
+
+    // Unread archives always sink to the bottom, whatever the direction.
+    let null_order = if query.sort.as_deref() == Some("last_read_at") {
+        "(a.last_read_at IS NULL), "
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        "SELECT a.id,
+                COALESCE(NULLIF(a.title, ''), a.file_name),
+                a.file_name,
+                a.ext,
+                a.file_size,
+                a.rating,
+                a.page_count,
+                a.added_at,
+                a.file_mtime,
+                a.cover_key,
+                a.rel_path,
+                a.missing,
+                a.error,
+                a.note,
+                {group_columns},
+                a.last_read_at,
+                a.last_page
+         FROM archives a
+         {tag_join}{collection_join}
+         WHERE {filter}
+         ORDER BY {group_order}{null_order}{sort} {direction}, a.id DESC
+         LIMIT ? OFFSET ?"
+    );
+
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("准备查询失败: {error}"))?;
+
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(params.iter().cloned()),
+            |row| {
+                let cover_key: Option<String> = row.get(9)?;
+                let relative: String = row.get(10)?;
+                let missing: i64 = row.get(11)?;
+                let file_path = fsutil::join_rel(root, &relative)
+                    .map(|path| path.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let cover_path = cover_key.map(|key| {
+                    covers_dir
+                        .join(key)
+                        .to_string_lossy()
+                        .to_string()
+                });
+
+                Ok(ArchiveCard {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_name: row.get(2)?,
+                    ext: row.get(3)?,
+                    file_size: row.get(4)?,
+                    rating: row.get(5)?,
+                    page_count: row.get(6)?,
+                    added_at: row.get(7)?,
+                    file_mtime: row.get(8)?,
+                    cover_path,
+                    file_path,
+                    note: row.get(13)?,
+                    missing: missing != 0,
+                    error: row.get(12)?,
+                    group_bucket: row.get(14)?,
+                    group_label: row.get(15)?,
+                    group_category: row.get(16)?,
+                    last_read_at: row.get(17)?,
+                    last_page: row.get(18)?,
+                })
+            },
+        )
+        .map_err(|error| format!("查询画集失败: {error}"))?;
+
+    let items: Vec<ArchiveCard> = rows
+        .filter_map(Result::ok)
+        .collect();
+
+    Ok(ArchivePage {
+        items,
+        total,
+        page,
+        page_size,
+        groups,
+    })
+}

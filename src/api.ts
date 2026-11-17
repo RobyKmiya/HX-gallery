@@ -1,0 +1,168 @@
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import type {
+  ArchivePage,
+  ArchiveQuery,
+  Collection,
+  ImportOptions,
+  ImportReport,
+  LibraryState,
+  ReaderBookmark,
+  ReaderInfo,
+  ReaderPage,
+  ScanReport,
+  Tag,
+  TagCategory,
+  TagGraph,
+  TagTranslationInput,
+  TrashedArchive,
+} from "./types";
+
+export const api = {
+  getLibraryState: () => invoke<LibraryState>("get_library_state"),
+
+  openLibrary: (path: string) =>
+    invoke<LibraryState>("open_library", { path }),
+
+  queryArchives: (query: ArchiveQuery) =>
+    invoke<ArchivePage>("query_archives", { query }),
+
+  importPaths: (paths: string[], options: ImportOptions) =>
+    invoke<ImportReport>("import_paths", { paths, options }),
+
+  scanLibrary: () => invoke<ScanReport>("scan_library"),
+
+  setRating: (id: number, rating: number) =>
+    invoke<number>("set_rating", { id, rating }),
+
+  setNote: (id: number, note: string | null) =>
+    invoke<string | null>("set_note", { id, note }),
+
+  deleteArchive: (archiveId: number) =>
+    invoke<void>("delete_archive", { archiveId }),
+
+  restoreArchive: (archiveId: number) =>
+    invoke<void>("restore_archive", { archiveId }),
+
+  purgeArchive: (archiveId: number) =>
+    invoke<void>("purge_archive", { archiveId }),
+
+  listDeletedArchives: () =>
+    invoke<TrashedArchive[]>("list_deleted_archives"),
+
+  listTags: () => invoke<Tag[]>("list_tags"),
+
+  listDeletedTags: () => invoke<Tag[]>("list_deleted_tags"),
+
+  listArchiveTags: (archiveId: number) =>
+    invoke<Tag[]>("list_archive_tags", { archiveId }),
+
+  addTag: (archiveId: number, name: string) =>
+    invoke<Tag>("add_tag", { archiveId, name }),
+
+  removeTag: (archiveId: number, tagId: number) =>
+    invoke<void>("remove_tag", { archiveId, tagId }),
+
+  updateTag: (tagId: number, name: string, translatedName: string | null) =>
+    invoke<Tag>("update_tag", { tagId, name, translatedName }),
+
+  setTagTranslations: (updates: TagTranslationInput[]) =>
+    invoke<number>("set_tag_translations", { updates }),
+
+  mergeTags: (sourceIds: number[], targetId: number) =>
+    invoke<Tag>("merge_tags", { sourceIds, targetId }),
+
+  deleteTag: (tagId: number) => invoke<void>("delete_tag", { tagId }),
+
+  restoreTag: (tagId: number) => invoke<Tag>("restore_tag", { tagId }),
+
+  purgeTag: (tagId: number) => invoke<void>("purge_tag", { tagId }),
+
+  listTagCategories: () => invoke<TagCategory[]>("list_tag_categories"),
+
+  createTagCategory: (parentPath: string | null, name: string) =>
+    invoke<TagCategory>("create_tag_category", { parentPath, name }),
+
+  renameTagCategory: (path: string, newName: string) =>
+    invoke<TagCategory[]>("rename_tag_category", { path, newName }),
+
+  moveTagCategory: (path: string, newParentPath: string | null) =>
+    invoke<TagCategory[]>("move_tag_category", { path, newParentPath }),
+
+  deleteTagCategory: (path: string) =>
+    invoke<TagCategory[]>("delete_tag_category", { path }),
+
+  setTagCategory: (tagId: number, category: string | null) =>
+    invoke<Tag>("set_tag_category", { tagId, category }),
+
+  tagGraph: (minWeight?: number, limit?: number) =>
+    invoke<TagGraph>("tag_graph", { minWeight, limit }),
+
+  listCollections: () => invoke<Collection[]>("list_collections"),
+
+  createCollection: (name: string) =>
+    invoke<Collection>("create_collection", { name }),
+
+  renameCollection: (collectionId: number, name: string) =>
+    invoke<Collection>("rename_collection", { collectionId, name }),
+
+  deleteCollection: (collectionId: number) =>
+    invoke<void>("delete_collection", { collectionId }),
+
+  listDeletedCollections: () =>
+    invoke<Collection[]>("list_deleted_collections"),
+
+  restoreCollection: (collectionId: number) =>
+    invoke<Collection>("restore_collection", { collectionId }),
+
+  purgeCollection: (collectionId: number) =>
+    invoke<void>("purge_collection", { collectionId }),
+
+  reorderCollections: (orderedIds: number[]) =>
+    invoke<void>("reorder_collections", { orderedIds }),
+
+  setCollectionCover: (collectionId: number, archiveId: number | null) =>
+    invoke<Collection>("set_collection_cover", { collectionId, archiveId }),
+
+  addArchivesToCollection: (collectionId: number, archiveIds: number[]) =>
+    invoke<number>("add_archives_to_collection", { collectionId, archiveIds }),
+
+  listArchiveCollections: (archiveId: number) =>
+    invoke<number[]>("list_archive_collections", { archiveId }),
+
+  setArchiveCollection: (
+    archiveId: number,
+    collectionId: number,
+    member: boolean,
+  ) =>
+    invoke<void>("set_archive_collection", {
+      archiveId,
+      collectionId,
+      member,
+    }),
+
+  openReader: (archiveId: number) =>
+    invoke<ReaderInfo>("open_reader", { archiveId }),
+
+  readReaderPage: (archiveId: number, index: number) =>
+    invoke<ReaderPage>("read_reader_page", { archiveId, index }),
+
+  readReaderThumbnail: (archiveId: number, index: number, maxEdge?: number) =>
+    invoke<ReaderPage>("read_reader_thumbnail", {
+      archiveId,
+      index,
+      maxEdge: maxEdge ?? null,
+    }),
+
+  setReadingProgress: (archiveId: number, page: number) =>
+    invoke<void>("set_reading_progress", { archiveId, page }),
+
+  addReaderBookmark: (archiveId: number, page: number) =>
+    invoke<ReaderBookmark>("add_reader_bookmark", { archiveId, page }),
+
+  removeReaderBookmark: (archiveId: number, bookmarkId: number) =>
+    invoke<void>("remove_reader_bookmark", { archiveId, bookmarkId }),
+};
+
+export function assetUrl(path: string): string {
+  return convertFileSrc(path);
+}

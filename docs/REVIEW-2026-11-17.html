@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>画匣 1.0.0 · 全面工程审查报告</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1b2130; --muted:#5c6779; --line:#e3e7ee;
+    --p0:#c0392b; --p1:#c47a12; --p2:#3a6ea5; --ok:#1f7a4d; --chip:#eef1f6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1120px;margin:0 auto;padding:32px 24px 80px}
+  header{background:linear-gradient(135deg,#1e2a44 0%,#33456b 100%);color:#fff;border-radius:16px;padding:30px 34px;margin-bottom:22px}
+  header h1{margin:0 0 6px;font-size:26px;letter-spacing:.5px}
+  header .sub{opacity:.82;font-size:13px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+  .meta span{background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:4px 12px;font-size:12px}
+  h2{font-size:19px;margin:34px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:15px;margin:22px 0 10px;color:#2c3a55}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin-bottom:14px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:18px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+  .stat b{display:block;font-size:24px;line-height:1.3}
+  .stat small{color:var(--muted)}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#eef2f8;color:#33415c;font-weight:600;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code{font:12px/1.6 "Cascadia Mono",Consolas,monospace;background:var(--chip);padding:1px 5px;border-radius:4px;color:#34405c;word-break:break-all}
+  .badge{display:inline-block;min-width:34px;text-align:center;color:#fff;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:700;white-space:nowrap}
+  .b0{background:var(--p0)} .b1{background:var(--p1)} .b2{background:var(--p2)} .bok{background:var(--ok)}
+  .issue{border-left:4px solid var(--line);padding:2px 0 2px 14px;margin:16px 0}
+  .issue.i0{border-color:var(--p0)} .issue.i1{border-color:var(--p1)} .issue.i2{border-color:var(--p2)}
+  .issue .t{font-weight:650;font-size:14px;margin-bottom:4px}
+  .issue .loc{color:var(--muted);font-size:12px;margin-bottom:6px}
+  .issue p{margin:4px 0}
+  .issue .fix{background:#f1f7f3;border-left:3px solid var(--ok);padding:6px 10px;border-radius:0 6px 6px 0;margin-top:8px;font-size:13px}
+  .pass{color:var(--ok);font-weight:600} .warn{color:var(--p1);font-weight:600} .fail{color:var(--p0);font-weight:600}
+  ul{margin:6px 0 0;padding-left:20px} li{margin:4px 0}
+  .note{background:#fff8e8;border:1px solid #f0dcae;border-radius:10px;padding:12px 16px;font-size:13px}
+  footer{margin-top:36px;color:var(--muted);font-size:12px;text-align:center}
+  @media print{body{background:#fff}header{background:#1e2a44 !important;-webkit-print-color-adjust:exact}.card,table,.stat{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>画匣 1.0.0 · 全面工程审查报告</h1>
+  <div class="sub">接手检查 · 缺点 / 可升级点 / 可优化点 / 手感改进点 / 工程可改进点</div>
+  <div class="meta">
+    <span>工程 D:\Qoderwork</span>
+    <span>审查日期 2026-11-17</span>
+    <span>Tauri 2 + React 19 + Rust / SQLite</span>
+    <span>源码约 22,000 行</span>
+    <span>只读审查 · 未改动源码</span>
+  </div>
+</header>
+
+<div class="grid">
+  <div class="stat"><b class="pass">全绿</b><small>tsc / vite build / 12 项 Rust 测试 / npm audit 0 漏洞</small></div>
+  <div class="stat"><b>5</b><small>P0 · 数据安全、崩溃与用户输入丢失</small></div>
+  <div class="stat"><b>10+</b><small>P1 · 正确性与明显卡顿</small></div>
+  <div class="stat"><b>22+</b><small>P2 · 手感、性能、工程化</small></div>
+</div>
+
+<div class="card">
+  <strong>一句话结论：</strong>功能完成度非常高（M1–M23 全做完，交互细节甚至做到滚轮防连翻、封面预解码无闪烁），代码也有类型检查和集成测试兜底；但 <b>发布级工程化明显缺位</b>（无 Git、无 lint/CI、clippy 20 条警告、fmt 不统一），并且有几处 <b>会静默丢数据 / 直接退出进程</b> 的底层风险，主要集中在备份、图片解码、行错误处理。建议先修 P0/P1，再做手感与架构升级。
+  <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:13px">
+    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>
+  </div>
+</div>
+
+<h2>一、实测体检</h2>
+<table>
+  <tr><th>检查项</th><th>命令 / 位置</th><th>结果</th></tr>
+  <tr><td>TypeScript 类型检查</td><td><code>npm run check</code></td><td class="pass">通过（strict + noUnused*）</td></tr>
+  <tr><td>前端生产构建</td><td><code>npm run build</code></td><td class="pass">通过；JS 379 KB（gzip 109 KB）、CSS 69 KB，无分包</td></tr>
+  <tr><td>Rust 集成测试</td><td><code>cargo test --lib</code></td><td class="pass">12 passed / 0 failed（覆盖导入、查询、分组、迁移、回收站等）</td></tr>
+  <tr><td>Rust 静态检查</td><td><code>cargo clippy --all-targets</code></td><td class="fail">20 条警告；加 <code>-D warnings</code> 直接编译失败（13–14 条）</td></tr>
+  <tr><td>Rust 格式</td><td><code>cargo fmt --check</code></td><td class="fail">有差异（<code>galleryctl.rs</code> 多处）</td></tr>
+  <tr><td>依赖安全</td><td><code>npm audit --json</code></td><td class="pass">0 漏洞（70 个依赖）</td></tr>
+  <tr><td>版本控制</td><td><code>git status</code></td><td class="fail">不是 Git 仓库（HANDOFF §6.2 已列为待办）</td></tr>
+  <tr><td>运行实例</td><td>进程检查</td><td>release 版正在运行（PID 46516），本次 <b>未结束</b>、未触碰真实库 <code>F:\Hthings\BENZI</code></td></tr>
+</table>
+<div class="note" style="margin-top:12px">本次为只读审查，未修改任何源码；仅 <code>npm run build</code> 正常重生成了 <code>dist/</code> 构建产物。未执行任何 scan / import / purge，未复制或备份原始画集。</div>
+
+<h2>二、缺点：P0 数据安全与崩溃风险</h2>
+
+<div class="issue i0">
+  <div class="t"><span class="badge b0">P0</span> 1. 迁移备份可能是不完整快照</div>
+  <div class="loc"><code>src-tauri/src/db.rs:282-305</code> · <code>backup_database()</code></div>
+  <p><code>let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")</code> 忽略失败，随后 <code>fs::copy(library.db, backup)</code> 只复制主库。WAL 模式下，若 checkpoint 未成功（CLI 或另一实例正持有连接），最近写入仍在 <code>-wal</code> 里，备份静默缺数据。HANDOFF 明确"备份只允许复制元数据"，因此这个备份的可靠性很关键。</p>
+  <div class="fix"><b>建议：</b>改用 <code>VACUUM INTO '备份路径'</code> 或 <code>rusqlite::backup::Backup</code> 得到一致性快照；成功后校验文件大小/PRAGMA integrity_check，失败则中止迁移而非继续。</div>
+</div>
+
+<div class="issue i0">
+  <div class="t"><span class="badge b0">P0</span> 2. 行解析错误被静默吞掉，画集会"凭空消失"</div>
+  <div class="loc"><code>library.rs:801</code>（主列表）、<code>625 / 655 / 687 / 260</code>（分组与扫描）、<code>db.rs:1422 / 1467</code></div>
+  <p>多处使用 <code>rows.filter_map(Result::ok).collect()</code>。任何一行 <code>row.get()</code> 失败（NULL、类型不符、分组列错位）该画集就被悄悄丢弃，界面显示 <code>total = 170</code> 却只渲染 168 本，且没有任何错误提示。这是最难排查的一类问题。</p>
+  <div class="fix"><b>建议：</b>统一改成 <code>collect::&lt;Result&lt;Vec&lt;_&gt;, _&gt;&gt;()?</code>，让错误冒泡到命令层并 toast。</div>
+</div>
+
+<div class="issue i0">
+  <div class="t"><span class="badge b0">P0</span> 3. 图片解码没有像素上限，存在 OOM / 进程退出风险</div>
+  <div class="loc"><code>archive.rs:154-174</code>、<code>reader.rs:121-127 / 148-150 / 182-200</code>、<code>Cargo.toml:43 panic="abort"</code></div>
+  <p>只限制了<b>压缩后字节数</b>（封面 64 MB、页面 32 MB），<code>image::load_from_memory</code> 没有设置 <code>Limits</code>。一张高压缩比的"图片炸弹"（例如几 MB 的 30000×30000 PNG）解码时会申请 GB 级内存。叠加 release 的 <code>panic = "abort"</code>，分配失败或 panic 会直接终止整个桌面进程，无保存、无错误对话框。<code>importer.rs:268</code> 的 <code>expect("temporary path missing")</code> 也在导入路径上保留了 panic 可能。</p>
+  <div class="fix"><b>建议：</b>用 <code>ImageReader::with_guessed_format().limits(Limits::default().max_alloc(Some(256MB)).max_image_width/height(...))</code>；移除命令路径上的 <code>expect/unwrap</code>；评估把 <code>panic="abort"</code> 改回 <code>unwind</code> 并加顶层崩溃日志。</div>
+  <div class="note" style="margin-top:10px"><b>复核修订（严重度）：</b>保留 P0 定性——<code>panic="abort"</code> + 无解码上限确实会让一次异常直接终止进程，事实无误。但<b>执行顺序下调到 P0-1 / P0-2 之后</b>：这是本地离线个人库、没有外部恶意输入通道，现实触发条件是「某张超大扫描图 / 损坏文件」而非刻意构造的图片炸弹；后果是崩溃后重启可恢复，而 P0-1（备份缺 WAL 数据）与 P0-2（行错误静默丢画集）是<b>不可逆、且没有任何提示的数据丢失</b>。第十二章 12.6 已据此把第 1 步拆成 1a（静默丢数据两项）→ 1b（崩溃与破图两项）。</div>
+</div>
+
+<div class="issue i0">
+  <div class="t"><span class="badge b0">P0</span> 4. 封面缓存非原子写，坏文件会永久卡住</div>
+  <div class="loc"><code>archive.rs:123-142 / 176-184</code></div>
+  <p><code>image.save(destination)</code> 直接写最终文件；中途失败/断电留下截断的 JPEG，而下次判断是 <code>if !cover_path.exists()</code> —— 文件存在就再也不重生成，该画集长期显示破图。错误分支里的 <code>remove_file</code> 只覆盖显式报错，覆盖不到崩溃场景。</p>
+  <div class="fix"><b>建议：</b>写 <code>.tmp</code> → <code>fs::rename</code> 原子替换；读缓存时校验文件头/可解码；提供"重建封面"命令批量修复。</div>
+</div>
+
+<h2>三、缺点：P1 正确性与明显卡顿（第 14 条经复核降为 P2，见 12.5）</h2>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 5. 默认评分 60 与"未评分"筛选语义冲突</div>
+  <div class="loc"><code>db.rs:172 / 501</code>、<code>library.rs:418-435</code>、<code>LibraryView.tsx:119-128</code>、<code>ArchiveCard.tsx:103-106</code>、<code>DetailDrawer.tsx:605</code></div>
+  <p>表定义 <code>rating DEFAULT 60</code>，<code>insert_archive</code> 硬编码写入 60；筛选把 <code>rating &lt;= 0</code> 当作"未评分"（bucket 0），卡片直接显示 <code>{card.rating}</code>。结果：<b>每本新导入的画集都被自动评为 60 分并显示星标</b>，"未评分"筛选恒为空，按评分分组时所有未评分画集挤进 41–60 组。详情抽屉把 60 标注为"默认评分"，说明是有意设计，但数据模型与筛选语义互相矛盾。</p>
+  <div class="fix"><b>建议：</b>让 <code>rating</code> 可为 NULL（或增加 <code>rating_set</code> 标志）表示未评分；迁移时把从未手动改动过的 60 归一为未评分；筛选与分组按 NULL 判断。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 6. 阅读器整页图片走 base64 JSON，是翻页延迟的根因</div>
+  <div class="loc"><code>reader.rs:133-137 / 158-162</code>、<code>lib.rs:857-922</code></div>
+  <p><code>data:{mime};base64,...</code> 单页最大 32 MB 原始字节 → 约 43 MB 字符串，每翻一页都要「ZIP 解压 → Rust 序列化 JSON → IPC 传输 → WebView 解析 base64 → 图片解码」。M19 的"9–10 ms 换帧"靠预取缓存实现，<b>冷启动首帧、跳页、未命中缓存的页仍受这条链路限制</b>；高分辨率扫描图尤其明显。</p>
+  <div class="fix"><b>建议：</b>改为注册自定义 URI scheme（<code>register_uri_scheme_protocol</code>）直接返回字节流，或解压到缓存目录走 <code>asset://</code>，或至少用 <code>tauri::ipc::Response</code> 二进制通道；前端 <code>&lt;img src&gt;</code> 由浏览器自行流式解码与缓存。这是投入产出比最高的一项性能升级。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 7. 缩略图无缓存、每次都全解码原图</div>
+  <div class="loc"><code>reader.rs:140-163</code>（与 <code>read_page_bytes</code> 165-203）</div>
+  <p>每次 <code>read_thumbnail</code> 都重新打开 ZIP、<code>load_from_memory</code> 解码整页原图、再 <code>thumbnail()</code> 缩放并 JPEG 编码。缩略图侧栏 N 张就是 N 次原图全解码，且没有任何磁盘/内存缓存；每次翻页也重新 <code>ZipArchive::new</code> 解析中央目录。</p>
+  <div class="fix"><b>建议：</b>按 <code>(content_hash, page_index, max_edge)</code> 落盘缓存缩略图；提供 <code>read_reader_thumbnails(archive_id, indices[])</code> 批量命令；缓存打开的 ZIP 句柄（LRU）。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 8. 全局页表缓存永不淘汰，且失效判定不严谨</div>
+  <div class="loc"><code>reader.rs:28-31 / 33-42 / 70-101</code></div>
+  <p><code>static Mutex&lt;HashMap&lt;PathBuf, Manifest&gt;&gt;</code> 每个打开过的压缩包都常驻内存（每页一个 String），切换库也不清理，长时间使用持续膨胀。缓存有效性只靠 <code>(mtime_ms, len)</code>：同一毫秒内替换同大小文件（复制覆盖很常见）不会失效，导致页码与内容错位。</p>
+  <div class="fix"><b>建议：</b>改 LRU + 容量上限，切换库时 <code>clear()</code>；stamp 增加 <code>content_hash</code> 或 Windows 文件 ID / 采样头尾字节。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 9. settings.json 静默失败 + 非原子写</div>
+  <div class="loc"><code>lib.rs:87-110</code>；参见 HANDOFF §6.3「UTF-8 无 BOM、双反斜杠」</div>
+  <p><code>serde_json::from_str(...).unwrap_or_default()</code>：配置损坏（BOM、手写错、写入中断）时直接回到欢迎页且<b>不给任何提示</b>。<code>fs::write</code> 失败只 <code>eprintln!</code>，<code>open_library</code> 仍返回成功 —— 用户以为切换成功，下次启动却丢了库路径。这个坑已经在交接文档里被记录过，说明确实发生过。</p>
+  <div class="fix"><b>建议：</b>tmp + rename 原子写；读取失败时把错误写入 <code>startup_error</code> 让前端显示"配置损坏，已保留备份，请重新选择库"；写失败时让命令返回错误。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 10. 数据库迁移不是事务，失败会留半迁移库并反复堆积备份</div>
+  <div class="loc"><code>db.rs:135-158 / 308-373 / 282-305</code></div>
+  <p><code>upgrade_schema</code> 连续执行十余条 <code>ALTER TABLE</code> / <code>UPDATE</code> / <code>CREATE INDEX</code> / 回填，全程不在事务里，<code>PRAGMA user_version</code> 最后才写。中途失败 → 数据库处于半升级状态但版本号仍旧；下次启动重跑迁移，还会<b>再生成一份带时间戳的备份</b>（无保留策略，backups 目录无限增长）。</p>
+  <div class="fix"><b>建议：</b>整个迁移包进 <code>conn.transaction()</code>，失败自动回滚；按 version 记录迁移历史；备份只保留最近 N 份并做完整性校验。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 11. 导入不可取消、进度事件无任务隔离、异常会留残留</div>
+  <div class="loc"><code>importer.rs:21-30 / 98-357 / 359</code>、<code>lib.rs:180-213</code></div>
+  <p><code>spawn_blocking</code> 里没有取消标志，拖入几百个大文件只能等；<code>app.emit("import-progress")</code> 全局广播且不带任务 ID，若同时触发两次导入，进度与结果会互相覆盖；<code>.gallery/tmp/&lt;uuid&gt;/*.part</code> 只在正常结束时清理，崩溃/被杀后永久残留。</p>
+  <div class="fix"><b>建议：</b>加 <code>AtomicBool</code> 取消令牌 + 前端"取消导入"按钮；事件带 <code>taskId</code>；启动时清理超过 24h 的 tmp 目录；导入队列化，禁止并发导入。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 12. 导入与主连接并发写，可能触发 database is locked</div>
+  <div class="loc"><code>importer.rs:48-63</code>、<code>db.rs:82</code>、<code>lib.rs:976-993</code></div>
+  <p>导入自己 <code>db::open_library(root)</code> 开了第二条连接，AppState 也常驻一条；导入逐条 <code>insert_archive</code> 自动提交，密集写入配合 <code>busy_timeout = 5000</code> 容易撞锁。同时所有查询被同一把 <code>Mutex&lt;AppInner&gt;</code> 串行化，<code>query_archives</code> 是同步命令、持锁跑完 3 条 SQL（分组 + COUNT + 分页），导入期间 UI 的筛选/翻页会明显排队。Tauri 同步命令默认在主线程执行，进一步放大阻塞感。</p>
+  <div class="fix"><b>建议：</b>导入用单事务分批提交（每 N 条）；查询命令改 <code>async + spawn_blocking</code>；把状态锁拆成 <code>Arc&lt;Mutex&lt;Connection&gt;&gt;</code> 或只读连接池；适当提高 busy_timeout 并对锁错误做重试。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">P1</span> 13. 批量标签逐个 IPC 往返，且中途失败留下半应用状态</div>
+  <div class="loc"><code>DetailDrawer.tsx:328-356</code>（HANDOFF §6.2 亦提及）</div>
+  <p><code>for (const name of names) { await api.addTag(card.id, name) }</code> 串行调用；几十个标签尚可，几百个会逐条等待，且第 N 条失败时前面已写入、UI 只提示一条错误。同类问题还有 <code>LibraryView.tsx:1138</code> 批量删除（并发但无成功/失败明细）。</p>
+  <div class="fix"><b>建议：</b>后端加 <code>add_tags_bulk</code> / <code>delete_archives_bulk</code> 单事务命令，返回成功与失败明细；前端一次提交、失败可整体回滚。</div>
+</div>
+
+<div class="issue i2">
+  <div class="t"><span class="badge b2">P2 · 复核降级</span> 14. 内容安全策略完全关闭 —— 纵深防御缺失，非当前漏洞</div>
+  <div class="loc"><code>src-tauri/tauri.conf.json:24-29</code>、<code>capabilities/default.json:6-10</code></div>
+  <p><code>"csp": null</code> 是为了放行阅读器的 <code>data:</code> 图片。当前代码没有 <code>dangerouslySetInnerHTML</code>（React 默认转义）、没有已知注入点，因此<b>不构成 P1</b>；复核意见成立，本条降为 P2 纵深防御，且不应与命令权限问题混在一节。<b>真正该按 P1 处理的是第十章 B4</b>：Tauri 2 自有命令不受 capability ACL 约束、<code>open_library</code> 只判空、<code>import_paths</code> 无白名单、<code>library_id</code> 未校验就拼路径 —— 这是不需要任何注入前提就成立的权限面问题。</p>
+  <div class="fix"><b>建议：</b>随第 3 步「阅读器数据通道重构」一并收口：改用自定义协议 / <code>asset:</code> 后可禁用 <code>data:</code>，再配置最小 CSP（<code>default-src 'self'; img-src 'self' asset: data:; script-src 'self'</code>）；asset scope 收紧到 <code>$APPCACHE/covers/**</code>；可评估 Isolation 模式。<b>不与 B4 的 ACL 改造捆绑排期。</b></div>
+</div>
+
+<h2>四、可升级点（架构与产品能力）</h2>
+<div class="card">
+<ul>
+  <li><b>阅读器数据通道重构</b>（对应 P1-6）：自定义协议 / 二进制 IPC + 页级磁盘缓存，可同时解决翻页延迟、缩略图解码、内存占用与 CSP 四个问题，是最值得做的一次架构升级。</li>
+  <li><b>结构化错误码</b>：目前所有命令都是 <code>Result&lt;T, String&gt;</code>（<code>lib.rs</code> 全篇）。改用 <code>thiserror</code> 枚举 + serde 错误码，前端才能区分「文件缺失 / 数据库锁 / 参数非法 / 权限不足」并给出针对性恢复动作（重新定位文件、稍后重试、跳转设置）。</li>
+  <li><b>搜索能力升级</b>：<code>library.rs:463-487</code> ≥3 字符走 FTS5 trigram 严格子串短语，1–2 字符走 <code>%LIKE%</code> 全表扫描。实测 trigram：搜「妄想秘話」可命中，但用户加空格写成「妄想 秘話」就搜不到；繁简、错字、同义词、拼音都无容错，且 1–2 字查询随库增大线性变慢。建议按空格拆词做 AND、加 LIKE 兜底、中文分词或拼音索引，并在无结果时给出原因提示。</li>
+  <li><b>维护命令</b>：<code>db.rs:390-409</code> 的 FTS 只在表不存在时 rebuild，缺 <code>fts rebuild / integrity-check</code>；也缺 <code>PRAGMA optimize</code>、WAL checkpoint、VACUUM 与"重建全部封面"等自助修复入口。可在 <code>galleryctl</code> 加 <code>maintain</code> 子命令族。</li>
+  <li><b>单实例 + 窗口状态</b>：HANDOFF §5.4 记录过多实例引发 WebView2 <code>0x8007139F</code>。加 <code>tauri-plugin-single-instance</code>，第二实例聚焦已有窗口并转发拖入路径；同时持久化窗口尺寸/位置（当前 <code>tauri.conf.json</code> 固定 1280×820）。</li>
+  <li><b>发布链路</b>：代码签名（避免 SmartScreen 警告）、<code>tauri-plugin-updater</code> 自动更新、MSI/便携版、校验和，HANDOFF §6.2 已列但未做。</li>
+  <li><b>主题与个性化</b>：<code>App.css:2</code> 固定 <code>color-scheme: dark</code>，没有浅色 / 跟随系统 / 主题切换；快捷键、自动翻页档位（5/8/12 秒）、每页尺寸等也不可配置。长时间看图的用户常需要浅色与自定义节奏。</li>
+  <li><b>格式与元数据</b>：当前只支持 ZIP/CBZ 与 8 种图片扩展名（<code>archive.rs:29-39</code>）。可评估 RAR/7z、AVIF/HEIC/JXL、以及从压缩包内 <code>ComicInfo.xml</code> 读取标题/作者/标签，减少手工录入。</li>
+</ul>
+</div>
+
+<h2>五、可优化点（性能与代码结构）</h2>
+<div class="card">
+<ul>
+  <li><b>深分页与重复 COUNT</b>：<code>library.rs:334 / 692-698 / 751</code> 每次查询都 <code>COUNT(*)</code> + <code>LIMIT ? OFFSET ?</code>。当前 170 本无感，上万本时深页与每次筛选都要全表扫描。建议按排序键做游标分页、缓存 total（筛选条件不变时复用）。</li>
+  <li><b>首屏无代码分割</b>：实测单个 379 KB JS + 69 KB CSS，14 个组件全部静态 import。阅读器、标签中心、回收站、标签导图都是"打开弹层才用"，建议 <code>React.lazy</code> + 动态 import 按界面拆包，冷启动更快。</li>
+  <li><b>巨型文件</b>：<code>App.css</code> 5016 行 / <code>LibraryView.tsx</code> 2833 行 / <code>db.rs</code> 2139 行 / <code>TagCenter.tsx</code> 1382 行。CSS 里 12 处 <code>z-index</code> 分散、只有 4 个 <code>@media</code>（720/860/1120），而窗口 <code>minWidth = 980</code> —— 720/860 两个断点在桌面窗口里永远不会触发，属于死代码。建议按模块拆 CSS、抽自定义 hooks、用 design tokens 统一管理层级与颜色。</li>
+  <li><b>静默忽略返回值过多</b>：<code>importer.rs</code> 里十余处 <code>let _ = fs::remove_file(...)</code>、<code>db.rs:288</code> 的 checkpoint、<code>lib.rs:514</code> 的封面删除。清理失败会积累垃圾且无人知晓，建议至少汇总进导入报告 / 日志。</li>
+  <li><b>版本号三处手工同步</b>：<code>package.json:4</code>、<code>Cargo.toml:3</code>、<code>tauri.conf.json:4</code> 都是 1.0.0，发版容易漏改。建议单一来源 + 构建脚本校验。</li>
+  <li><b>文档与实现不符</b>：<code>docs/AGENT_API.md:33</code> 写「分页命令使用游标」，实际 <code>search --page/--limit</code> 是 OFFSET 分页，只有 <code>tags list --after</code> 才是游标。</li>
+  <li><b>无运行日志</b>：只有零散 <code>eprintln!</code>（<code>lib.rs:56/63</code>、<code>db.rs:301</code>），用户机器上出问题无法追溯。建议文件日志 + 轮转 + 「导出诊断信息」入口。</li>
+</ul>
+</div>
+
+<h2>六、使用手感 / 交互改进点</h2>
+<div class="card">
+<ul>
+  <li><b>破坏性操作没有撤销</b>：<code>LibraryView.tsx:1131/1220</code>、<code>DetailDrawer.tsx:1061</code>、<code>TagCenter.tsx:661/940/1105</code> 一律用「二次点击 + 3200 ms 超时」确认，但删除/合并/彻底删除后没有 Undo。建议 Toast 带「撤销」按钮 + 统一命令栈；<code>purge</code> 前明确显示将影响多少条记录、不可恢复。</li>
+  <li><b>导入缺少可感知的控制</b>（对应 P1-11）：没有取消按钮、没有后台队列、没有逐文件失败明细的筛选；大批量导入时用户只能盯着进度条。建议可最小化到后台、结束再弹汇总。</li>
+  <li><b>空格键与按钮激活冲突</b>：<code>Reader.tsx:545-551</code> 全局把无 Shift 的 <code>Space</code> 映射为下一页并 <code>preventDefault()</code>。焦点落在「书签」「缩略图」等按钮上时按空格无法激活按钮，键盘用户会困惑。建议目标为 <code>button / [role=button]</code> 时让出原生行为。</li>
+  <li><b>嵌套交互元素</b>：<code>ArchiveCard.tsx:64-83</code> 用 <code>&lt;article role="button" tabIndex=0&gt;</code> 包住两个原生 <code>&lt;button&gt;</code>（141-171），靠 <code>onKeyDown stopPropagation</code> 打补丁；读屏与 Tab 顺序容易错乱。建议拆成封面按钮 + 独立信息区。</li>
+  <li><b>Esc 优先级</b>：<code>Reader.tsx:525-529</code> 在输入框焦点检查（531-539）之前直接关闭阅读器，页码输入框里按 Esc 会退出整个阅读器。建议输入框内 Esc 先还原/失焦。</li>
+  <li><b>缺少减少动效支持</b>：<code>App.css</code> 全文 0 处 <code>prefers-reduced-motion</code>，翻页与淡入动画无法被系统无障碍设置关闭。建议统一加 <code>@media (prefers-reduced-motion: reduce)</code> 关闭 transition/animation。</li>
+  <li><b>滚轮节流偏保守</b>：<code>Reader.tsx:653-661</code> 硬编码 480 ms 翻页间隔 + 200 ms 累积重置，高刷新触控板连续滚动会显得"吞输入"。建议改成基于惯性结束的动态阈值，并允许用户在设置里调灵敏度。</li>
+  <li><b>搜索空态信息不足</b>：现有「清除全部」（<code>LibraryView.tsx:2316</code>）做得好，但没有区分「库中无数据 / 筛选过严 / 搜索词不被 FTS 支持」。结合上面搜索升级，给出具体建议（例如"试试去掉空格或更短的关键词"）会明显减少挫败感。</li>
+  <li><b>固定深色主题</b>：<code>App.css:2</code> 仅 <code>color-scheme: dark</code>，没有浅色/跟随系统选项；漫画阅读场景常需要浅色或护眼色。顺带建议对长文本标签、卡片标题补充 <code>title</code> / 高对比度检查。</li>
+  <li><b>无右键上下文菜单</b>：卡片上右键没有任何「打开 / 开始阅读 / 收藏到… / 删除」快捷操作，所有动作都要先 hover 找小按钮或打开抽屉。桌面应用里这是很自然的效率提升点。</li>
+</ul>
+</div>
+
+<h2>七、工程化与仓库卫生</h2>
+<div class="card">
+<ul>
+  <li><b>无 Git 仓库</b>（实测 <code>fatal: not a git repository</code>）：M1–M23 二十多次迭代全靠 <code>docs/logs/</code> 人工记录，没有可回滚的提交历史。建议尽快 <code>git init</code> + 基线提交，之后每个功能一个提交/分支。</li>
+  <li><b>仓库体积隐患</b>：<code>src-tauri/target/</code> 约 13 GB、<code>node_modules/</code> 90 MB、<code>docs/logs/assets/</code> 13 MB。根 <code>.gitignore</code> 未列 <code>src-tauri/target/</code>（虽然 <code>src-tauri/.gitignore</code> 有），也未列 <code>damai-grab/</code>。提交前务必确认不入库构建产物与真实库路径/私人配置。</li>
+  <li><b>无关残留</b>：<code>damai-grab/out/*.png</code>（6.1 MB 的另一个项目的调试截图）、<code>public/tauri.svg</code>、<code>public/vite.svg</code>、<code>src/assets/react.svg</code> 都是脚手架/其它项目遗留，建议移出工程或删除（本次未做任何删除）。</li>
+  <li><b>无质量门禁</b>：没有 ESLint / Prettier、没有前端测试、没有 CI、没有 <code>lint</code> 脚本；<code>cargo clippy</code> 20 条警告（<code>-D warnings</code> 直接失败）、<code>cargo fmt --check</code> 有差异。建议加 <code>npm run lint</code> + <code>cargo fmt --check</code> + <code>cargo clippy -- -D warnings</code> 到提交钩子/CI，先一次性清掉现有警告。</li>
+  <li><b>测试覆盖缺口</b>：12 个测试都在 <code>--lib</code>，覆盖主流程但缺：并发写锁、迁移失败回滚、FTS 特殊字符/空格、超大图片与损坏 ZIP、路径穿越、深分页、CLI 命令、前端交互。建议补边界用例与至少一个 CI 冒烟。</li>
+</ul>
+</div>
+
+<h2>八、建议的推进顺序</h2>
+<table>
+  <tr><th>阶段</th><th>做什么</th><th>为什么先做</th></tr>
+  <tr><td><span class="badge b0">第 0 步</span></td><td><code>git init</code> + 基线提交 + .gitignore / 残留清理</td><td>后面所有重构都要能回滚，这是零成本的安全网</td></tr>
+  <tr><td><span class="badge b0">第 1 步</span></td><td>P0 四项：备份改 <code>VACUUM INTO</code>、去掉 <code>filter_map(Result::ok)</code>、图片解码 Limits、封面原子写</td><td>都是可能导致「静默丢数据 / 直接退出」的问题，改动小、收益最大</td></tr>
+  <tr><td><span class="badge b1">第 2 步</span></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + 批量 IPC</td><td>一次改动同时解决翻页延迟、缩略图卡顿、CSP 与内存占用，手感提升最明显</td></tr>
+  <tr><td><span class="badge b1">第 3 步</span></td><td>默认评分语义、settings/settings 原子写、迁移事务、导入可取消与任务隔离</td><td>消除「用着用着状态不对」的隐性问题</td></tr>
+  <tr><td><span class="badge b2">第 4 步</span></td><td>质量门禁（clippy/fmt/lint/CI）+ 组件与 CSS 拆分 + 代码分割</td><td>为后续长期迭代降低维护成本</td></tr>
+  <tr><td><span class="badge b2">第 5 步</span></td><td>手感打磨（撤销、右键菜单、主题、reduced-motion、快捷键冲突）+ 搜索升级 + 发布链路</td><td>从「能用」到「好用」，并补齐 1.0 之后的升级路径</td></tr>
+</table>
+
+<h2>九、需要你确认的事项</h2>
+<div class="card">
+<ul>
+  <li>默认评分 60 是否是有意的产品设定？改动会牵涉数据迁移与既有筛选习惯，需你拍板。</li>
+  <li>是否同意 <code>git init</code> 并清理 <code>damai-grab/</code> 与脚手架 SVG？本次审查<b>没有删除任何文件</b>。</li>
+  <li>是否需要在改代码前，先只备份元数据 <code>.gallery/library.db</code>（不复制原始画集）？按 HANDOFF 约束，全量扫描 <code>F:\Hthings\BENZI</code> 需你明确启动。</li>
+  <li>正式版进程（PID 46516）仍在运行；如需重新打包，需先关闭它，本次未动。</li>
+</ul>
+</div>
+
+<h2 id="deep">十、二次核查 · 后端专项深度补充</h2>
+<div class="card">
+以下为初稿后对 <code>src-tauri/src</code> 全部 Rust 文件逐行复核的<b>增量发现</b>，已逐条回查源码确认，未包含在前面 P0/P1 清单中。同时先澄清两点<b>已防住、不必修</b>的地方，避免误报：SQL 注入基本防住（<code>sort/direction/tag_mode/read_statuses</code> 均走白名单或固定片段，<code>search</code> 两分支都参数化，FTS5 只需转义 <code>"</code>、LIKE 的 <code>escape_like</code> 顺序正确）；ZIP Slip 不成立（图片只按 <code>by_index</code> 读进内存，从不把 <code>entry.name()</code> 当落盘路径，<code>join_rel</code> 显式拒绝 <code>..</code>）；哈希是 1 MB 缓冲流式读取，不会把整文件载入内存。
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> B1. <code>galleryctl search</code> 返回的 <code>coverPath</code> 是裸文件名，AI 接口数据不可用</div>
+  <div class="loc"><code>bin/galleryctl.rs:272-276</code> → <code>library.rs:768-773</code></div>
+  <p><code>query_archives(&library.conn, &library.root, Path::new(""), &amp;ArchiveQuery{...})</code> 把 <code>covers_dir</code> 传成空路径，于是 <code>covers_dir.join(key)</code> 只得到 <code>"xxxxx.jpg"</code>，没有目录前缀。而 <code>Scan</code>/<code>Import</code> 分支用的是 <code>default_covers_dir()</code>（307-340 行）。<code>AGENT_API.md</code> 把 <code>search</code> 作为 AI 工作流主力命令，调用方拿到的封面路径无法直接打开。</p>
+  <div class="fix"><b>建议：</b>传 <code>default_covers_dir(&amp;library)?</code>；并把 covers 目录解析抽成共享函数，与桌面端 <code>paths.rs:8-15</code> 的 <code>app_cache_dir()</code> 统一（目前 CLI 用 <code>%LOCALAPPDATA%/com.archivegallery.desktop/covers/&lt;id&gt;</code> 硬编码拼接，两处规则独立，缺一致性校验）。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> B2. 多连接 + 逐条 autocommit + 无 busy 重试，产品承诺的「CLI 与桌面可同时用」未兑现</div>
+  <div class="loc"><code>lib.rs:202-237</code>、<code>importer.rs:48 / 307</code>、<code>library.rs:30 / 270</code>、<code>db.rs:82</code>、<code>AGENT_API.md:175</code></div>
+  <p>桌面 <code>AppInner</code> 常驻一条连接；<code>import_blocking</code>/<code>scan_blocking</code> 内部<b>再次</b> <code>db::open_library()</code> 开第二条；CLI 又是第三个进程，且 CLI 的 <code>Scan</code>/<code>Import</code> 会在自己进程内再开一条。每个文件的写都是独立 autocommit（<code>insert_archive</code> 单个 execute、<code>set_missing</code> 逐个 UPDATE），只设了 <code>busy_timeout = 5000</code> 且无重试；全项目仅迁移备份处做过一次 checkpoint。</p>
+  <p><b>后果：</b>并发导入时 5 秒后返回 <code>database is locked</code>，错误被转成字符串塞进 <code>errors</code>，表现为「部分文件导入失败」；每条事务都 fsync WAL 并触发 3 个 FTS 触发器，千级文件导入时 WAL 膨胀、速度骤降。文档明确写了「桌面应用与 CLI 可以同时使用」，这是实现与承诺的差距。</p>
+  <div class="fix"><b>建议：</b>导入/扫描复用传入的连接（去掉内部 <code>open_library</code>）；整批包进显式事务或每 200 文件分批 commit；加「正在导入/扫描」互斥标志；<code>busy_timeout</code> 提到 30s 并对 <code>SQLITE_BUSY</code> 指数退避；设 <code>wal_autocheckpoint</code> 并在批次间 <code>wal_checkpoint(PASSIVE)</code>。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> B3. 每次开库都执行写 schema 的 DDL，并发启动会抢写锁</div>
+  <div class="loc"><code>db.rs:85 → 135-158 → 390-409</code></div>
+  <p><code>migrate()</code> 每次 <code>open_library</code> 都调用 <code>ensure_full_text()</code>，而后者<b>无条件</b> <code>execute_batch(FULL_TEXT_SCHEMA)</code>（含 <code>CREATE VIRTUAL TABLE</code> + 3 个 <code>CREATE TRIGGER</code>）。即使带 <code>IF NOT EXISTS</code>，这些仍是写 <code>sqlite_master</code> 的 DDL。叠加 B2 的多进程/多连接，桌面启动、CLI 启动、导入任务同时打开库时可能随机 <code>database is locked</code>，导致启动失败。另外 FTS 表已存在但内容为空或损坏时不会 rebuild（只有 <code>existed == 0</code> 才重建），搜索会静默失效。</p>
+  <div class="fix"><b>建议：</b>先查 <code>sqlite_master</code>，仅当表/触发器确实缺失时才执行 DDL；启动时做一次 <code>INSERT INTO archives_fts(archives_fts) VALUES('integrity-check')</code>，失败则 rebuild。<b>同时修正 P0-1 的备份方案与迁移事务化（见 P1-10）。</b></div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> B4. 自有命令无 ACL + 路径校验缺失（<b>与 CSP 解耦，独立按 P1 处理</b>）</div>
+  <div class="loc"><code>tauri.conf.json:24-30</code>、<code>capabilities/default.json:6-10</code>、<code>lib.rs:148-213 / 1005-1053</code>、<code>db.rs:108-133</code>、<code>archive.rs:186-188</code></div>
+  <p><b>按复核意见与第三章第 14 条（CSP）拆开：这不是 CSP 的「深化」，而是一个无需注入前提即可成立的独立权限面问题。</b>Tauri 2 中自己写的 <code>#[tauri::command]</code> <b>不受 capabilities 权限约束</b>，40+ 命令（含 <code>purge_archive</code>/<code>purge_tag</code>/<code>purge_collection</code>/<code>open_library</code>/<code>import_paths</code>）前端可无条件调用。<code>open_library(path)</code> 只判空、<code>import_paths(paths)</code> 无路径白名单；<code>library.json</code> 的 <code>library_id</code> 直接 <code>serde_json::from_str</code> 读入后拼进 <code>cache_dir.join("covers").join(library_id)</code> 并 <code>create_dir_all</code>。</p>
+  <p><b>后果：</b>webview 内任意脚本可换库、导入任意路径、彻底删除数据；被篡改的 <code>library_id = "../../..."</code> 可让封面写出 <code>$APPCACHE</code> 之外。<code>purge_archive</code>（<code>lib.rs:511-516</code>）还直接 <code>remove_file(covers_dir.join(key))</code>，既不检查是否有其它记录共用同一 <code>cover_key</code>，也不校验 key 格式。</p>
+  <div class="fix"><b>建议（按复核意见拆成四项，均与连接层同在 <code>lib.rs</code>）：</b>① <b>命令边界</b>——为 <code>purge_*</code> / <code>open_library</code> / <code>import_paths</code> 定义自定义 permission 并按窗口授权，路径做规范化与库目录白名单校验；② <b>数据校验</b>——<code>library.json.library_id</code> 读入时校验为 UUID / 安全字符（拒绝 <code>..</code>、分隔符、绝对前缀），版本状态只认 <code>PRAGMA user_version</code>；③ <b>删封面</b>——先 <code>SELECT COUNT(*) FROM archives WHERE cover_key = ?</code> 确认无其它引用，并校验 key 为 <code>hex + .jpg</code>；④ asset scope 收紧到 <code>$APPCACHE/covers/**</code>。<b>CSP 属纵深防御、已降为 P2（见第三章第 14 条修订），随阅读器通道重构收口，不列在本条范围。</b></div>
+</div>
+
+<h3>其余补充（P2，均已回查源码）</h3>
+<div class="card">
+<ul>
+  <li><b>图片上限的精确事实</b>（深化 P0-3）：已核对 <code>image-0.25.10</code> 源码，<code>load_from_memory</code> 内部是 <code>ImageReader::with_guessed_format()?.decode()</code>，用的是 <code>Limits::default()</code> —— <code>max_alloc = 512MB</code>、<b>宽高无上限</b>，且便捷函数无法传自定义 Limits。修复必须换成 <code>ImageReader::new(Cursor::new(bytes)).set_limits(...)</code> 并先读 <code>dimensions()</code> 校验。</li>
+  <li><code>db.rs:79-81</code> <b>WAL 切换结果未校验</b>：SQLite 无法切换时返回当前模式字符串而不报错，代码丢弃返回值；若实际跑在 rollback 模式，后续所有 WAL 并发假设与 checkpoint 逻辑全部失效。应断言返回值为 <code>"wal"</code>。</li>
+  <li><b>FTS 健壮性</b>（<code>library.rs:463-486</code>）：搜索词无长度上限，trigram 下超长短语展开成海量 AND 链；FTS 报错不会降级到 LIKE，而是让整页查询失败；同一个含 FTS 子查询的 <code>filter</code> 在分组、COUNT、主查询里重复执行 3 次。建议限长 128 字符、剔除控制字符、失败回退 LIKE。</li>
+  <li><b>索引缺口</b>（<code>db.rs:184-192</code>）：<code>page_count</code>、<code>last_read_at</code> 排序，<code>last_page/page_count</code> 阅读状态过滤，以及 <code>deleted_at IS NULL</code> 都无可用索引；<code>tag_graph</code>（<code>db.rs:1729-1762</code>）自连接是 O(k²)，单本挂 k 个标签就产生 k(k-1)/2 行中间结果，<code>LIMIT</code> 在聚合之后才生效。建议补复合索引并给共现计算加前置过滤。</li>
+  <li><b>路径保真问题</b>：<code>fsutil.rs:143</code> 用 <code>to_string_lossy()</code> 把 <code>OsStr</code> 存成 DB 的 <code>rel_path</code>，非 UTF-8 文件名导入后永远打不开；<code>importer.rs:538-544</code> 的 <code>relative_of</code> 在词法比较失败后改用 <code>canonicalize</code>，会把符号链接解析到真实目标、误判 <code>source_in_library = true</code> 从而走进「不复制」分支。建议 DB 存原始字节、用 <code>symlink_metadata</code> 显式拒绝链接。</li>
+  <li><b>库目录被移动后无自愈</b>：<code>source.missing</code> 只在 <code>scan_with_covers</code> 末尾更新（<code>library.rs:268-276</code>），<code>AppInner</code> 缓存的 root 不会重验；移动库后阅读器报底层 IO 错误、封面指向旧路径。建议读取失败时自动 <code>set_missing(true)</code> 并给友好提示，启动时校验库可访问性。</li>
+  <li><b>细节口径不一致</b>：<code>library.rs:510-536</code> 的 <code>preferred_tag_order</code> 用的是<b>未过滤</b>的原始 <code>query.tag_ids</code>（过滤后的局部变量在 368-375 行），与筛选口径不一致且无数量上限；<code>importer.rs:84</code> 把 <code>collect_candidates</code> 的错误计入 <code>failed</code> 但 <code>total</code> 不含它们，会出现 <code>failed &gt; total</code>；加入收藏夹失败只 push <code>errors</code> 不增 <code>failed</code>；<code>unique_target</code> 线性探测最多 1 万次、每轮查一次 DB，批量同名文件是 O(n²)。</li>
+  <li><b>测试缺口</b>（<code>tests.rs</code> 12 个用例）：已覆盖导入/扫描/查询/分组/迁移 v1→v7/回收站等主流程，但缺并发写与 <code>database is locked</code>、v2–v6 逐级迁移与中途失败回滚、备份一致性、路径穿越与非 UTF-8、FTS 引号与运算符与超长词、深翻页与万级文件、超大/损坏 ZIP、导入中途失败与孤儿文件。建议按缺口补参数化用例，尤其「两个 Connection 同时写」与「恶意 ZIP」。</li>
+</ul>
+</div>
+
+<h3>修订后的推进顺序（覆盖第八章）</h3>
+<table>
+  <tr><th>顺序</th><th>修订</th></tr>
+  <tr><td>0</td><td>不变：<code>git init</code> + 基线提交 + .gitignore / 残留清理</td></tr>
+  <tr><td>1</td><td>不变：P0 四项（备份一致性、去掉静默吞错、图片 Limits、封面原子写）——<b>内部顺序按 12.5 改为 1a 静默丢数据两项 → 1b 崩溃与破图两项</b></td></tr>
+  <tr><td><b>2（新增，与原 3 合并）</b></td><td><b>「连接与任务层」一次重构</b>：统一连接 + 导入/扫描批量事务 + busy 重试 + WAL checkpoint + 命令 async 化 + <code>ensure_full_text</code> 去掉每次 DDL（B2 / B3 / P1-12 / S1）。这是「部分导入失败 / 启动锁冲突 / UI 假死」的共同根因，宜一次做完。<br><b>【复核修订】2 的尾部追加 B4：命令 ACL + 路径 / <code>library_id</code> / <code>cover_key</code> 校验</b> —— 两者都在改 <code>lib.rs</code>，分开做等于同一批代码改两遍</td></tr>
+  <tr><td>3</td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + 批量 IPC；<b>CSP 收口随本步一并做（已降 P2）</b></td></tr>
+  <tr><td>4</td><td>默认评分语义、settings 原子写、迁移事务化、导入可取消、<b>CLI coverPath 修复</b>（<del>CSP 与命令 ACL 已移出：CSP → 第 3 步，ACL → 第 2 步尾</del>）</td></tr>
+  <tr><td>5</td><td>不变：质量门禁 + 拆分 + 手感打磨 + 搜索升级 + 发布链路</td></tr>
+</table>
+
+<h2 id="ux">十一、二次核查 · 前端交互与手感专项</h2>
+<div class="card">
+对 <code>src/</code> 全部 20 个文件与 5016 行 CSS 逐行复核的增量结果，均已回查源码确认。<b>先说亮点，重构时不要回退</b>：<code>loadPage</code> 的 <code>requestIdRef + queryTokenRef</code> 双令牌竞态防护、DetailDrawer 评分的 <code>saveSeqRef</code> + 卸载 flush、搜索 320 ms 防抖、缩略图 <code>IntersectionObserver</code> 懒加载、<code>preloadCoverImages</code> 的 900 ms <code>Promise.race</code> 超时兜底——这些都做得扎实。问题集中在<b>模态/键盘体系</b>与<b>大列表性能</b>两块。
+</div>
+
+<div class="issue i0">
+  <div class="t"><span class="badge b0">新增 P0</span> F1. 备注草稿未保存时按 Esc 或点遮罩，内容静默丢失</div>
+  <div class="loc"><code>DetailDrawer.tsx:240-246</code>、<code>:493</code>、<code>:503</code>、<code>:628-645</code></div>
+  <p>Esc 监听是无条件 <code>onClose()</code>，遮罩是 <code>onClick={onClose}</code>；代码里<b>已经算出</b> <code>noteDirty = noteDraft.trim() !== (card.note ?? "").trim()</code>，却只用它控制「保存备注」按钮的 disabled，<b>没有用于关闭拦截</b>。备注是手动保存（Ctrl+Enter / 按钮），不像评分那样有卸载 flush。用户写了一段简介后习惯性按 Esc 或点到遮罩，草稿既没保存也没有任何提示——这是<b>用户输入的真实丢失</b>，比本报告其它手感问题都严重。</p>
+  <p>更不一致的是：只有 <code>tag-input</code>(:724-730) 与批量 textarea(:779-785) 做了 <code>stopPropagation</code>，备注框、评分数字框、标签搜索框、新建收藏夹输入框都没有。</p>
+  <div class="fix"><b>建议：</b>统一封装 <code>useCloseGuard(dirty)</code>，关闭前若 <code>noteDirty</code> 则弹「保存 / 放弃 / 取消」确认或直接自动 <code>saveNote()</code>；遮罩与 Esc 走同一个关闭入口；Esc 监听检查 <code>event.defaultPrevented</code>，只由栈顶模态响应。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> F2. 键盘与模态体系：7 处各自监听 Esc、无焦点陷阱，键盘「进得去出不来」</div>
+  <div class="loc"><code>Reader.tsx:523-596</code>、<code>LibraryView.tsx:531-551 / 1369-1380 / 1400-1416 / 1432</code>、<code>DetailDrawer.tsx:244</code>、<code>TagCenter.tsx:97</code>、<code>TrashCenter.tsx:60</code>、<code>CollectionNameDialog.tsx:38</code>、<code>CollectionEditor.tsx:74</code></div>
+  <p><b>(a) 空格劫持</b>：<code>Reader.tsx:531-539</code> 的排除列表只有 <code>INPUT / TEXTAREA / isContentEditable</code>，<b>没有 BUTTON</b>；无 Shift 的空格被映射为 <code>goNext()</code> 并 <code>preventDefault()</code>。键盘用户 Tab 到「关闭阅读器」「缩略图」「上一页/下一页」按钮后按空格，按钮无法激活、反而翻页——<code>aria-modal="true"</code> 的对话框连关闭都做不到。<code>LibraryView.tsx:1407-1416</code> 本来就有更完整的写法（含 <code>closest("[role='dialog']")</code>），同一应用两套标准。</p>
+  <p><b>(b) 修饰键被吞</b>：<code>Reader.tsx:545-581</code> 的 <code>d / b / l / t</code> 用 <code>event.key.toLowerCase()</code> 判断后 <code>preventDefault()</code>，全程不检查 <code>ctrlKey/metaKey/altKey</code> → <code>Ctrl+B / Ctrl+L / Ctrl+T / Ctrl+D</code> 都会切换面板并阻止宿主默认行为；而 <code>LibraryView.tsx:1404</code> 明确排除了所有修饰键。</p>
+  <p><b>(c) 无模态栈</b>：7 处分别注册在 <code>window</code> 或 <code>document</code>，全部无条件 <code>onClose()</code>、无一处检查 <code>defaultPrevented</code>。<code>TagCenter</code> 只能靠 <code>if (graph) setGraph(null)</code> 手工模拟层级；<code>TagGraph</code> 声明了 <code>aria-modal</code> 却没有 Esc。真实叠加场景（阅读中拖文件导入）：<code>ImportOverlay</code>(z-50) 被 <code>Reader</code>(z-55) 盖住，进度浮层既看不见也没有 Esc。</p>
+  <p><b>(d) 浮层进得去出不来</b>：筛选/标签 popover 只靠 <code>document.mousedown</code> 点外部关闭，<b>没有 Esc、没有 focusout</b>，触发按钮缺 <code>aria-expanded/aria-haspopup/aria-controls</code>；而 <code>overlayOpen</code>(:1369-1380) 把这两个轻量浮层与全屏模态一锅烩，导致 <code>handleKeyDown</code>(:1403) 在浮层打开时直接 return —— <b>方向键也一起失效</b>。</p>
+  <p><b>(e) 无焦点管理</b>：全项目只有 <code>CollectionNameDialog.tsx:30-32</code> 做了打开聚焦，<b>没有一处</b> Tab 循环约束或关闭后焦点恢复。Reader 打开时焦点仍留在背景卡片上，Tab 会走进被遮挡的主界面。</p>
+  <div class="fix"><b>建议：</b>做一个统一 <code>&lt;Modal&gt;</code> 基座（打开聚焦首个元素、Tab/Shift+Tab 循环、背景 <code>inert</code>、卸载恢复焦点快照）+ 全局单一 keydown 按栈顶分发 Esc；Reader 快捷键排除 <code>button, a, [role='button'], select</code> 与所有修饰键；<code>overlayOpen</code> 拆成「阻断分页键的全屏模态」与「不阻断的 popover」两类。这一组改动能一次消掉 7 处重复监听与全部键盘不可达问题。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> F3. 大列表与换页：滚动模式无限累积、0 处 memo、换页最多白等 900 ms、三套封面预载</div>
+  <div class="loc"><code>LibraryView.tsx:162-197 / 766-780 / 789-805 / 2473-2552 / 2680-2693</code>、<code>ArchiveCard.tsx</code>、<code>App.css:898-923</code></div>
+  <p><b>(a) 换页被预载阻塞</b>：<code>loadPage</code> 在查询已返回后、<code>commitPage</code> 之前 <code>await preloadCoverImages(result.items)</code>（:767-768），要等全部封面 <code>onload + decode</code> 或 900 ms 超时才提交新页；首屏(<code>itemsRef.length === 0</code>)与缓存命中路径不等，造成<b>命中缓存与未命中的手感不一致</b>。M19 追求的「无闪烁换页」是以每次翻页最多 1 秒白等换来的。</p>
+  <p><b>(b) 无窗口化</b>：滚动模式 <code>setItems(prev =&gt; [...prev, ...result.items])</code> 无限追加，渲染是全量 <code>groups.map → items.map</code>；全项目 <code>React.memo</code> 检索为 <b>0 处</b>，<code>selectedIds.includes(card.id)</code> 对每张卡片是 O(n)，勾选一次触发所有卡片重渲染。上千本时 DOM 与内存都会失控。</p>
+  <p><b>(c) 三套封面预载并存</b>：<code>preloadCoverImages</code> 的 <code>new Image()</code>、<code>.cover-warm</code> 常驻最多 128 张 <code>loading="eager" decoding="sync"</code> 的隐藏 <code>&lt;img&gt;</code>（CSS 注释坦承「保持位图解码常驻」）、卡片自身 <code>eager</code> —— 重复解码、常驻内存，还与 <code>trimPageCache</code> 的淘汰目标冲突。</p>
+  <div class="fix"><b>建议：</b>先 <code>commitPage</code> 立即渲染（已有 <code>onError</code> 占位可容忍图片迟到），预载转后台；<code>ArchiveCard</code> 加 <code>React.memo</code> + <code>useCallback</code> 稳定回调；滚动模式接入 <code>@tanstack/react-virtual</code> / Virtuoso grouped 并限制 <code>items</code> 上限；只保留一套预载机制，去掉隐藏 <code>&lt;img&gt;</code> 农场。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> F4. 回收站三个「彻底删除」漏调 <code>onChanged()</code>，主库状态不同步</div>
+  <div class="loc"><code>TrashCenter.tsx:96-109 / 126-139 / 156-169</code>（对比 <code>:76-94 / 111-124 / 141-154</code>）</div>
+  <p>三个 <code>purge*</code> 都是 <code>await api.purgeXxx(...); await load(); onNotify(...)</code>，只刷新回收站自己；而三个 <code>restore*</code> 都带 <code>await onChanged()</code>。<code>TagCenter.tsx:313-315</code> 的 <code>purgeTag</code> 也是带 <code>onChanged()</code> 的 —— 行为不一致。后果：彻底删除后主画廊的 <code>archiveCount</code>、标签列表、收藏夹列表不刷新，直到用户手动切库或重开。</p>
+  <div class="fix"><b>建议：</b>三个 purge 统一补 <code>await onChanged()</code>，或把 <code>load + onChanged</code> 收进 <code>afterTrashMutation()</code>。这是纯逻辑改动、可立即修。</div>
+</div>
+
+<div class="issue i1">
+  <div class="t"><span class="badge b1">新增 P1</span> F5. Toast 计时器被内联 <code>onClose</code> 无限重启，且 id 用毫秒时间戳会冲突</div>
+  <div class="loc"><code>Toast.tsx:17-21</code>、<code>LibraryView.tsx:466-468 / 2814</code></div>
+  <p><code>useEffect(..., [toast.id, toast.kind, onClose])</code> 依赖了 <code>onClose</code>，而调用处是 <code>onClose={() =&gt; setToast(null)}</code> 内联箭头函数 —— <code>LibraryView</code> 重渲染极频繁，Toast 显示期间任何 state 变化都会清零重计时，提示可能长时间不消失。同时 <code>notify</code> 用 <code>id: Date.now()</code>，同毫秒两条通知 id 相同 → effect 不重启、新消息沿用旧倒计时提前消失。错误 Toast 还用了 <code>role="status"</code>（polite），应为 <code>role="alert"</code>。</p>
+  <div class="fix"><b>建议：</b><code>onClose</code> 用 <code>useCallback</code> 稳定化；<code>id</code> 改递增 <code>useRef</code> 计数器；Toast 内部用 ref 记录首次挂载时间做绝对时限。</div>
+</div>
+
+<h3>其余补充（P2，均已回查源码）</h3>
+<div class="card">
+<ul>
+  <li><b>破坏性操作模式重复 7 处</b>（<code>LibraryView.tsx:1127/1216</code>、<code>TagCenter.tsx:659/940/1105</code>、<code>DetailDrawer.tsx:1057</code>、<code>TrashCenter.tsx:64</code>）：3.2 秒二次点击 + <code>setTimeout</code>，多数<b>没有 cleanup</b>（组件卸载后仍 setState），确认态按钮 <code>aria-label</code> 固定、读屏用户听不到「需要再点一次」。<code>purge</code> 标题写着「不可恢复」却只有二次点击，没有列出受影响数量。建议抽 <code>useConfirmAction</code> + 统一 <code>&lt;ConfirmDialog role="alertdialog"&gt;</code>，可恢复操作在 Toast 上给「撤销」（后端已有 <code>restore*</code> API）。</li>
+  <li><b>批量 IPC 三处风格不一</b>：<code>LibraryView.tsx:1138</code> 并行 N 次 <code>deleteArchive</code>、<code>TagCenter.tsx:274-280</code> 串行 N 次 <code>deleteTag</code>、<code>DetailDrawer.tsx:328-355</code> 循环里 <code>addTag + setTags + listTags</code>（每次循环都重渲染）。后端已有 <code>add_archives_to_collection(ids[])</code> / <code>merge_tags(ids[])</code> 的批量风格，建议补 <code>delete_archives(ids[])</code> / <code>add_tags(archiveId, names[])</code>。</li>
+  <li><b>状态与错误态收口</b>：<code>App.tsx:15/78</code> 的 <code>error</code> 只传给 <code>&lt;Welcome&gt;</code>，进入库阶段后 <code>refreshLibrary</code> 的错误写进 state 却无人消费，两层错误体系并存；<code>Welcome.tsx:70-83</code> 明明显示了「上次的库：路径」，唯一操作却仍是「选择画廊库目录」，而 <code>api.openLibrary(path)</code> 已存在 —— 加一个「重新打开上次的库」主按钮即可。</li>
+  <li><b>「浏览历史」名不副实</b>（<code>LibraryView.tsx:65-72 / 341-403</code>）：<code>NavSnapshot</code> 只存 6 个字段（收藏夹 + 模态开关），不记录 <code>page / sort / search / tagIds / groupBy</code>；翻 10 页再改排序，点「后退」毫无反应。<code>applyNavSnapshot</code> 还会原样恢复 <code>selected</code>，而该画集可能已被移入回收站。建议把查询态纳入快照或改名「面板历史」，恢复时校验 id 仍存在。</li>
+  <li><b>交互一致性</b>：自动翻页到末页<b>静默循环回第 1 页</b>（<code>LibraryView.tsx:1516</code>）且无全局播放指示；滚轮翻页逻辑在 <code>LibraryView.tsx:1436-1503</code> 与 <code>Reader.tsx:598-672</code> 逐行复制，阈值却一个 32、一个 40；分页提示写「滚轮上下左右翻页」（<code>:2599-2601</code>），实际要求滚到顶/底边界才触发，用户照提示操作无反应。</li>
+  <li><b>缩略图侧栏</b>（<code>Reader.tsx:919-928</code>）一次性创建 <code>pageCount</code> 个按钮节点 + observer（图片虽懒加载），几百页的本子就是几百个 button；<code>onSelect={goTo}</code> 每次渲染新引用、<code>ReaderThumb</code> 无 memo，侧栏整体重渲染。</li>
+  <li><b>可维护性</b>：<code>LibraryView.tsx</code> 单组件 52 处 <code>useState</code>、2833 行，一个 <code>overlayOpen</code> 布尔串联 12 种状态（直接导致 F2-d 的键盘失效）；魔法数字散落（320/480/40/32/3200/700/1600/900/80/60…）；硬编码中文文案内联 JSX 无 i18n。</li>
+  <li><b>视觉与无障碍细节</b>：<code>App.css:12</code> <code>--faint #63625f</code> 对 <code>--bg #0b0c0f</code> 约 <b>3.4:1</b>，低于 WCAG AA 4.5:1，却用于 10px 的 <code>.eyebrow</code> 等大量辅助文字；约 30 处 transition/animation 但 0 处 <code>prefers-reduced-motion</code>；12 个散落 z-index 魔法值；720/860 断点在 <code>minWidth=980</code> 下永不触发（约 90 行死代码）；980px 下单排塞 12+ 顶栏控件会折成 2–3 行；全项目 <code>aria-haspopup/aria-controls/role="progressbar"/aria-busy</code> 均为 0 处。</li>
+  <li><b>边界误判</b>：<code>isSupportedDropPath</code>（<code>LibraryView.tsx:156-160</code>）用「文件名是否含点」判断文件夹，名为 <code>comics.v2</code> 的目录会被拒绝拖入；<code>.archive-quick</code> 默认 <code>opacity:0</code> 仅 hover/focus 显示，触屏设备无 hover 时「直接阅读 / 收藏」两个按钮基本不可达。建议用 Tauri 侧 <code>is_dir</code> 判断，并给触屏常显或补右键菜单。</li>
+  <li><b>小瑕疵</b>：<code>Reader.tsx:230</code> 大括号后同行（疑似合并残留）；筛选变化时 <code>setSelectedIds([])</code> 但不退出 <code>selectionMode</code>，用户停在「已选 0 个」；阅读进度 700 ms 防抖写与卸载 cleanup 各写一次，快速翻页关闭可能重复 IPC。</li>
+</ul>
+</div>
+
+<h3>前端侧修订后的优先序（覆盖第八章、补第十章）</h3>
+<table>
+  <tr><th>顺序</th><th>修订</th></tr>
+  <tr><td><b>1（提到最前，前端并行线）</b></td><td><b>【复核修订】F1 单独提前</b>：它是唯一会真实丢用户输入的问题，且<b>与 F2 的模态基座是同一处改动</b>（同一个 Esc 分发 / 关闭入口），必须在同一次提交里落地，不要拆成两次。先做 <code>useCloseGuard(noteDirty)</code> 拦住 Esc 与遮罩，再做统一 <code>&lt;Modal&gt;</code> 基座（焦点陷阱/恢复、模态栈、单一 Esc 分发）+ Reader 快捷键排除 BUTTON 与修饰键 + popover 补 Esc。纯前端、无数据迁移风险，与后端第 1 步并行</td></tr>
+  <tr><td>2</td><td>P0 后端四项（先 1a 静默丢数据、后 1b 崩溃与破图）+ 连接与任务层重构（第十章）<b>；尾部一并做 B4 命令 ACL 与路径校验</b></td></tr>
+  <tr><td>3</td><td><b>大列表性能三件套</b>（F3）：<code>commitPage</code> 前移、<code>ArchiveCard</code> 加 memo、滚动模式虚拟列表、清理隐藏图片农场；随后阅读器数据通道重构</td></tr>
+  <tr><td>4</td><td>F4（purge 状态同步）、F5（Toast 计时）、批量 IPC、<code>useConfirmAction</code> + 撤销 Toast、<code>App.error</code> 可见化、Welcome「打开上次的库」</td></tr>
+  <tr><td>5</td><td>状态拆分（<code>useArchiveQuery</code> / <code>useOverlays</code>）、CSS token 化、断点清理、对比度与 reduced-motion、ARIA 语义、i18n</td></tr>
+</table>
+<div class="note" style="margin-top:12px"><b>重构警告：</b>拆 <code>LibraryView</code> 时务必把 <code>requestIdRef + queryTokenRef</code> 竞态防护、<code>saveSeqRef</code> 评分 flush、320 ms 搜索防抖、缩略图 <code>IntersectionObserver</code> 原样迁到 <code>useArchiveQuery</code> / <code>useReaderPages</code>，不要回退这些已有亮点。</div>
+
+<h2 id="recheck">十二、三次复核 · 覆盖补遗、分级修订与验证边界</h2>
+<div class="card">
+你逐条抽查源码后给出的复核意见，本章逐项落地。<b>先承认一个覆盖缺陷</b>：初稿自称「全面」，后端专项也写了「<code>src-tauri/src</code> 全部 Rust 文件逐行复核」，但实际漏了 <code>translate.rs</code> 与 <code>models.rs</code> —— 前者是标签<b>自动</b>翻译的唯一来源，后者是所有 IPC 数据契约的定义处。本轮补审这两个文件，把「全面」改成可核对的覆盖清单；同时按你的意见调整严重度、拆分 CSP 与命令 ACL、修订推进顺序，并显式标注「哪些是实测、哪些是推断」。
+</div>
+
+<h3>12.1 文件覆盖矩阵</h3>
+<table>
+  <tr><th>范围</th><th>文件</th><th>前两轮</th><th>本轮</th></tr>
+  <tr><td>后端 Rust</td><td>13 个 <code>.rs</code>：<code>db / lib / library / importer / reader / archive / fsutil / paths / models / translate / tests / main / bin/galleryctl</code></td><td>11 个逐文件审查</td><td class="fail">补 <code>translate.rs</code>（131 行）、<code>models.rs</code>（231 行）</td></tr>
+  <tr><td>前端</td><td>22 个文件（20 个逻辑文件 + <code>vite-env.d.ts</code> / <code>assets/react.svg</code> 脚手架），含 5016 行 <code>App.css</code></td><td>已全部覆盖（第十一章）</td><td>补核 <code>types.ts</code> ↔ <code>models.rs</code> 契约</td></tr>
+  <tr><td>配置与文档</td><td><code>tauri.conf.json</code>、<code>capabilities/default.json</code>、<code>Cargo.toml</code>、<code>package.json</code>、<code>tsconfig.json</code>、两个 <code>.gitignore</code>、README / HANDOFF / WORKLOG / AGENT_API</td><td>已读</td><td>—</td></tr>
+  <tr><td>测试与产物</td><td><code>tests.rs</code> 12 个用例、<code>dist/</code> 产物、进程状态</td><td>已跑 / 已看</td><td>未复跑（见 12.4）</td></tr>
+</table>
+<div class="note" style="margin-top:10px"><code>main.rs</code> 仅 6 行（Windows release 隐藏控制台 + 调 <code>run()</code>），无逻辑；真正的遗漏就是 <code>translate.rs</code> 与 <code>models.rs</code>。子代理报告里「全部 <code>.rs</code> 逐行复核」的口径过宽，本报告沿用了它，是初稿表述不严谨。</div>
+
+<h3>12.2 补遗 T1 · <code>translate.rs</code>：标签自动翻译的唯一来源，实测覆盖率</h3>
+<div class="issue i2">
+  <div class="t"><span class="badge b2">新增 P2</span> T1. 136 个硬编码词条、整串精确匹配，任意多词组合 0 命中</div>
+  <div class="loc"><code>translate.rs:1-131</code> → <code>db.rs:1027</code>（新建标签）、<code>db.rs:427-454</code>（迁移 backfill）、<code>library.rs:545</code>（显示层）、<code>bin/galleryctl.rs:361-454</code>（CLI 人工翻译）</div>
+  <p><code>translate_tag()</code> 把输入做 <code>to_ascii_lowercase</code> + <code>_</code>/<code>-</code> → 空格 + <code>split_whitespace().join(" ")</code> 归一化后，<b>整串精确匹配</b>一个写死在 Rust 源码里的 <code>match</code> 表：共 <b>136 个键 / 118 个不同译文 / 仅 12 个多词键</b>。它是<b>自动批量翻译</b>的唯一来源（人工可经 UI 的 <code>setTagTranslation</code> 或 CLI <code>tags translate</code> 逐条补，但那不是自动路径）。</p>
+  <p>复刻归一化逻辑跑了一组可重现的样本（脚本解析 <code>translate.rs</code> 的 match 分支，对每组输入执行同一规则）：</p>
+  <table>
+    <tr><th>样本组</th><th>命中</th><th>说明</th></tr>
+    <tr><td>A 词典内原词（含大小写）</td><td class="pass">10/10</td><td>基准行为正常，<code>LANDSCAPE</code> / <code>Landscape</code> 都能归一到「风景」</td></tr>
+    <tr><td>B 下划线 / 连字符变体</td><td>7/11</td><td><code>water_color</code> / <code>fan_art</code> / <code>cyber_punk</code> / <code>land-scape</code> 未命中</td></tr>
+    <tr><td>C 任意多词组合</td><td class="fail">0/11</td><td><code>original character</code>、<code>original_character</code>、<code>school uniform</code>、<code>city night</code> 全部落空</td></tr>
+    <tr><td>D 标点 / 数字前缀 / 中文 / 驼峰</td><td class="fail">2/14</td><td>仅 <code>3d</code>、<code>cityScape</code> 命中；<code>landscape.</code>、<code>(cute)</code>、<code>1girl</code>、<code>风景</code> 落空</td></tr>
+  </table>
+  <p><b>最反直觉的一点：归一化自身在制造漏匹配。</b><code>watercolor</code> → 水彩，但 <code>water_color</code> 被归一成 <code>water color</code> 后落空；<code>fanart</code> → 同人，<code>fan_art</code> 落空；<code>landscape</code> 命中，<code>land-scape</code> 落空。你点名的 <code>original character</code> 尤其典型：<code>original</code>（原创）与 <code>character</code>（角色）<b>各自都在词典里</b>，但没有组合或逐词回退逻辑，合在一起就 0 命中。</p>
+  <p><b>后果链：</b>未命中即 <code>translated_name = NULL</code>；显示层 <code>COALESCE(NULLIF(t.translated_name,''), t.name)</code>（<code>library.rs:545</code>）于是显示英文原名，标签中心大面积不中文化。而 <code>backfill_translations</code> 只在<b>迁移时</b>执行一次且只查 <code>translated_name IS NULL</code>（<code>db.rs:429</code>）—— 词典将来扩充也不会自动重跑已有标签，除非再触发一次迁移；<code>translation_source</code> 只有 <code>dictionary</code> / <code>manual</code> / <code>legacy</code>，无法区分「尝试过但没命中」和「新标签从未尝试」。</p>
+  <div class="fix"><b>建议：</b>归一化后按顺序尝试「整串 → 去空格拼接 → 逐词回退并合并 → 复数/词干 → 剥离标点与数字前缀」；词典外置为可编辑资源（TOML/JSON，用户可扩充、无需重编译），中文标签直接跳过；加 <code>translation_attempted_at</code> 或状态列区分未命中，并提供「重新翻译所有未译标签」命令。定级 P2：这是<b>功能覆盖局限</b>，不丢数据、不崩溃，但影响标签中文化这个用户可见功能，建议排在 P2 前半段。</div>
+</div>
+
+<h3>12.3 补遗 T2 · <code>models.rs</code>：输入校验与 IPC 契约的收口点</h3>
+<div class="issue i2">
+  <div class="t"><span class="badge b2">新增 P2</span> T2. 纯 DTO、无算法缺陷，但「无上限输入」与「跨语言契约」的根因都在这里</div>
+  <div class="loc"><code>models.rs:1-231</code>、<code>src/types.ts:1-202</code></div>
+  <p>此文件只有 <code>Serialize</code>/<code>Deserialize</code> 结构体，没有逻辑，所以漏审没有漏掉运行时 bug；但漏掉了<b>修复建议应该落在哪一层</b>：</p>
+  <ul>
+    <li><b>输入无校验的根源</b>：<code>ArchiveQuery</code>(:101-114)、<code>TagTranslationInput</code>(:168-174)、<code>ImportOptions</code>(:116-121) 都是裸 <code>Deserialize</code> + <code>Default</code>，<code>page</code> / <code>page_size</code> / <code>tag_ids</code> / <code>search</code> 全无上限。第十章 L1 / M1 提的「深 OFFSET、超长 <code>IN (...)</code>、超长 FTS 短语」根因其实在 DTO 层 —— 此前把修复建议都指向 <code>library.rs</code>，应改为在<b>命令边界</b>统一校验（或 <code>deserialize_with</code> / newtype 约束）。<code>TagTranslationInput.source</code> 是无枚举的 <code>Option&lt;String&gt;</code>，CLI 可写入任意字符串（<code>db.rs:1522 / 1562</code> 直接落库）。</li>
+    <li><b>字段拼写错会静默降级</b>：所有 <code>Deserialize</code> 结构都没有 <code>#[serde(deny_unknown_fields)]</code>。IPC 参数是运行时 JSON，前端 TS 类型只在编译期有效；一旦字段名写错（如 <code>pageSize</code> → <code>pagesize</code>），serde 会静默忽略并取默认值，表现为「筛选没生效」且没有任何报错。</li>
+    <li><b>跨语言契约靠手工镜像</b>：<code>models.rs</code> 的 <code>rename_all = "camelCase"</code> 与 <code>src/types.ts</code> 手写接口一一对应。本轮逐字段比对了 <code>LibraryState / ArchiveCard / ArchiveQuery / Tag / ReaderPage / ArchivePage / ImportReport / ScanReport / Collection / TrashedArchive</code>，<b>当前完全一致</b>，但没有任何生成或运行时校验机制保证后续同步。建议用 <code>ts-rs</code> / <code>typeshare</code> 从 Rust 生成 TS，或给 invoke 加一层 schema 校验。</li>
+    <li><b>两处敏感字段的载体</b>：<code>ArchiveCard.file_path: String</code>(:28) 无条件序列化，绝对路径由此进入 webview（对应第十章 M11 路径泄露）；<code>ReaderPage.data_url: String</code>(:96) 是 43 MB base64 的类型载体（对应 P1-6）。改数据通道或脱敏时应同时改 DTO，而不是只在返回处打补丁。</li>
+    <li><b>轻量</b>：<code>ScanReport.elapsed_ms: u128</code>(:228) 经 JSON number 传给 JS，理论上超 2^53 会丢精度（毫秒耗时实际远不到，暂不构成问题）。<code>LibraryState.error</code>(:12) 由 <code>lib.rs:137</code> 的 <code>startup_error</code> 填充，而前端 <code>App.tsx</code> 另有自己的 error state，两套错误态并存（第十一章 M8）。</li>
+  </ul>
+  <div class="fix"><b>建议：</b>把「输入上限 / 枚举 / 路径白名单」统一收口到 DTO + 命令入口；补 <code>deny_unknown_fields</code> 并引入类型生成；定级 P2，但应随第 2 步 B4 的路径与参数校验一起做，避免同一批边界校验改两遍。</div>
+</div>
+
+<h3>12.4 证据等级与验证边界</h3>
+<p>你的两点保留意见成立。下表把每条结论的「证据强度」显式分开，避免静态推断被当成实测：</p>
+<table>
+  <tr><th>等级</th><th>含义</th><th>本报告对应内容</th><th>你的复核状态</th></tr>
+  <tr><td><b>A · 命令实测</b></td><td>本次会话实际执行、有 stdout</td><td><code>tsc --noEmit</code> / <code>vite build</code>（379 KB JS）/ <code>clippy</code> 20 条 / <code>fmt --check</code> 差异 / <code>npm audit</code> 0 / <code>git status</code> / 进程 PID 46516 / <code>cargo test --lib</code> <b>12 passed</b></td><td>除 <code>cargo test</code> 外你已复跑；<b>12 passed 对你而言是采信，不是验证</b></td></tr>
+  <tr><td><b>A′ · 依赖源码核对</b></td><td>读第三方 registry 源码</td><td><code>image-0.25.10</code> 的 <code>Limits::default()</code>：<code>max_alloc 512MB</code>、宽高无上限、便捷函数无法传自定义 Limits（P0-3 / 第十章）</td><td>静态可复核</td></tr>
+  <tr><td><b>A″ · 引擎 / 纯函数实测</b></td><td>跑了可复现的小实验</td><td>SQLite FTS5 trigram：「妄想 秘話」带空格搜不到（第四章）；<b>本轮新增</b>：<code>translate.rs</code> 词典命中率脚本（12.2）</td><td>本轮新增项可复现</td></tr>
+  <tr><td><b>B · 静态代码事实</b></td><td>逐行可核对，无推断成分</td><td>所有行号、SQL、<code>DEFAULT 60</code>、<code>csp: null</code>、<code>Path::new("")</code>、<code>noteDirty</code>、<code>filter_map(Result::ok)</code> 8 处、0 处 <code>React.memo</code> / <code>prefers-reduced-motion</code> / <code>aria-haspopup</code></td><td class="pass">你已抽查，全部属实</td></tr>
+  <tr><td><b>C · 静态推断，未运行时验证</b></td><td>由代码路径 + 依赖行为推导，方向可信但<b>没有量化</b></td><td><b>「换页最多白等 900 ms」</b>（F3-a）、43 MB IPC 造成的卡顿与内存尖峰、滚动模式大库掉帧、WAL 膨胀与 <code>database is locked</code> 的具体表现、OOM 触发条件、三套封面预载的常驻内存、虚拟列表与 memo 的收益幅度</td><td class="fail">均未实测</td></tr>
+</table>
+<div class="note" style="margin-top:10px"><b>为什么没做运行时验证：</b>正式版正在运行、真实库 <code>F:\Hthings\BENZI</code> 不可触碰、不能执行 scan / import / purge。所以本报告的性质是<b>静态代码审查 + 工具链体检 + 少量纯函数实测</b>，不是性能或体验实测；凡属 C 级的结论都应理解为「按代码路径应当发生」，而非「测到了」。<br><b>建议补的运行时验证：</b>① 建临时测试库（不碰真实库），造 1 万条记录 + 千页本子 + 一张 8000×8000 扫描图；② 用 React DevTools Profiler / <code>performance.now()</code> 量换页 P50/P95、勾选 50 项的重渲染耗时、滚动模式 DOM 节点数与堆内存；③ 用两个进程并发导入量 <code>SQLITE_BUSY</code> 失败率与 WAL 大小；④ 补完并发 / 迁移失败用例后复跑 <code>cargo test</code>。拿到数字再决定 F3 与 P1-6 的实际优先级。</div>
+
+<h3>12.5 复核意见 → 报告修订对照</h3>
+<table>
+  <tr><th>你的意见</th><th>处理</th><th>落地位置</th></tr>
+  <tr><td>P0-3 严重度偏高，应排在 P0-1 / P0-2 之后</td><td>保留 P0 定性（进程崩溃是事实），但<b>执行顺序下调</b>；第 1 步拆 1a → 1b</td><td>P0-3 复核说明、12.6</td></tr>
+  <tr><td>CSP 不该算 P1；B4 才是真问题，报告把它们混在一节</td><td>第三章第 14 条<b>降为 P2</b> 纵深防御；B4 独立为 P1 并剥离 CSP，拆成 4 项命令 / 路径校验</td><td>第三章 14、第十章 B4</td></tr>
+  <tr><td>漏了 <code>translate.rs</code> / <code>models.rs</code></td><td>本轮补审，给出实测命中率与契约根因；补文件覆盖矩阵</td><td>12.1 / 12.2 / 12.3</td></tr>
+  <tr><td><code>cargo test</code> 是采信不是验证</td><td>证据表标注 A 级中这一条你未复跑</td><td>12.4</td></tr>
+  <tr><td>纯静态审查，无运行时验证；「900 ms 白等」是推断</td><td>新增证据等级表，把该结论明确归为 C 级并给验证清单</td><td>12.4</td></tr>
+  <tr><td>B4 从第 4 步提到第 2 步尾（同在改 <code>lib.rs</code>）</td><td>已并入连接层重构尾部，第 4 步移除</td><td>第十 / 十一章顺序表、12.6</td></tr>
+  <tr><td>F1 单独提前，且与 F2 模态基座同一处改动</td><td>列为第 1 步前端并行线，明确「同一次提交落地、不要拆两次」</td><td>第十一章顺序表、12.6</td></tr>
+  <tr><td>抽查结论：证据链、优先级、亮点保留都可信</td><td>已验证条目原样保留，亮点清单仍在第十一章末尾</td><td>—</td></tr>
+</table>
+
+<h3>12.6 最终推进总表（覆盖第八 / 十 / 十一章）</h3>
+<table>
+  <tr><th>步</th><th>内容</th><th>说明</th></tr>
+  <tr><td><b>0</b></td><td><code>git init</code> + 基线提交 + <code>.gitignore</code> 补 <code>target/</code>、清理残留</td><td>零成本安全网，按你的意见不变</td></tr>
+  <tr><td><b>1 · 前端并行</b></td><td><b>F1 关闭守卫 + F2 统一模态层（同一次提交）</b>：Esc / 遮罩走同一入口、焦点陷阱与恢复、模态栈、Reader 快捷键排除 BUTTON 与修饰键、popover 补 Esc</td><td>唯一真实丢用户输入的问题；与后端并行、无数据迁移风险</td></tr>
+  <tr><td><b>1a</b></td><td><b>P0-1 备份一致性</b>（<code>VACUUM INTO</code> / backup API）+ <b>P0-2</b> 去掉 8 处 <code>filter_map(Result::ok)</code></td><td>不可逆、无提示的静默数据丢失，最优先</td></tr>
+  <tr><td><b>1b</b></td><td><b>P0-3</b> 图片解码 <code>Limits</code> + 先读 <code>dimensions()</code>、移除命令路径 <code>expect</code>；<b>P0-4</b> 封面 <code>.tmp</code> + rename 原子写</td><td>按复核意见下调到静默丢数据两项之后</td></tr>
+  <tr><td><b>2</b></td><td><b>连接与任务层一次重构</b>：统一连接、批量事务、busy 重试、checkpoint 管理、命令 async 化、去掉每次开库的 DDL；<b>尾部追加 B4</b>：命令 permission / 路径白名单 / <code>library_id</code> / <code>cover_key</code> 校验 + DTO 入参上限</td><td>共同根因；B4 与它同在 <code>lib.rs</code>，一次改完</td></tr>
+  <tr><td><b>3</b></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + <b>CSP 收口</b>；随后 F3 大列表性能三件套</td><td>CSP 已降 P2，随数据通道顺手做</td></tr>
+  <tr><td><b>4</b></td><td>默认评分语义、settings 原子写、迁移事务化、导入可取消与任务隔离、CLI <code>coverPath</code>、F4/F5 与批量 IPC、确认 / 撤销</td><td>状态与手感收口</td></tr>
+  <tr><td><b>5</b></td><td>词典命中率升级（12.2）、IPC 契约生成（12.3）、质量门禁与 CI、组件 / CSS 拆分、视觉与无障碍、发布链路</td><td>补遗项与长期维护</td></tr>
+</table>
+<div class="note" style="margin-top:10px"><b>运行时验证贯穿：</b>第 2 / 3 步改动前先按 12.4 建临时测试库并打基线，改动后用同一组数据复测，避免把 C 级推断当成验收标准。<b>仍需你拍板：</b>默认评分 60 是否保留、是否 <code>git init</code> 并清理 <code>damai-grab/</code> 与脚手架 SVG、改代码前是否先单独备份 <code>.gallery/library.db</code> 元数据。</div>
+
+<footer>本报告基于 2026-11-17 的工程快照。<b>性质说明：</b>这是静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有应用运行时 / 性能压测 / 真实库操作验证</b>；证据等级与未验证边界见 12.4。全程未修改源码、未访问 <code>F:\Hthings\BENZI</code>、未执行 scan / import / purge、未结束运行中的正式版；仅 <code>npm run build</code> 正常重生成 <code>dist/</code>。</footer>
+</div>
+</body>
+</html>

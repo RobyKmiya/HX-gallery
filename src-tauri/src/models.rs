@@ -1,0 +1,230 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryState {
+    pub library_path: Option<String>,
+    pub library_name: Option<String>,
+    pub archive_count: i64,
+    pub missing_count: i64,
+    pub total_size: i64,
+    pub last_library_path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveCard {
+    pub id: i64,
+    pub title: String,
+    pub file_name: String,
+    pub ext: String,
+    pub file_size: i64,
+    pub rating: i64,
+    pub page_count: i64,
+    pub added_at: i64,
+    pub file_mtime: i64,
+    pub cover_path: Option<String>,
+    pub file_path: String,
+    pub note: Option<String>,
+    pub missing: bool,
+    pub error: Option<String>,
+    pub last_read_at: Option<i64>,
+    pub last_page: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_bucket: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveGroup {
+    pub bucket: i64,
+    pub count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagCategory {
+    pub id: i64,
+    pub name: String,
+    pub parent_id: Option<i64>,
+    pub path: String,
+    pub depth: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivePage {
+    pub items: Vec<ArchiveCard>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<ArchiveGroup>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderInfo {
+    pub page_count: i64,
+    pub last_page: i64,
+    pub bookmarks: Vec<ReaderBookmark>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderBookmark {
+    pub id: i64,
+    pub archive_id: i64,
+    pub page: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderPage {
+    pub index: i64,
+    pub name: String,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub sort: Option<String>,
+    pub direction: Option<String>,
+    pub collection_id: Option<i64>,
+    pub tag_ids: Option<Vec<i64>>,
+    pub tag_mode: Option<String>,
+    pub rating_buckets: Option<Vec<i64>>,
+    pub read_statuses: Option<Vec<String>>,
+    pub missing_only: Option<bool>,
+    pub search: Option<String>,
+    pub group: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOptions {
+    pub add_to_collection: Option<i64>,
+    pub preserve_structure: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProgress {
+    pub current: usize,
+    pub total: usize,
+    pub file_name: String,
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportErrorItem {
+    pub file: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub errors: Vec<ImportErrorItem>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub id: i64,
+    pub number: i64,
+    pub name: String,
+    pub original_name: String,
+    pub translated_name: Option<String>,
+    pub translation_source: Option<String>,
+    pub translated_at: Option<i64>,
+    pub category: Option<String>,
+    pub merged_into: Option<i64>,
+    pub deleted_at: Option<i64>,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagTranslationInput {
+    pub id: i64,
+    pub translated_name: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagEdge {
+    pub source: i64,
+    pub target: i64,
+    pub weight: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagGraph {
+    pub nodes: Vec<Tag>,
+    pub edges: Vec<TagEdge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashedArchive {
+    pub id: i64,
+    pub title: String,
+    pub file_name: String,
+    pub ext: String,
+    pub file_size: i64,
+    pub page_count: i64,
+    pub last_read_at: Option<i64>,
+    pub last_page: i64,
+    pub missing: bool,
+    pub cover_path: Option<String>,
+    pub deleted_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+    pub is_default: bool,
+    pub count: i64,
+    pub sort_order: i64,
+    pub cover_archive_id: Option<i64>,
+    pub cover_path: Option<String>,
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReport {
+    pub found: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub missing: usize,
+    pub errors: Vec<String>,
+    pub elapsed_ms: u128,
+    pub message: String,
+}

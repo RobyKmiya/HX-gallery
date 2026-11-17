@@ -1,0 +1,193 @@
+import { useEffect, useState } from "react";
+import { assetUrl } from "../api";
+import { formatBytes, formatDate, formatDateTime } from "../format";
+import type { ArchiveCardData } from "../types";
+import {
+  AlertIcon,
+  BookIcon,
+  CheckIcon,
+  HeartIcon,
+  LogoIcon,
+  StarIcon,
+} from "./Icons";
+
+interface ArchiveCardProps {
+  card: ArchiveCardData;
+  onOpen: (card: ArchiveCardData) => void;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (id: number) => void;
+  onQuickEdit?: (card: ArchiveCardData) => void;
+  onRead?: (card: ArchiveCardData) => void;
+  eager?: boolean;
+}
+
+export default function ArchiveCard({
+  card,
+  onOpen,
+  selectionMode = false,
+  selected = false,
+  onToggleSelect,
+  onQuickEdit,
+  onRead,
+  eager = false,
+}: ArchiveCardProps) {
+  const [imageFailed, setImageFailed] = useState(false);
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [card.coverPath]);
+
+  const cover =
+    card.coverPath && !imageFailed ? assetUrl(card.coverPath) : null;
+
+  const hasProgress = card.lastPage > 0 && card.pageCount > 0;
+  const finished = hasProgress && card.lastPage >= card.pageCount;
+  const progressPercent = hasProgress
+    ? Math.min(100, Math.round((card.lastPage / card.pageCount) * 100))
+    : 0;
+  const readLabel = finished
+    ? "重新阅读"
+    : hasProgress
+      ? "继续阅读"
+      : "开始阅读";
+
+  const activate = () => {
+    if (selectionMode && onToggleSelect) {
+      onToggleSelect(card.id);
+    } else {
+      onOpen(card);
+    }
+  };
+
+  return (
+    <article
+      className={`archive-card${card.missing ? " is-missing" : ""}${
+        selectionMode ? " is-selecting" : ""
+      }${selected ? " is-selected" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-label={
+        selectionMode
+          ? `${selected ? "取消选择" : "选择"} ${card.title}`
+          : `打开 ${card.title}`
+      }
+      aria-pressed={selectionMode ? selected : undefined}
+      onClick={activate}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate();
+        }
+      }}
+    >
+      <div className="archive-cover">
+        {cover ? (
+          <img
+            src={cover}
+            alt=""
+            loading={eager ? "eager" : "lazy"}
+            decoding={eager ? "sync" : "async"}
+            draggable={false}
+            onError={() => setImageFailed(true)}
+          />
+        ) : (
+          <div className="cover-placeholder">
+            <LogoIcon width={28} height={28} />
+            <span>{card.title.slice(0, 1).toUpperCase()}</span>
+          </div>
+        )}
+
+        <span className="format-badge">{card.ext.toUpperCase()}</span>
+
+        <span className="rating-badge" title="评分">
+          <StarIcon width={11} height={11} />
+          {card.rating}
+        </span>
+
+        {hasProgress && (
+          <span
+            className={`progress-badge${finished ? " is-finished" : ""}`}
+            title={`上次读到第 ${card.lastPage} 页${
+              card.lastReadAt ? ` · ${formatDateTime(card.lastReadAt)}` : ""
+            }`}
+          >
+            <BookIcon width={10} height={10} />
+            {finished ? "已读完" : `${card.lastPage} / ${card.pageCount}`}
+          </span>
+        )}
+
+        {hasProgress && (
+          <span className="cover-progress-track" aria-hidden="true">
+            <span style={{ width: `${progressPercent}%` }} />
+          </span>
+        )}
+
+        {selectionMode && (
+          <span className={`select-check${selected ? " is-on" : ""}`}>
+            {selected && <CheckIcon width={12} height={12} />}
+          </span>
+        )}
+
+        {card.missing && (
+          <div className="missing-overlay">
+            <AlertIcon width={20} height={20} />
+            文件缺失
+          </div>
+        )}
+
+        {!selectionMode && <div className="archive-hover-hint">查看详情</div>}
+
+        {!selectionMode && onRead && (
+          <button
+            type="button"
+            className="archive-quick is-read"
+            title={readLabel}
+            aria-label={`${readLabel} ${card.title}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRead(card);
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <BookIcon width={14} height={14} />
+          </button>
+        )}
+
+        {!selectionMode && onQuickEdit && (
+          <button
+            type="button"
+            className="archive-quick"
+            title="收藏到…"
+            aria-label={`把 ${card.title} 收藏到收藏夹`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onQuickEdit(card);
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <HeartIcon width={14} height={14} />
+          </button>
+        )}
+      </div>
+
+      <div className="archive-body">
+        <h3 title={card.fileName}>{card.title}</h3>
+        <div className="archive-meta">
+          <span>{card.pageCount > 0 ? `${card.pageCount} 页` : "页数未知"}</span>
+          <span className="meta-dot" />
+          <span>{formatBytes(card.fileSize)}</span>
+          <span className="meta-dot" />
+          <span>{formatDate(card.addedAt)}</span>
+        </div>
+        {card.note && <p className="archive-note">{card.note}</p>}
+        {card.error && (
+          <div className="archive-warning" title={card.error}>
+            <AlertIcon width={12} height={12} />
+            索引异常
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
