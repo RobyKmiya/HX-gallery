@@ -69,7 +69,7 @@
 <div class="card">
   <strong>一句话结论：</strong>功能完成度非常高（M1–M23 全做完，交互细节甚至做到滚轮防连翻、封面预解码无闪烁），代码也有类型检查和集成测试兜底；但 <b>发布级工程化明显缺位</b>（无 Git、无 lint/CI、clippy 20 条警告、fmt 不统一），并且有几处 <b>会静默丢数据 / 直接退出进程</b> 的底层风险，主要集中在备份、图片解码、行错误处理。建议先修 P0/P1，再做手感与架构升级。
   <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:13px">
-    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准。
+    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准；<b>12.9 记录第三批</b>——阅读器改走 <code>gallery://</code> 自定义协议供图（不再传 43 MB 的 base64）、CSP 收口、大列表渲染三件（<code>87ff023</code>），并列出必须人工冒烟的三处运行时风险。
   </div>
 </div>
 
@@ -300,7 +300,7 @@
   <div class="fix"><b>建议（按复核意见拆成四项，均与连接层同在 <code>lib.rs</code>）：</b>① <b>命令边界</b>——为 <code>purge_*</code> / <code>open_library</code> / <code>import_paths</code> 定义自定义 permission 并按窗口授权，路径做规范化与库目录白名单校验；② <b>数据校验</b>——<code>library.json.library_id</code> 读入时校验为 UUID / 安全字符（拒绝 <code>..</code>、分隔符、绝对前缀），版本状态只认 <code>PRAGMA user_version</code>；③ <b>删封面</b>——先 <code>SELECT COUNT(*) FROM archives WHERE cover_key = ?</code> 确认无其它引用，并校验 key 为 <code>hex + .jpg</code>；④ asset scope 收紧到 <code>$APPCACHE/covers/**</code>。<b>CSP 属纵深防御、已降为 P2（见第三章第 14 条修订），随阅读器通道重构收口，不列在本条范围。</b></div>
 </div>
 
-<div class="note" style="margin-top:12px"><b>本章的处理状态（第二批 <code>fcea7c6</code> 已落地，详见 <a href="#batch2">12.8</a>）：</b>「严重」三项（同步命令跑主线程 + 全局锁、导入/扫描各自开连接与逐条提交无重试、迁移与 FTS DDL 不在事务内）与 B1（CLI <code>coverPath</code>）、B2、B3，以及 B4 的路径 / 引用校验部分<b>均已修复</b>；B4 的「命令 ACL」需要把 45 个命令拆进 plugin 才能生效，<b>未做</b>；M2（每次翻页 3 条 SQL）与 M3（<code>page_count</code> / <code>last_read_at</code> 缺索引）<b>未做</b>，且实测显示 1 万条规模下深翻页只比首页慢 6 ms，优先级应让位于前端大列表渲染。</div>
+<div class="note" style="margin-top:12px"><b>本章的处理状态（第二批 <code>fcea7c6</code> 已落地，详见 <a href="#batch2">12.8</a>；第三批 <a href="#batch3">12.9</a> 又补了索引）：</b>「严重」三项（同步命令跑主线程 + 全局锁、导入/扫描各自开连接与逐条提交无重试、迁移与 FTS DDL 不在事务内）与 B1（CLI <code>coverPath</code>）、B2、B3，以及 B4 的路径 / 引用校验部分<b>均已修复</b>；B4 的「命令 ACL」需要把 45 个命令拆进 plugin 才能生效，<b>未做</b>；M3（<code>page_count</code> / <code>last_read_at</code> 缺索引）<b>已补</b>（<code>87ff023</code>，旧库缺列时跳过）；M2（每次翻页 3 条 SQL）<b>未做</b>——实测显示 1 万条规模下深翻页只比首页慢 6 ms，优先级低于前端大列表渲染。阅读器侧的数据通道（43 MB base64）已在第三批换成自定义协议，见 <a href="#batch3">12.9</a>。</div>
 
 <h3>其余补充（P2，均已回查源码）</h3>
 <div class="card">
@@ -352,7 +352,7 @@
 </div>
 
 <div class="issue i1">
-  <div class="t"><span class="badge b1">新增 P1</span> F3. 大列表与换页：滚动模式无限累积、0 处 memo、换页最多白等 900 ms、三套封面预载</div>
+  <div class="t"><span class="badge b1">新增 P1</span> F3. 大列表与换页：滚动模式无限累积、0 处 memo、换页最多白等 900 ms、三套封面预载 <span style="color:var(--muted)">（第三批已处理三项：memo、先提交再预热、<code>content-visibility</code> 容器化；<b>JS 虚拟列表未做</b>，隐藏图片农场按「不回归既有手感」保留，理由见 12.9）</span></div>
   <div class="loc"><code>LibraryView.tsx:162-197 / 766-780 / 789-805 / 2473-2552 / 2680-2693</code>、<code>ArchiveCard.tsx</code>、<code>App.css:898-923</code></div>
   <p><b>(a) 换页被预载阻塞</b>：<code>loadPage</code> 在查询已返回后、<code>commitPage</code> 之前 <code>await preloadCoverImages(result.items)</code>（:767-768），要等全部封面 <code>onload + decode</code> 或 900 ms 超时才提交新页；首屏(<code>itemsRef.length === 0</code>)与缓存命中路径不等，造成<b>命中缓存与未命中的手感不一致</b>。M19 追求的「无闪烁换页」是以每次翻页最多 1 秒白等换来的。</p>
   <p><b>(b) 无窗口化</b>：滚动模式 <code>setItems(prev =&gt; [...prev, ...result.items])</code> 无限追加，渲染是全量 <code>groups.map → items.map</code>；全项目 <code>React.memo</code> 检索为 <b>0 处</b>，<code>selectedIds.includes(card.id)</code> 对每张卡片是 O(n)，勾选一次触发所有卡片重渲染。上千本时 DOM 与内存都会失控。</p>
@@ -395,7 +395,7 @@
   <tr><th>顺序</th><th>修订</th></tr>
   <tr><td><b>1（提到最前，前端并行线）</b></td><td><b>【复核修订】F1 单独提前</b>：它是唯一会真实丢用户输入的问题，且<b>与 F2 的模态基座是同一处改动</b>（同一个 Esc 分发 / 关闭入口），必须在同一次提交里落地，不要拆成两次。先做 <code>useCloseGuard(noteDirty)</code> 拦住 Esc 与遮罩，再做统一 <code>&lt;Modal&gt;</code> 基座（焦点陷阱/恢复、模态栈、单一 Esc 分发）+ Reader 快捷键排除 BUTTON 与修饰键 + popover 补 Esc。纯前端、无数据迁移风险，与后端第 1 步并行</td></tr>
   <tr><td>2</td><td>P0 后端四项（先 1a 静默丢数据、后 1b 崩溃与破图）+ 连接与任务层重构（第十章）<b>；尾部一并做 B4 命令 ACL 与路径校验</b></td></tr>
-  <tr><td>3</td><td><b>大列表性能三件套</b>（F3）：<code>commitPage</code> 前移、<code>ArchiveCard</code> 加 memo、滚动模式虚拟列表、清理隐藏图片农场；随后阅读器数据通道重构</td></tr>
+  <tr><td>3</td><td><b>大列表性能三件套</b>（F3）：<code>commitPage</code> 前移、<code>ArchiveCard</code> 加 memo、滚动模式虚拟列表、清理隐藏图片农场；随后阅读器数据通道重构 <span style="color:var(--muted)">（<b>已落地并调整方案</b>：前两项照做，虚拟列表改为 <code>content-visibility</code> 容器化、图片农场<b>保留</b>，见 12.9）</span></td></tr>
   <tr><td>4</td><td>F4（purge 状态同步）、F5（Toast 计时）、批量 IPC、<code>useConfirmAction</code> + 撤销 Toast、<code>App.error</code> 可见化、Welcome「打开上次的库」</td></tr>
   <tr><td>5</td><td>状态拆分（<code>useArchiveQuery</code> / <code>useOverlays</code>）、CSS token 化、断点清理、对比度与 reduced-motion、ARIA 语义、i18n</td></tr>
 </table>
@@ -483,7 +483,7 @@
   <tr><td><b>1a</b></td><td><b>P0-1 备份一致性</b>（<code>VACUUM INTO</code> / backup API）+ <b>P0-2</b> 去掉 8 处 <code>filter_map(Result::ok)</code></td><td>不可逆、无提示的静默数据丢失，最优先</td></tr>
   <tr><td><b>1b</b></td><td><b>P0-3</b> 图片解码 <code>Limits</code> + 先读 <code>dimensions()</code>、移除命令路径 <code>expect</code>；<b>P0-4</b> 封面 <code>.tmp</code> + rename 原子写</td><td>按复核意见下调到静默丢数据两项之后</td></tr>
   <tr><td><b>2</b></td><td><b>连接与任务层一次重构</b>：后台工作连接（不跑迁移/DDL）、批量事务、busy 重试、checkpoint 管理、命令 async 化、去掉每次开库的 DDL；<b>尾部追加 B4</b>：路径白名单 / <code>library_id</code> / <code>cover_key</code> 校验 + DTO 入参上限 <span style="color:var(--muted)">（命令 ACL 需拆插件，未做）</span></td><td><b>已完成（<code>fcea7c6</code>），见 <a href="#batch2">12.8</a></b>；B4 与它同在 <code>lib.rs</code>，一次改完</td></tr>
-  <tr><td><b>3</b></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + <b>CSP 收口</b>；随后 F3 大列表性能三件套</td><td>CSP 已降 P2，随数据通道顺手做</td></tr>
+  <tr><td><b>3</b></td><td>阅读器数据通道（自定义协议）+ 缩略图缓存 + <b>CSP 收口</b>；随后 F3 大列表性能三件套</td><td><b>已完成（<code>87ff023</code>），见 <a href="#batch3">12.9</a></b>；CSP 与协议是同一件事的两面，一起做</td></tr>
   <tr><td><b>4</b></td><td>settings 原子写、迁移事务化、导入可取消与任务隔离、CLI <code>coverPath</code>、F4/F5 与批量 IPC、确认 / 撤销 <span style="color:var(--muted)">（默认评分 60 已确认保留，不在范围）</span></td><td>状态与手感收口</td></tr>
   <tr><td><b>5</b></td><td>词典命中率升级（12.2）、IPC 契约生成（12.3）、质量门禁与 CI、组件 / CSS 拆分、视觉与无障碍、发布链路</td><td>补遗项与长期维护</td></tr>
 </table>
@@ -577,7 +577,80 @@
 <b>仍然存在的已知缺口：</b>CLI 与桌面跨进程并发仍只靠 <code>busy_timeout</code>（没有文件锁，只是从 5 s 提到 30 s 并有退避重试）；<code>page_count</code> / <code>last_read_at</code> 仍缺索引、深翻页仍是 OFFSET；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未规范化。
 </div>
 
-<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地两批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
+<h3 id="batch3">12.9 第三批落地记录（<code>87ff023</code>）：阅读器数据通道 + CSP 收口 + 大列表渲染</h3>
+<div class="card">
+按 12.6 第 3 步执行。本批改动 14 个文件（+646 / −130 行），其中 2 个新增文件（<code>pagecache.rs</code>、<code>asset_protocol.rs</code>）。<b>没有</b>改动数据库表结构、评分语义、<code>F:\Hthings\BENZI</code> 与真实库文件，未重新打包、未结束运行中的正式版进程。
+</div>
+
+<p><b>一、先把 base64 的账算清楚</b></p>
+<div class="card">
+原来 <code>read_reader_page</code> 返回 <code>data:image/jpeg;base64,…</code>：一页 2 MB 的扫描图 → 约 2.7 MB 字符串；压缩包内单页上限 32 MB → <b>单条 IPC 消息 43 MB</b>。这笔钱付了三次：Rust 端 <code>STANDARD.encode</code> 一次、JSON 序列化一次、JS 端字符串解析 + 解码一次；再乘以阅读器 14 页的 JS 缓存，最坏情况是几百 MB 的字符串常驻堆里，且每次翻页都在主线程上搬这几 MB。
+</div>
+
+<table>
+  <tr><th>设计选择</th><th>做法</th><th>理由</th></tr>
+  <tr><td><b>两段式：预热 → 取图</b></td><td><code>read_reader_page</code> 只做「解压 + 解码 + TIFF 转 PNG」并写进后端 LRU，返回 <code>{index, name}</code>；前端再用 <code>gallery://localhost/page/&lt;id&gt;/&lt;index&gt;</code> 取图，协议层只读内存</td><td>把重活留在 <code>spawn_blocking</code>（原有链路），协议层保持 O(1) 内存读。<b>错误信息也不丢</b>：页面超限、压缩包损坏仍由命令返回中文原因，而不是变成一张破图</td></tr>
+  <tr><td><b>协议层不碰数据库</b></td><td>路径来自命令层登记的 <code>archive_id → PathBuf</code>（最多 32 条，超出清空）</td><td>自定义协议处理器跑在 webview 的 <b>UI 线程</b>上，而库状态锁可能正被一次千级导入占着——在那里查库等于把整个窗口卡死</td></tr>
+  <tr><td><b>缓存未命中返回 404</b></td><td>前端 <code>onError</code> 触发一次自愈：清本地缓存 → 重新预热 → 换 <code>?t=</code> token 重取；同一次打开每页只自愈一次，再失败才进错误态</td><td>避免在 UI 线程上解压 30 MB 的图；也避免「404 → 重试 → 404」的死循环</td></tr>
+  <tr><td><b>缩略图仍走 IPC</b></td><td><code>read_reader_thumbnail</code> 继续返回 data URL，但后端加了 24 MB LRU</td><td>缩略图 8–20 KB，base64 开销可忽略；保留现有的 <code>IntersectionObserver</code> 懒加载与 JS 侧缓存。<b>真正贵的是解码</b>（一页 40 MP 的图缩到 160 px 也要完整解码一次），LRU 消掉的正是这部分重复开销</td></tr>
+  <tr><td><b>缓存键带文件指纹</b></td><td><code>kind|path|index|edge|mtime|size</code></td><td>压缩包被替换后旧键自然失效，不需要额外的失效逻辑；预算按总字节封顶（页面 96 MB ≥ 两页上限，避免大页把自己挤出去）</td></tr>
+</table>
+
+<p><b>二、CSP 从 null 到白名单</b></p>
+<table>
+  <tr><th>指令</th><th>生产</th><th>说明</th></tr>
+  <tr><td><code>default-src</code> / <code>script-src</code></td><td><code>'self'</code></td><td>Vite 产物只有外链 module script；Tauri 会为自己的注入脚本补 nonce，因此<b>不给</b> <code>unsafe-inline</code></td></tr>
+  <tr><td><code>style-src</code></td><td><code>'self' 'unsafe-inline'</code></td><td>React 的 <code>style={{...}}</code> 是行内样式属性，哈希 / nonce 都覆盖不到，只能放行 inline</td></tr>
+  <tr><td><code>img-src</code></td><td><code>'self' asset: http://asset.localhost gallery: http://gallery.localhost data: blob:</code></td><td>封面走 asset 协议、页面走 gallery 协议、缩略图是 data URL；两个 <code>http://*.localhost</code> 是 Windows / Android 上自定义协议的映射形态</td></tr>
+  <tr><td><code>connect-src</code></td><td><code>'self' ipc: http://ipc.localhost</code></td><td>Tauri 2 的大消息走 <code>ipc</code> 协议</td></tr>
+  <tr><td><code>devCsp</code></td><td>额外放行 <code>'unsafe-inline' 'unsafe-eval'</code> + <code>ws://localhost:1420</code></td><td><code>@vitejs/plugin-react</code> 会注入行内 react-refresh 预置脚本，HMR 还要连 websocket；生产环境不放行</td></tr>
+  <tr><td><code>object-src</code> / <code>base-uri</code> / <code>form-action</code></td><td><code>'none' / 'self' / 'none'</code></td><td>这三条与「本地离线、不加载任何远程资源」的定位一致，成本为零</td></tr>
+</table>
+<div class="note" style="margin-top:8px"><b>为什么现在才做：</b>按你的复核意见，CSP 本身是纵深防御、不是漏洞——自有命令不受 capabilities 约束（B4），即使 <code>csp: null</code> 也没有实际的注入面。它只有在「新增了协议」时才变成必须项：不写 <code>img-src</code> 白名单，新协议要么被拦、要么只能继续留着 <code>null</code>。</div>
+
+<p><b>三、F3 大列表：三个动作，一个不回归</b></p>
+<table>
+  <tr><th>项</th><th>改动</th><th>为什么这样改</th></tr>
+  <tr><td><b>memo</b></td><td><code>ArchiveCard</code>、阅读器 <code>ReaderThumb</code> 包 <code>memo</code></td><td>滚动模式一次能挂上千张卡，而父组件的状态（搜索框、选中集合、Toast、浮层）每次变化都会重渲染整棵树。这些 props 全是稳定引用（卡片对象来自同一份 <code>items</code>，回调是 <code>useState</code> setter / <code>useCallback</code>），浅比较几乎总能短路</td></tr>
+  <tr><td><b>先提交再预热</b></td><td><code>loadPage</code> 的 replace 分支改为 <code>commitPage</code> → <code>void preloadCoverImages</code></td><td>原来是「等这一页 48 张封面全部 load + decode（最多 900 ms）才提交」，方向键 / 滚轮翻页会先僵住再整页刷新。卡片本来就是 eager 加载，提交后逐个显示即可</td></tr>
+  <tr><td><b>CSS 容器化</b></td><td><code>.archive-card</code> 加 <code>content-visibility: auto</code> + <code>contain-intrinsic-size: auto 300px</code></td><td>让浏览器跳过视口外卡片的布局与绘制（DOM 仍在，Ctrl+F 与屏幕阅读器不受影响）。<code>auto</code> 关键字会在首次渲染后记住实测高度，滚动条不会跳</td></tr>
+</table>
+<div class="note" style="margin-top:8px">
+<b>为什么没写 JS 虚拟列表：</b>这份网格按评分 / 标签 / 收藏夹分组，<b>组头高度与数量都不定</b>，真正的虚拟化要先把「行高不定 + 分组交错」两件事都测准，属于要么全对要么很糟的改动。而本批<b>没有运行时压测条件</b>（12.4 的 C 级边界没有变），把一个不可验证的重构塞进这一批，风险高于收益。<code>content-visibility</code> 是同一目标下零逻辑、可随时回退的做法：Windows 的 WebView2 直接生效，不支持的引擎自动退化为普通渲染。<b>如果后续实测仍掉帧，再上虚拟列表，那时有数据支撑。</b>
+</div>
+<div class="note" style="margin-top:8px">
+<b>刻意保留 <code>.cover-warm</code>（128 张预热封面）：</b>原计划写的是「删掉这个农场」，落地时判断<b>不该删</b>——它存在的理由写在 <code>App.css</code> 的注释里：<code>preloadCoverImages</code> 里的 <code>new Image()</code> 一旦被 GC，解码位图就没了，正是这排 1 px 可见的 <code>&lt;img&gt;</code> 把「下一页的封面已解码」这件事钉住，翻页才是纯粹换帧。删掉它省内存，但会把「翻页立即出图」换成「翻页先白一下」——在没有实测数据证明物有所值之前，不拿既有手感去赌。
+</div>
+
+<p><b>四、顺带补的索引</b></p>
+<div class="card">
+排序下拉里的「页数」「最近阅读」两列一直没有索引，深翻页要先整表排序再 <code>OFFSET</code>。补 <code>idx_archives_page_count</code> / <code>idx_archives_last_read_at</code>，并在升级路径里<b>先查列是否存在再建</b>——v1 老库的 <code>archives</code> 可能连这两列都没有，不能凭空假设表结构（这条是跑测试时被 <code>migrates_v1_tags_to_translated_schema</code> 当场抓出来的）。
+</div>
+
+<p><b>五、验证结果</b></p>
+<table>
+  <tr><th>检查</th><th>结果</th></tr>
+  <tr><td><code>cargo test --lib</code></td><td class="pass"><b>22 passed</b> / 0 failed / 1 ignored（17 → 22）。新增 5 个：LRU 按最久未使用淘汰、单条超预算不入缓存、同键替换不重复计数、协议路径解析（含 <code>../</code> 与多段路径全部拒绝）、排序索引确实建出来了</td></tr>
+  <tr><td><code>cargo clippy --all-targets</code></td><td class="pass">16 个告警位置，<b>本批新增代码 0 条</b>（新写的 3 处 <code>if</code> 折叠建议已改成 let-chain）；剩余 16 条全是基线里的老代码</td></tr>
+  <tr><td><code>rustfmt --check</code></td><td class="pass">三个新文件 <b>0 差异</b>；仍然没有跑全量 <code>cargo fmt</code>（会把无关文件一起卷进来）</td></tr>
+  <tr><td><code>tsc --noEmit</code> / <code>npm run build</code></td><td class="pass">通过。产物 JS 379.77 → <b>380.27 KB</b>（+0.5 KB：协议 URL 构造 + 自愈逻辑）、CSS 69.06 → <b>69.11 KB</b></td></tr>
+</table>
+
+<div class="note" style="margin-top:10px">
+<b>本批无法在这里验证、需要你手动冒烟一次的三件事（按重要性排序）：</b>
+<ol>
+  <li><b><code>gallery://</code> 在 Windows 上的实际 URL 形态</b>——代码按 <code>navigator.userAgent</code> 选 <code>http://gallery.localhost</code>（Tauri 在 Windows / Android 的映射方式）。若这条不对，表现为「阅读器一直转圈 + 图片 404」，改 <code>src/api.ts</code> 的 <code>GALLERY_ORIGIN</code> 一行即可。</li>
+  <li><b>CSP 是否误伤</b>——重点看打开阅读器、翻几页、打开缩略图侧栏、以及封面是否正常。若控制台报 <code>Refused to load…</code>，把对应 scheme 补进 <code>img-src</code>；若整体白屏，先临时把 <code>csp</code> 改回 <code>null</code> 定位，再逐条加回。</li>
+  <li><b>自愈链路</b>——跳到很后面的页再跳回前面，制造一次「Rust 缓存已淘汰」的场景，应当自动恢复而不是停在破图上。</li>
+</ol>
+<b>本批新引入的两个权衡：</b>① 后端 LRU 与 JS 侧缓存可能不同步（前者按字节淘汰、后者按页数），未命中由 404 自愈兜底，代价是一次额外往返；② 页面响应带 <code>Cache-Control: no-store</code>，意思是 webview 不自己缓存页面，回头翻页一律落到后端 LRU——这是刻意的，避免「换库 / 换压缩包后仍显示旧页」。<b>两者都只在「大页 + 来回深度跳页」时才会被感知。</b>
+</div>
+
+<div class="note" style="margin-top:10px">
+<b>仍然存在的已知缺口（第三批未触及）：</b>命令 ACL（需把 45 个命令拆进 plugin）；CLI 与桌面的跨进程并发仍只靠 <code>busy_timeout</code>；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未做 Unicode 规范化；M2（每次翻页 3 条 SQL）未合并；<code>translate.rs</code> 仍是 131 行的小词典（12.2 的升级方案未动）。
+</div>
+
+<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地三批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
 
 </div>
 </body>
