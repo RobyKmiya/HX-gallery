@@ -69,7 +69,7 @@
 <div class="card">
   <strong>一句话结论：</strong>功能完成度非常高（M1–M23 全做完，交互细节甚至做到滚轮防连翻、封面预解码无闪烁），代码也有类型检查和集成测试兜底；但 <b>发布级工程化明显缺位</b>（无 Git、无 lint/CI、clippy 20 条警告、fmt 不统一），并且有几处 <b>会静默丢数据 / 直接退出进程</b> 的底层风险，主要集中在备份、图片解码、行错误处理。建议先修 P0/P1，再做手感与架构升级。
   <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:13px">
-    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准；<b>12.9 记录第三批</b>——阅读器改走 <code>gallery://</code> 自定义协议供图（不再传 43 MB 的 base64）、CSP 收口、大列表渲染三件（<code>87ff023</code>），并列出必须人工冒烟的三处运行时风险；<b>12.10 记录第四批</b>——按你的实测反馈修掉批量导入标签的识别问题：识别 <code>female:</code> / <code>character:</code> 这类命名空间并映射到大类、改成单事务导入、超长条目不再拖垮整批（<code>3ab267b</code>）。
+    本报告在初稿完成后做了两轮专项深度核查：<a href="#deep">第十章「Rust 后端」</a>新增 12 项发现（含 4 项 P1），<a href="#ux">第十一章「前端手感」</a>新增 1 项 P0（备注草稿静默丢失）+ 4 项 P1；经你逐条抽查源码复核后，又做了<a href="#recheck">第十二章「覆盖补遗与分级修订」</a>：补审初稿遗漏的 <code>translate.rs</code> / <code>models.rs</code>、按复核意见下调 P0-3 的执行顺序并将 CSP 降为 P2、把 B4（命令 ACL 与路径校验）从第 4 步提到第 2 步尾部、单独提前 F1。<b>推进顺序以 12.6 的最终总表为准；证据等级与未验证边界见 12.4。</b>另：<b>12.7 记录了已按你的决策落地的第一批修复</b>——默认评分 60 保留，P0 四项与 F1 已修复并提交（<code>fbde767</code>），安全网为基线提交 <code>461e545</code>；<b>12.8 记录第二批</b>——连接与任务层重构、命令 async 化、B4 入口校验已落地（<code>fcea7c6</code>），并附 1 万条记录的实测基准；<b>12.9 记录第三批</b>——阅读器改走 <code>gallery://</code> 自定义协议供图（不再传 43 MB 的 base64）、CSP 收口、大列表渲染三件（<code>87ff023</code>），并列出必须人工冒烟的三处运行时风险；<b>12.10 记录第四批</b>——按你的实测反馈修掉批量导入标签的识别问题：识别 <code>female:</code> / <code>character:</code> 这类命名空间并映射到大类、改成单事务导入、超长条目不再拖垮整批（<code>3ab267b</code>）。<b>12.12 记录第六批</b>——按你的要求重做「导入新画廊」：拖入压缩包先<b>暂存成清单</b>（页数、体积、疑似重复、库内文件一目了然），在同一面板里输入标准 tag 自动识别并映射大类，确认后一键导入并同事务挂标签（<code>e07be4b</code>）。
   </div>
 </div>
 
@@ -744,7 +744,49 @@
 <b>仍然存在的已知缺口（第三批未触及）：</b>命令 ACL（需把 45 个命令拆进 plugin）；CLI 与桌面的跨进程并发仍只靠 <code>busy_timeout</code>；导入不可取消；<code>ArchiveCard.file_path</code> 仍把绝对路径发给前端；压缩包内条目名未做 Unicode 规范化；M2（每次翻页 3 条 SQL）未合并；<code>translate.rs</code> 仍是 131 行的小词典（12.2 的升级方案未动）。
 </div>
 
-<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地五批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）、<b>第四批</b> <code>3ab267b</code>（批量标签解析命名空间 + <code>add_tags_bulk</code> 单事务导入，9 个文件）、<b>第五批</b> <code>8c32671</code>（阅读器动图加载：缓存 pin + 版本化 URL + 按字节预取，8 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
+<h3 id="batch6">12.12 第六批落地记录（<code>e07be4b</code>）：导入面板——拖入 → 核对 → 挂标签 → 一键导入</h3>
+<div class="card">
+原来的导入是「选完或拖完立刻写库」：拖错文件夹照样复制、重复拖入只能事后看提示、想给新画集打标签得一本一本开详情。这一批在中间加了一层<b>暂存面板</b>，把「要不要写库」的决定权交回用户。
+</div>
+
+<p><b>一、流程</b></p>
+<table>
+  <tr><th>步骤</th><th>界面</th><th>背后做了什么</th></tr>
+  <tr><td>进入</td><td>点「导入压缩包」仍先弹系统选择器（保持原有习惯）；拖到窗口任意位置则直接进面板；面板开着再拖，并入当前清单而不是重开</td><td><code>stage_import_paths</code> 展开文件夹、去重、给每本算大小与页数</td></tr>
+  <tr><td>核对</td><td>左侧清单：书名、格式、体积、页数，徽标标出「疑似重复」「库内文件」「不可导入 + 原因」；可单条移除或清空</td><td><b>不复制任何文件</b>：页数只读 zip 中央目录，查重只看「同名 + 同大小」</td></tr>
+  <tr><td>挂标签</td><td>右侧输入 <code>female:</code> / <code>character:</code> 这类标准格式，实时显示「角色 2 · 作者 1」与「新增 N · 复用 M」</td><td>复用第 4 批的 <code>parseTagInput</code>，命名空间映射大类；导入时同一事务挂标签</td></tr>
+  <tr><td>导入</td><td>底部「共 N 本 · 体积 · 约 M 页」+ 一个主按钮；进度改为面板内联（当前文件 + 进度条 + 成功/跳过/失败），导入中不允许关闭</td><td><code>import_paths</code> 带上 <code>tags</code> / 收藏夹 / 保留目录结构</td></tr>
+</table>
+
+<p><b>二、几个刻意的决定</b></p>
+<table>
+  <tr><th>决定</th><th>原因</th></tr>
+  <tr><td>入口不放宽也不收窄：按钮仍先弹系统选择器</td><td>老用户已经形成「点按钮 → 选文件」的手感，多一次点击是退步；拖放才是新入口</td></tr>
+  <tr><td>重复的那本不复制，但<b>面板里填的标签会补到已有记录上</b></td><td>否则「填了标签、点了导入、什么都没发生」，用户只会以为标签功能坏了</td></tr>
+  <tr><td>「疑似重复」只看同名 + 同大小，<b>不算内容哈希</b></td><td>30 本 × 几百兆的哈希要几十秒，面板必须秒开；真正的去重仍由导入流程按哈希复核，误报不会丢文件</td></tr>
+  <tr><td>超过 <b>80 本</b>不数页数、超过 <b>300 本</b>不查重</td><td>每本一次 IO / 一条 SQL 会拖成十几秒的白屏；这两项都是「锦上添花」，导入时该有的信息一样不少</td></tr>
+  <tr><td>标签和画集记录<b>同一个事务</b>（<code>link_tags_in_tx</code>）</td><td>避免了「导入成功但没标签」的半成品；SQLite 不支持嵌套写事务，所以必须由调用方持有事务</td></tr>
+</table>
+
+<p><b>三、验证</b></p>
+<table>
+  <tr><th>检查</th><th>结果</th></tr>
+  <tr><td><code>cargo test</code></td><td class="pass">25 passed / 0 failed / 1 ignored（24 → 25）。新增用例覆盖：暂存展开与库内外判定、<code>count_pages</code> 页数、导入即挂标签（含分类路径落库）、重复导入只补标签不复制、<code>has_similar_archive</code> 的边界</td></tr>
+  <tr><td><code>tsc --noEmit</code> / <code>npm run build</code></td><td class="pass">通过。JS 383.18 → <b>391.07 KB</b>，CSS 69.11 → <b>74.59 KB</b>（面板样式 + 组件）</td></tr>
+  <tr><td><code>cargo clippy --all-targets</code></td><td class="pass">15 处，<b>新代码 0 条</b>；新增/改动的函数 rustfmt 无差异</td></tr>
+  <tr><td>死代码清理</td><td class="pass">删除已无引用的 <code>ImportOverlay.tsx</code> 与其专属样式（含 <code>.pulse-mark</code> 动画），进度改由面板内联承载</td></tr>
+  <tr><td>运行时可验证性</td><td class="fail">拖放命中区域、面板在 900px 宽窗口下的排布、<code>&lt;select&gt;</code> 与复选框的实际观感，仍需真机点一遍</td></tr>
+</table>
+
+<div class="note" style="margin-top:10px">
+<b>需要冒烟的三处：</b>① 拖 2–3 个压缩包到窗口 → 面板应列出这几本并显示页数；② 在标签框粘贴 <code>female:big breasts, sole female / character:aoba utsumihikari</code> → 应显示「女性 2 · 角色 1」并在导入后落进对应大类；③ 把同一本再拖一次并填一个新标签 → 应提示「1 本已在库中：不复制，只补标签」，导入后那本多出该标签、库里仍然只有一本。
+</div>
+
+<div class="note" style="margin-top:10px">
+<b>本批未做：</b>导入仍不可取消（需要把导入循环改成可中断）；面板不支持逐本改名（标题仍取文件名）；暂存清单不跨重启保留；大文件夹（&gt;300）不查重时，用户要等到导入完成才知道哪些是重复。
+</div>
+
+<footer>本报告基于 2026-11-17 的工程快照。审查阶段为静态代码审查 + 工具链体检 + 少量纯函数实测，<b>没有真实库操作验证</b>；第二批起补充了可复现的基准测试（1 万条记录的临时库）与 CLI 端到端冒烟，证据等级与边界见 12.4。<br>已落地六批：<b>第一批</b> <code>fbde767</code>（P0 四项 + F1，5 个源码文件，安全网为基线 <code>461e545</code>）、<b>第二批</b> <code>fcea7c6</code>（连接与任务层 + B4 入口校验，8 个源码文件）、<b>第三批</b> <code>87ff023</code>（阅读器 <code>gallery://</code> 数据通道 + CSP 收口 + 大列表渲染，14 个文件）、<b>第四批</b> <code>3ab267b</code>（批量标签解析命名空间 + <code>add_tags_bulk</code> 单事务导入，9 个文件）、<b>第五批</b> <code>8c32671</code>（阅读器动图加载：缓存 pin + 版本化 URL + 按字节预取，8 个文件）、<b>第六批</b> <code>e07be4b</code>（导入面板：暂存清单 + 标签识别 + 单事务挂标签，14 个文件）。<br>全程未修改评分数据与筛选语义、未访问 <code>F:\Hthings\BENZI</code> 与真实 <code>.gallery/library.db</code>、未删除任何文件、未执行针对真实库的 scan / import / purge、未结束运行中的正式版（PID 46516）、未重新打包。所有实测均在系统临时目录下的独立库完成。</footer>
 
 </div>
 </body>
