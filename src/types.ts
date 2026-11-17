@@ -198,6 +198,33 @@ export interface TagTranslationInput {
 export interface ImportOptions {
   addToCollection?: number;
   preserveStructure?: boolean;
+  /** 导入成功后挂到每一本新画集上的标签。 */
+  tags?: TagDraft[];
+}
+
+/** 导入面板里的一行：拖进来之后、点确认之前的状态。 */
+export interface StageItem {
+  /** 源文件绝对路径，导入时原样回传。 */
+  path: string;
+  fileName: string;
+  /** 去掉扩展名，作为标题初值展示。 */
+  stem: string;
+  extension: string;
+  sizeBytes: number;
+  /** 压缩包里的图片张数；批量较大时后端不数，为 null。 */
+  pageCount: number | null;
+  /** 库里已有同名同大小的记录，导入时会被跳过。 */
+  duplicate: boolean;
+  /** 文件本身就在库目录内，导入只建索引、不复制。 */
+  inLibrary: boolean;
+  /** 无法导入的原因。 */
+  issue: string | null;
+}
+
+export interface StageReport {
+  items: StageItem[];
+  errors: ImportErrorItem[];
+  totalBytes: number;
 }
 
 export interface ImportProgress {

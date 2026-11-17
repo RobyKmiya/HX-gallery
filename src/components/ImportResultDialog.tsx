@@ -21,7 +21,7 @@ export default function ImportResultDialog({
         <div className="modal-title-row">
           <div>
             <p className="eyebrow">IMPORT REPORT</p>
-            <h2>导入完成，但有文件未处理</h2>
+            <h2>导入完成，有几项需要注意</h2>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="关闭">
             <CloseIcon />

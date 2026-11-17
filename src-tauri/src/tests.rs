@@ -1895,3 +1895,91 @@ fn bench_open_and_deep_paging() {
         started.elapsed()
     );
 }
+
+#[test]
+fn import_stage_preview_and_tags_on_import() {
+    let fixture = Fixture::new();
+    let zip = fixture.source.join("A 画集.cbz");
+    write_zip(&zip, &["cover.png", "page2.png", "page3.png"], 12);
+
+    // 暂存：拖进来的是目录，应展开成 1 本；页数走 zip 中央目录，不解码封面。
+    let (staged, errors) = importer::gather_inputs(
+        &fixture.library,
+        std::slice::from_ref(&fixture.source),
+    );
+    assert!(errors.is_empty(), "errors: {errors:?}");
+    assert_eq!(staged.len(), 1);
+    assert!(!staged[0].in_library, "源目录在库外");
+    assert!(staged[0].issue.is_none());
+    assert_eq!(crate::archive::count_pages(&zip).unwrap(), 3);
+
+    // 导入时直接把标签挂上，分类不存在就建出来。
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip.clone()],
+        ImportOptions {
+            add_to_collection: None,
+            preserve_structure: None,
+            tags: vec![
+                TagDraft {
+                    name: "胡桃".into(),
+                    category: Some("角色/原神".into()),
+                },
+                TagDraft {
+                    name: "全彩".into(),
+                    category: Some("其他".into()),
+                },
+            ],
+        },
+        |_| {},
+    );
+    assert_eq!(report.imported, 1, "errors: {:?}", report.errors);
+    assert!(report.errors.is_empty(), "tags: {:?}", report.errors);
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let page =
+        library::query_archives(&context.conn, &fixture.library, &fixture.covers, &ArchiveQuery::default())
+            .unwrap();
+    let archive_id = page.items[0].id;
+
+    let attached = db::archive_tags(&context.conn, archive_id).unwrap();
+    assert_eq!(attached.len(), 2, "标签应随导入一起挂上");
+    let find = |name: &str| attached.iter().find(|tag| tag.name == name).unwrap();
+    assert!(
+        find("胡桃")
+            .category
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("角色"),
+        "显式路径应落进角色大类"
+    );
+    assert_eq!(find("全彩").category.as_deref(), Some("其他"));
+
+    // 「疑似重复」只看同名同大小，命中后导入流程自己还会按内容哈希复核。
+    let size = fs::metadata(&zip).unwrap().len() as i64;
+    assert!(db::has_similar_archive(&context.conn, "A 画集.cbz", size).unwrap());
+    assert!(!db::has_similar_archive(&context.conn, "A 画集.cbz", size + 1).unwrap());
+
+    // 再导一次同一本：不复制、不重复建记录，但面板里新填的标签要补到已有记录上。
+    let again = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip],
+        ImportOptions {
+            tags: vec![TagDraft {
+                name: "补的标签".into(),
+                category: None,
+            }],
+            ..Default::default()
+        },
+        |_| {},
+    );
+    assert_eq!(again.imported, 0);
+    assert_eq!(again.skipped, 1, "errors: {:?}", again.errors);
+    let attached = db::archive_tags(&context.conn, archive_id).unwrap();
+    assert!(
+        attached.iter().any(|tag| tag.name == "补的标签"),
+        "重复导入时标签应补到已有画集上"
+    );
+}

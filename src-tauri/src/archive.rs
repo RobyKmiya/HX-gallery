@@ -46,6 +46,24 @@ pub(crate) fn decode_image(bytes: &[u8], max_alloc: u64) -> Result<DynamicImage,
     DynamicImage::from_decoder(decoder).map_err(|error| format!("图片无法解码: {error}"))
 }
 
+/// 只数「看起来是页」的图片条目，不解压、不解码。
+///
+/// 导入面板要在用户点确认之前就报出「这本大概多少页」，而 `inspect_archive`
+/// 会顺带解码一张封面（几十到几百毫秒）；一次拖 30 本进来就是十几秒的空白。
+/// 这里只读 zip 的中央目录，30 本通常几十毫秒。
+pub fn count_pages(path: &Path) -> Result<i64, String> {
+    let file = File::open(path).map_err(|error| format!("无法打开压缩包: {error}"))?;
+    let archive =
+        ZipArchive::new(file).map_err(|error| format!("压缩包损坏或格式不支持: {error}"))?;
+
+    let total = archive
+        .file_names()
+        .filter(|name| !is_ignored_entry(name) && is_image_name(name))
+        .count();
+
+    Ok(total as i64)
+}
+
 #[derive(Debug, Default)]
 pub struct ArchiveInspection {
     pub page_count: i64,

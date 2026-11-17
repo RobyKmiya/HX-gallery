@@ -337,6 +337,7 @@ fn run(cli: Cli) -> Result<Value, String> {
                 ImportOptions {
                     add_to_collection: collection_id,
                     preserve_structure: None,
+                    tags: Vec::new(),
                 },
                 |_| {},
             );

@@ -11,11 +11,45 @@ use walkdir::WalkDir;
 use crate::archive;
 use crate::db;
 use crate::fsutil;
-use crate::models::{ImportErrorItem, ImportOptions, ImportProgress, ImportReport};
+use crate::models::{
+    BulkTagReport, ImportErrorItem, ImportOptions, ImportProgress, ImportReport, TagDraft,
+};
 
 struct Candidate {
     source: PathBuf,
     base: PathBuf,
+}
+
+/// 导入面板的一行：把用户给的一批路径展开成实际的压缩包清单。
+pub struct StagedInput {
+    pub source: PathBuf,
+    pub in_library: bool,
+    pub issue: Option<String>,
+}
+
+/// 只做展开和轻量校验，不复制、不读压缩包内容（页数由调用方按需再数）。
+pub fn gather_inputs(root: &Path, inputs: &[PathBuf]) -> (Vec<StagedInput>, Vec<ImportErrorItem>) {
+    let mut errors = Vec::new();
+    let candidates = collect_candidates(inputs, &mut errors);
+
+    let staged = candidates
+        .into_iter()
+        .map(|candidate| {
+            let relative = relative_of(root, &candidate.source);
+            let inside_gallery = relative
+                .as_deref()
+                .map(|rel| rel == ".gallery" || rel.starts_with(".gallery/"))
+                .unwrap_or(false);
+            StagedInput {
+                in_library: relative.is_some(),
+                issue: inside_gallery
+                    .then(|| "位于画廊自身的 .gallery 目录内，不能导入".to_string()),
+                source: candidate.source,
+            }
+        })
+        .collect();
+
+    (staged, errors)
 }
 
 /// 写入一条画集记录所需的字段。参数较多，集中成一个结构体避免调用处错位。
@@ -225,6 +259,27 @@ where
                         continue;
                     }
                 }
+                // 重复的那本虽然不复制，但用户在导入面板里填的标签是有意义的：
+                // 直接丢掉会让人以为「填了标签却没生效」。这里补到已有记录上。
+                if !options.tags.is_empty() {
+                    match db::add_tags_bulk(connection, existing_id, &options.tags) {
+                        Ok(report) => {
+                            for failure in report.failed {
+                                errors.push(ImportErrorItem {
+                                    file: display_name.clone(),
+                                    message: format!(
+                                        "标签「{}」未能添加：{}",
+                                        failure.name, failure.reason
+                                    ),
+                                });
+                            }
+                        }
+                        Err(error) => errors.push(ImportErrorItem {
+                            file: display_name.clone(),
+                            message: format!("重复文件未能补加标签: {error}"),
+                        }),
+                    }
+                }
                 skipped += 1;
                 emit_progress(
                     &mut on_progress,
@@ -355,9 +410,24 @@ where
             inspection_error: inspection.error.as_deref(),
         };
 
-        // 写库与加入收藏夹在同一个事务里：任一步失败都回滚，不会留下半成品记录。
-        match insert_archive_atomic(connection, &insert, options.add_to_collection) {
-            Ok(_) => imported += 1,
+        // 写库、加入收藏夹、挂标签在同一个事务里：任一步失败都回滚，
+        // 不会留下「导入成功但没标签」或「进了收藏夹但没记录」的半成品。
+        match insert_archive_atomic(
+            connection,
+            &insert,
+            options.add_to_collection,
+            &options.tags,
+        ) {
+            Ok((_, tag_report)) => {
+                // 单条标签失败不影响这本画集的导入，但必须如实报出来。
+                for failure in tag_report.failed {
+                    errors.push(ImportErrorItem {
+                        file: file_name.clone(),
+                        message: format!("标签「{}」未能添加：{}", failure.name, failure.reason),
+                    });
+                }
+                imported += 1
+            }
             Err(error) => {
                 if !source_in_library {
                     let _ = fs::remove_file(&target);
@@ -426,7 +496,8 @@ fn insert_archive_atomic(
     connection: &Connection,
     insert: &ArchiveInsert<'_>,
     collection_id: Option<i64>,
-) -> Result<i64, String> {
+    tags: &[TagDraft],
+) -> Result<(i64, BulkTagReport), String> {
     let transaction = db::begin_write(connection)?;
     let archive_id = db::insert_archive(
         &transaction,
@@ -447,10 +518,17 @@ fn insert_archive_atomic(
             .map_err(|error| format!("加入收藏夹失败: {error}"))?;
     }
 
+    let tag_report = if tags.is_empty() {
+        BulkTagReport::default()
+    } else {
+        db::link_tags_in_tx(&transaction, archive_id, tags)
+            .map_err(|error| format!("挂标签失败: {error}"))?
+    };
+
     transaction
         .commit()
         .map_err(|error| format!("提交导入记录失败: {error}"))?;
-    Ok(archive_id)
+    Ok((archive_id, tag_report))
 }
 
 fn collect_candidates(inputs: &[PathBuf], errors: &mut Vec<ImportErrorItem>) -> Vec<Candidate> {

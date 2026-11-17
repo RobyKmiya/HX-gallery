@@ -654,6 +654,30 @@ pub fn find_duplicate(conn: &Connection, hash: &str) -> Result<Option<i64>, Stri
     .map_err(|e| format!("检查重复文件失败: {e}"))
 }
 
+/// 导入面板的「疑似重复」判定：同名 + 同大小。
+///
+/// 这里故意不算内容哈希 —— 一次拖 30 本、每本几百兆，光哈希就要几十秒，
+/// 而面板要的是「立刻给出提示」。真正的去重仍由导入流程按内容哈希决定，
+/// 所以这里只作为提示标签，误报不会导致文件被丢掉。
+pub fn has_similar_archive(
+    conn: &Connection,
+    file_name: &str,
+    file_size: i64,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT 1 FROM archives
+         WHERE deleted_at IS NULL
+           AND file_name = ?1 COLLATE NOCASE
+           AND file_size = ?2
+         LIMIT 1",
+        params![file_name, file_size],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(|e| format!("检查同名文件失败: {e}"))
+}
+
 pub fn insert_archive(
     conn: &Connection,
     rel_path: &str,
@@ -1282,6 +1306,23 @@ pub fn add_tags_bulk(
 ) -> Result<BulkTagReport, String> {
     ensure_archive_exists(conn, archive_id)?;
     let transaction = begin_write(conn)?;
+    let report = link_tags_in_tx(&transaction, archive_id, drafts)?;
+    transaction
+        .commit()
+        .map_err(|e| format!("提交标签导入失败: {e}"))?;
+    Ok(report)
+}
+
+/// 在**调用方已开启的事务里**挂标签。
+///
+/// 导入新画集时标签要和画集记录同生共死：写库成功、挂标签失败就应该整体回滚，
+/// 而不是留下一本「导入成功但没标签」的孤儿。因此这里绝不自己开事务
+/// （SQLite 不支持嵌套写事务，会直接报 SQLITE_BUSY）。
+pub fn link_tags_in_tx(
+    transaction: &Connection,
+    archive_id: i64,
+    drafts: &[TagDraft],
+) -> Result<BulkTagReport, String> {
     let mut report = BulkTagReport::default();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -1307,7 +1348,7 @@ pub fn add_tags_bulk(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            Some(path) => match ensure_category_path(&transaction, path) {
+            Some(path) => match ensure_category_path(transaction, path) {
                 Ok(canonical) => Some(canonical),
                 Err(reason) => {
                     report.failed.push(BulkTagFailure {
@@ -1405,10 +1446,6 @@ pub fn add_tags_bulk(
             report.linked += 1;
         }
     }
-
-    transaction
-        .commit()
-        .map_err(|e| format!("提交标签导入失败: {e}"))?;
 
     Ok(report)
 }

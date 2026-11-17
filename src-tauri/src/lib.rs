@@ -19,12 +19,17 @@ use tauri::{AppHandle, Manager, State};
 
 use models::{
     ArchivePage, ArchiveQuery, BulkTagReport, Collection, ImportOptions, ImportReport, LibraryState,
-    ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb, ScanReport, Tag, TagCategory, TagDraft,
-    TagGraph, TagTranslationInput, TrashedArchive,
+    ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb, ScanReport, StageItem, StageReport, Tag,
+    TagCategory, TagDraft, TagGraph, TagTranslationInput, TrashedArchive,
 };
 
 /// 一次导入最多接受多少个入口路径，避免单次 IPC 传入超大数组。
 const MAX_IMPORT_INPUTS: usize = 20_000;
+
+/// 导入面板里至多给这么多本数页数（打开 zip 中央目录，单本几十毫秒）。
+const STAGE_PAGE_COUNT_LIMIT: usize = 80;
+/// 导入面板里至多给这么多本做「同名同大小」查重（每本一条 SQL）。
+const STAGE_DUPLICATE_LIMIT: usize = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AppSettings {
@@ -327,6 +332,115 @@ async fn import_paths(
     })
     .await
     .map_err(|error| format!("导入任务异常结束: {error}"))?
+}
+
+/// 导入面板的暂存：把路径展开成压缩包清单，并给出大小、页数与「疑似重复」提示。
+///
+/// 这里刻意不做任何重活：不解压、不解码封面、不算内容哈希。面板只负责让用户
+/// 在确认前看清「要进来什么」，真正的去重与封面生成仍在 `import_paths` 里完成。
+#[tauri::command]
+async fn stage_import_paths(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<StageReport, String> {
+    if paths.len() > MAX_IMPORT_INPUTS {
+        return Err(format!("一次最多导入 {MAX_IMPORT_INPUTS} 个路径"));
+    }
+    if paths.is_empty() {
+        return Ok(StageReport {
+            items: Vec::new(),
+            errors: Vec::new(),
+            total_bytes: 0,
+        });
+    }
+
+    let root = {
+        let inner = state.lock()?;
+        inner
+            .library
+            .as_ref()
+            .ok_or_else(|| "请先选择库目录".to_string())?
+            .root
+            .clone()
+    };
+    let inputs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<StageReport, String> {
+        // 只查重需要数据库，用工作连接（不迁移、不抢主连接）。
+        let connection = db::open_worker_connection(&root)?;
+        let (staged, mut errors) = importer::gather_inputs(&root, &inputs);
+
+        // 一次拖几百本时，页数与查重都是「每本一次 IO / 一次查询」，会拖成十几秒的空白。
+        // 超过阈值就先不显示（导入时该有的信息一样不少），保证面板立刻可用。
+        let with_pages = staged.len() <= STAGE_PAGE_COUNT_LIMIT;
+        let with_duplicates = staged.len() <= STAGE_DUPLICATE_LIMIT;
+
+        let mut items = Vec::with_capacity(staged.len());
+        let mut total_bytes = 0i64;
+
+        for input in staged {
+            let file_name = input
+                .source
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| input.source.to_string_lossy().to_string());
+            let stem = input
+                .source
+                .file_stem()
+                .map(|value| value.to_string_lossy().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| file_name.clone());
+            let extension = input
+                .source
+                .extension()
+                .map(|value| value.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+
+            let (size_bytes, issue) = match fs::metadata(&input.source) {
+                Ok(metadata) if metadata.is_file() => (metadata.len() as i64, input.issue),
+                Ok(_) => (0, Some("不是普通文件".to_string())),
+                Err(error) => (0, Some(format!("无法读取文件信息: {error}"))),
+            };
+            total_bytes += size_bytes.max(0);
+
+            let page_count = if issue.is_none() && with_pages {
+                archive::count_pages(&input.source).ok()
+            } else {
+                None
+            };
+
+            let duplicate = issue.is_none()
+                && with_duplicates
+                && db::has_similar_archive(&connection, &file_name, size_bytes).unwrap_or(false);
+
+            items.push(StageItem {
+                path: input.source.to_string_lossy().to_string(),
+                file_name,
+                stem,
+                extension,
+                size_bytes,
+                page_count,
+                duplicate,
+                in_library: input.in_library,
+                issue,
+            });
+        }
+
+        // 前端展示顺序按文件名排，和导入顺序一致，用户核对时不会跳来跳去。
+        items.sort_by(|left, right| {
+            left.file_name
+                .to_ascii_lowercase()
+                .cmp(&right.file_name.to_ascii_lowercase())
+        });
+
+        Ok(StageReport {
+            items,
+            total_bytes,
+            errors: std::mem::take(&mut errors),
+        })
+    })
+    .await
+    .map_err(|error| format!("准备导入清单异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -1006,6 +1120,7 @@ pub fn run() {
             get_library_state,
             open_library,
             import_paths,
+            stage_import_paths,
             scan_library,
             query_archives,
             set_rating,

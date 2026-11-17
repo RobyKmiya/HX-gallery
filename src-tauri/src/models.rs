@@ -145,6 +145,39 @@ pub struct ArchiveQuery {
 pub struct ImportOptions {
     pub add_to_collection: Option<i64>,
     pub preserve_structure: Option<bool>,
+    /// 导入成功后挂到每一本新画集上的标签。`TagDraft` 与批量导入共用同一套
+    /// 语义：分类不存在就建、已有分类不覆盖。
+    #[serde(default)]
+    pub tags: Vec<TagDraft>,
+}
+
+/// 导入面板里的一行：拖进来（或选中）之后、点确认之前的状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageItem {
+    /// 源文件绝对路径，导入时按原样回传。
+    pub path: String,
+    pub file_name: String,
+    /// 去掉扩展名的名字，界面上作为「标题」初值展示。
+    pub stem: String,
+    pub extension: String,
+    pub size_bytes: i64,
+    /// 压缩包里的图片张数；读不出来时为 None（不阻断导入）。
+    pub page_count: Option<i64>,
+    /// 库里已有同名同大小的记录 —— 大概率是重复拖入，导入时会被跳过。
+    pub duplicate: bool,
+    /// 文件本身就在库目录里，导入只建索引、不复制。
+    pub in_library: bool,
+    /// 无法导入的原因；非空时这一行是「不可导入」状态。
+    pub issue: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageReport {
+    pub items: Vec<StageItem>,
+    pub errors: Vec<ImportErrorItem>,
+    pub total_bytes: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -12,6 +12,7 @@ import type {
   ReaderPage,
   ReaderThumb,
   ScanReport,
+  StageReport,
   Tag,
   TagCategory,
   TagDraft,
@@ -31,6 +32,10 @@ export const api = {
 
   importPaths: (paths: string[], options: ImportOptions) =>
     invoke<ImportReport>("import_paths", { paths, options }),
+
+  /** 导入前的暂存：展开路径、给出大小 / 页数 / 疑似重复，不做任何复制。 */
+  stageImportPaths: (paths: string[]) =>
+    invoke<StageReport>("stage_import_paths", { paths }),
 
   scanLibrary: () => invoke<ScanReport>("scan_library"),
 

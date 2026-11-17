@@ -32,7 +32,10 @@ import ArchiveCard from "./ArchiveCard";
 import CollectionEditor from "./CollectionEditor";
 import CollectionNameDialog from "./CollectionNameDialog";
 import DetailDrawer from "./DetailDrawer";
-import ImportOverlay from "./ImportOverlay";
+import ImportDialog, {
+  type ImportDialogHandle,
+  type ImportSubmit,
+} from "./ImportDialog";
 import ImportResultDialog from "./ImportResultDialog";
 import Reader from "./Reader";
 import TagCenter from "./TagCenter";
@@ -246,6 +249,10 @@ export default function LibraryView({
     null,
   );
   const [importReport, setImportReport] = useState<ImportReport | null>(null);
+  /** 导入面板：先暂存、再确认，避免拖错文件就直接写进库里。 */
+  const [importOpen, setImportOpen] = useState(false);
+  const [importSeedPaths, setImportSeedPaths] = useState<string[]>([]);
+  const importDialogRef = useRef<ImportDialogHandle>(null);
   const [selected, setSelected] = useState<ArchiveCardData | null>(null);
   const [readerCard, setReaderCard] = useState<ArchiveCardData | null>(null);
   const [toast, setToast] = useState<ToastData | null>(null);
@@ -903,9 +910,15 @@ export default function LibraryView({
     return () => observer.disconnect();
   }, [items.length, loadPage, page, total, viewMode]);
 
-  const runImport = useCallback(
-    async (paths: string[]) => {
-      if (paths.length === 0) return;
+  /** 打开导入面板：先让用户核对清单与标签，再决定写不写库。 */
+  const openImport = useCallback((paths: string[]) => {
+    setImportSeedPaths(paths);
+    setImportOpen(true);
+  }, []);
+
+  const startImport = useCallback(
+    async (payload: ImportSubmit) => {
+      if (payload.paths.length === 0) return;
 
       setImporting(true);
       setImportProgress({
@@ -919,13 +932,18 @@ export default function LibraryView({
       });
 
       try {
-        const report = await api.importPaths(paths, {
-          preserveStructure: false,
+        const report = await api.importPaths(payload.paths, {
+          addToCollection: payload.collectionId ?? undefined,
+          preserveStructure: payload.preserveStructure,
+          tags: payload.tags,
         });
+        setImportOpen(false);
+        setImportSeedPaths([]);
         notify(report.message, report.failed > 0 ? "error" : "success");
         if (report.errors.length > 0) setImportReport(report);
         await onLibraryChanged();
         await loadCollections();
+        await loadTags();
         await loadPage(1, true, true);
       } catch (error) {
         notify(`导入失败：${String(error)}`, "error");
@@ -934,7 +952,7 @@ export default function LibraryView({
         setImportProgress(null);
       }
     },
-    [loadCollections, loadPage, notify, onLibraryChanged],
+    [loadCollections, loadPage, loadTags, notify, onLibraryChanged],
   );
 
   useEffect(() => {
@@ -964,7 +982,12 @@ export default function LibraryView({
           notify("正在导入，请等当前任务完成", "info");
           return;
         }
-        void runImport(paths);
+        // 面板已经开着就直接并入清单，不再弹第二层面板。
+        if (importDialogRef.current) {
+          importDialogRef.current.addPaths(paths);
+          return;
+        }
+        openImport(paths);
       })
       .then((stop) => {
         if (disposed) stop();
@@ -975,7 +998,7 @@ export default function LibraryView({
       disposed = true;
       unlisten?.();
     };
-  }, [importing, notify, runImport]);
+  }, [importing, notify, openImport]);
 
   const pickFiles = useCallback(async () => {
     try {
@@ -989,11 +1012,11 @@ export default function LibraryView({
       const paths = Array.isArray(selectedPaths)
         ? selectedPaths
         : [selectedPaths];
-      await runImport(paths);
+      openImport(paths);
     } catch (error) {
       notify(String(error), "error");
     }
-  }, [notify, runImport]);
+  }, [notify, openImport]);
 
   const pickFolder = useCallback(async () => {
     try {
@@ -1003,12 +1026,12 @@ export default function LibraryView({
         multiple: false,
       });
       if (typeof selectedFolder === "string") {
-        await runImport([selectedFolder]);
+        openImport([selectedFolder]);
       }
     } catch (error) {
       notify(String(error), "error");
     }
-  }, [notify, runImport]);
+  }, [notify, openImport]);
 
   const submitCollection = useCallback(
     async (name: string) => {
@@ -2761,15 +2784,15 @@ export default function LibraryView({
         />
       )}
 
-      {dragActive && (
+      {dragActive && !importOpen && (
         <div className="drop-overlay" aria-hidden="true">
           <div className="drop-card">
             <span className="drop-icon">
               <ImportIcon width={30} height={30} />
             </span>
-            <strong>松开即可导入</strong>
+            <strong>松开后核对并导入</strong>
             <p>支持 ZIP / CBZ 压缩包，或包含压缩包的文件夹</p>
-            <small>库内文件只建索引，不会重复复制</small>
+            <small>会先列出清单与标签，确认之后才写入库</small>
           </div>
         </div>
       )}
@@ -2802,7 +2825,25 @@ export default function LibraryView({
         />
       )}
 
-      {importing && <ImportOverlay progress={importProgress} />}
+      {importOpen && (
+        <ImportDialog
+          ref={importDialogRef}
+          initialPaths={importSeedPaths}
+          collections={collections}
+          knownTags={tags}
+          dragActive={dragActive}
+          importing={importing}
+          progress={importProgress}
+          onSubmit={(payload) => void startImport(payload)}
+          onClose={() => {
+            setImportOpen(false);
+            setImportSeedPaths([]);
+          }}
+          onPickFiles={() => void pickFiles()}
+          onPickFolder={() => void pickFolder()}
+          onNotify={notify}
+        />
+      )}
 
       {importReport && (
         <ImportResultDialog
