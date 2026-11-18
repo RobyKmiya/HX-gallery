@@ -141,6 +141,7 @@ archives_fts      FTS5 trigram（title / file_name / note）
 ### 3. 退出后自动发布（`release.rs` + `ReleasePanel.tsx`）
 - 面板登记源码目录 → 关窗时生成脚本 → 脚本脱离进程树等应用退出 → 跑 `npm run release` → 重开
 - **编码坑**：`.cmd` 必须纯 ASCII，中文路径交给 node 助手（`release-helper.mjs`）；加 `chcp 65001` 会让 cmd 把 `setlocal` 解析成 `01`
+- **黑框坑**：explorer 直接拉 `.cmd` 会带出可见控制台，一挂几分钟；改为 explorer 拉 `release-on-exit.vbs`（UTF-16LE+BOM，wscript 才认），由它 `sh.Run "...cmd...", 0, False` 隐藏执行整条链路
 
 ### 4. 单实例守卫（`instance.rs`）
 - Win32 命名互斥体 `Local\com.archivegallery.desktop.single-instance`
