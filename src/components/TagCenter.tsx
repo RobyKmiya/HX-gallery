@@ -54,6 +54,41 @@ export default function TagCenter({
   const [graph, setGraph] = useState<TagGraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphMinWeight, setGraphMinWeight] = useState(1);
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(
+    () => {
+      try {
+        const raw = window.localStorage.getItem("tagcenter-collapsed");
+        const list: unknown = raw ? JSON.parse(raw) : [];
+        return new Set(
+          Array.isArray(list)
+            ? list.filter((item): item is string => typeof item === "string")
+            : [],
+        );
+      } catch {
+        return new Set();
+      }
+    },
+  );
+
+  const toggleCategoryCollapsed = useCallback((path: string) => {
+    setCollapsedCategories((previous) => {
+      const next = new Set(previous);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      try {
+        window.localStorage.setItem(
+          "tagcenter-collapsed",
+          JSON.stringify([...next]),
+        );
+      } catch {
+        // localStorage 不可用时只影响本次记忆，不影响功能
+      }
+      return next;
+    });
+  }, []);
 
   const loadTags = useCallback(async () => {
     setLoading(true);
@@ -345,27 +380,85 @@ export default function TagCenter({
       return null;
     }
 
+    // 搜索时忽略折叠状态，保证命中结果全部可见
+    const collapsed = !searching && collapsedCategories.has(category.path);
+    const totalCount =
+      categoryCounts.get(category.path)?.total ?? directTags.length;
+
     return (
       <section
         key={category.path}
-        className="tag-category"
+        className={`tag-category${collapsed ? " is-collapsed" : ""}`}
         style={{ marginLeft: `${Math.min(category.depth, 5) * 14}px` }}
       >
-        <header className="tag-category-head">
+        <header
+          className="tag-category-head"
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          onClick={() => toggleCategoryCollapsed(category.path)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              toggleCategoryCollapsed(category.path);
+            }
+          }}
+        >
           <ChevronRightIcon width={12} height={12} />
           <FolderIcon width={14} height={14} />
           <strong>{category.name}</strong>
           {category.path !== category.name && (
             <span className="tag-category-path">{category.path}</span>
           )}
-          <span className="tag-category-count">{directTags.length}</span>
+          <span className="tag-category-count">
+            {collapsed ? totalCount : directTags.length}
+          </span>
         </header>
-        {directTags.length > 0 && (
+        {!collapsed && directTags.length > 0 && (
           <div className="tag-category-rows">
             {directTags.map(renderTagRow)}
           </div>
         )}
-        {childSections}
+        {!collapsed && childSections}
+      </section>
+    );
+  }
+
+  function renderCollapsibleGroup(
+    path: string,
+    icon: ReactNode,
+    title: string,
+    subtitle: string,
+    rows: Tag[],
+  ): ReactNode {
+    const collapsed = !searching && collapsedCategories.has(path);
+    return (
+      <section
+        key={path}
+        className={`tag-category is-uncategorized${collapsed ? " is-collapsed" : ""}`}
+      >
+        <header
+          className="tag-category-head"
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          onClick={() => toggleCategoryCollapsed(path)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              toggleCategoryCollapsed(path);
+            }
+          }}
+        >
+          <ChevronRightIcon width={12} height={12} />
+          {icon}
+          <strong>{title}</strong>
+          <span className="tag-category-path">{subtitle}</span>
+          <span className="tag-category-count">{rows.length}</span>
+        </header>
+        {!collapsed && (
+          <div className="tag-category-rows">{rows.map(renderTagRow)}</div>
+        )}
       </section>
     );
   }
@@ -547,25 +640,17 @@ export default function TagCenter({
               </div>
             ) : (
               <>
+                {/* 未分类置顶：这是最常需要补分类的地方，不用每次滑到底 */}
+                {uncategorizedTags.length > 0 &&
+                  renderCollapsibleGroup(
+                    "__uncategorized__",
+                    <TagIcon width={14} height={14} />,
+                    "未分类",
+                    "尚未指定分类的标签",
+                    uncategorizedTags,
+                  )}
                 {(childrenByCategory.get(null) ?? []).map((category) =>
                   renderCategory(category),
-                )}
-                {uncategorizedTags.length > 0 && (
-                  <section className="tag-category is-uncategorized">
-                    <header className="tag-category-head">
-                      <TagIcon width={14} height={14} />
-                      <strong>未分类</strong>
-                      <span className="tag-category-path">
-                        尚未指定分类的标签
-                      </span>
-                      <span className="tag-category-count">
-                        {uncategorizedTags.length}
-                      </span>
-                    </header>
-                    <div className="tag-category-rows">
-                      {uncategorizedTags.map(renderTagRow)}
-                    </div>
-                  </section>
                 )}
               </>
             )
