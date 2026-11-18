@@ -138,6 +138,10 @@ pub fn open_library(root: &Path) -> Result<LibraryContext, String> {
 
     migrate(&conn, &gallery_dir)?;
     sync_meta_schema(&gallery_dir, &mut meta)?;
+    // 启动期每日快照（尽力而为，失败不影响打开库）。
+    if let Err(error) = daily_backup(&conn, &gallery_dir) {
+        eprintln!("daily backup skipped: {error}");
+    }
 
     Ok(LibraryContext {
         root,
@@ -478,6 +482,85 @@ fn backup_database(conn: &Connection, gallery_dir: &Path, version: i64) -> Resul
         "database v{version} backed up to {} ({size} bytes)",
         backup_path.to_string_lossy()
     );
+    Ok(())
+}
+
+/// 启动期每日滚动备份：距上一份日备不足 20 小时则跳过，保留最近 3 份。
+///
+/// 与迁移备份不同，这里失败只降级为跳过（eprintln），绝不阻断打开库——
+/// 备份是为了防数据丢失，不该成为启动失败的源头。
+fn daily_backup(conn: &Connection, gallery_dir: &Path) -> Result<(), String> {
+    const KEEP: usize = 3;
+    const MIN_INTERVAL_MS: i64 = 20 * 60 * 60 * 1000;
+
+    let backup_dir = gallery_dir.join("backups");
+    fs::create_dir_all(&backup_dir).map_err(|e| format!("无法创建备份目录: {e}"))?;
+
+    let mut dailies: Vec<PathBuf> = fs::read_dir(&backup_dir)
+        .map_err(|e| format!("无法读取备份目录: {e}"))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("library-daily-") && name.ends_with(".db"))
+        })
+        .collect();
+    // 文件名内嵌 now_ms，字典序即时间序。
+    dailies.sort();
+
+    // 无论今天是否需要新快照，都先把超额旧档清掉——否则一份新鲜的日备
+    // 会让跳过分支永久搁置清理。
+    while dailies.len() > KEEP {
+        let oldest = dailies.remove(0);
+        if let Err(error) = fs::remove_file(&oldest) {
+            eprintln!(
+                "清理旧备份失败（保留继续）: {} — {error}",
+                oldest.to_string_lossy()
+            );
+            break;
+        }
+    }
+
+    let now = fsutil::now_ms();
+    if let Some(latest) = dailies.last() {
+        let stamp = latest
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.rsplit('-').next())
+            .and_then(|tail| tail.parse::<i64>().ok());
+        if let Some(stamp) = stamp {
+            if now - stamp < MIN_INTERVAL_MS {
+                return Ok(());
+            }
+        }
+    }
+
+    let backup_path = backup_dir.join(format!("library-daily-{}.db", fsutil::now_ms()));
+    let target = backup_path.to_string_lossy().to_string();
+    conn.execute("VACUUM INTO ?1", rusqlite::params![target])
+        .map_err(|e| format!("每日备份失败: {e}"))?;
+    let size = fs::metadata(&backup_path).map(|meta| meta.len()).unwrap_or(0);
+    if size == 0 {
+        let _ = fs::remove_file(&backup_path);
+        return Err("每日备份为空，已删除".to_string());
+    }
+    eprintln!(
+        "daily backup written to {} ({size} bytes)",
+        backup_path.to_string_lossy()
+    );
+
+    dailies.push(backup_path);
+    while dailies.len() > KEEP {
+        let oldest = dailies.remove(0);
+        if let Err(error) = fs::remove_file(&oldest) {
+            eprintln!(
+                "清理旧备份失败（保留继续）: {} — {error}",
+                oldest.to_string_lossy()
+            );
+            break;
+        }
+    }
     Ok(())
 }
 

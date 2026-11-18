@@ -2283,3 +2283,49 @@ fn record_read_rejects_deleted_archive() {
         "已进回收站的画集不应再计数"
     );
 }
+
+#[test]
+fn daily_backup_skips_fresh_and_prunes_old() {
+    let fixture = Fixture::new();
+    let backups = fixture.library.join(".gallery").join("backups");
+
+    // Fixture::new 里的 open_library 已经写了一份日备；确认它存在。
+    let fresh: Vec<_> = fs::read_dir(&backups)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("library-daily-"))
+        })
+        .collect();
+    assert_eq!(fresh.len(), 1, "首次打开应写一份日备");
+
+    // 20 小时内再次打开：跳过，不新增。
+    let context = db::open_library(&fixture.library).unwrap();
+    drop(context);
+    let after_skip = fs::read_dir(&backups).unwrap().count();
+    assert_eq!(after_skip, 1, "20 小时内重复打开不应新增日备");
+
+    // 伪造 3 份过期日备（时间戳远小于当前，排序在最前）。
+    for index in 0..3i64 {
+        let stamp: i64 = 1_000_000_000_000 + index; // 2001 年，肯定过期
+        fs::write(backups.join(format!("library-daily-{stamp}.db")), b"stale").unwrap();
+    }
+    let context = db::open_library(&fixture.library).unwrap();
+    drop(context);
+
+    let mut names: Vec<String> = fs::read_dir(&backups)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with("library-daily-"))
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 3, "日备应滚动保留最近 3 份");
+    assert!(
+        !names.iter().any(|name| name.contains("1000000000000")),
+        "最老的过期日备应被清理"
+    );
+}

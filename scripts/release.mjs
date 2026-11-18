@@ -213,4 +213,12 @@ if (dryRun) {
 } else {
   console.log(`\n完成。新版 ${next} 已安装，直接双击桌面「画匣」就是最新版。`);
   console.log(`安装包留档：${setupPath}`);
+
+  // 发布成功后顺手导出真实库的标签译名快照（docs/tag-translations.json），
+  // 防止译名只存在库文件单点丢失。失败只警告，不影响发布结果。
+  try {
+    execFileSync('node', [path.join(ROOT, 'scripts', 'export-tags.mjs')], { stdio: 'inherit' });
+  } catch (error) {
+    warn(`标签译名导出失败（不影响发布）: ${String(error)}`);
+  }
 }

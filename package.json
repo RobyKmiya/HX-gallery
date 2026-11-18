@@ -12,6 +12,7 @@
     "release": "node scripts/release.mjs",
     "release:minor": "node scripts/release.mjs --minor",
     "release:major": "node scripts/release.mjs --major",
+    "export-tags": "node scripts/export-tags.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
