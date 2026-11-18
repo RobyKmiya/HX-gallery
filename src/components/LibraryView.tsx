@@ -21,6 +21,7 @@ import type {
   ImportProgress,
   ImportReport,
   LibraryState,
+  Queue,
   ReadStatus,
   SortDirection,
   SortKey,
@@ -37,7 +38,9 @@ import ImportDialog, {
   type ImportSubmit,
 } from "./ImportDialog";
 import ImportResultDialog from "./ImportResultDialog";
+import QueuePanel from "./QueuePanel";
 import Reader from "./Reader";
+import ReleasePanel from "./ReleasePanel";
 import TagCenter from "./TagCenter";
 import Toast, { type ToastData, type ToastKind } from "./Toast";
 import TrashCenter from "./TrashCenter";
@@ -313,6 +316,25 @@ export default function LibraryView({
   const [tagQuery, setTagQuery] = useState("");
   const [tagCenterOpen, setTagCenterOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
+  const [queuePanelOpen, setQueuePanelOpen] = useState(false);
+  const [releasePanelOpen, setReleasePanelOpen] = useState(false);
+  /**
+   * 正在浏览的待看目录。非空时列表只显示这个目录的成员；
+   * 它和收藏夹是两套筛选，进待看目录时把收藏夹选择清掉。
+   */
+  const [activeQueue, setActiveQueue] = useState<Queue | null>(null);
+
+  /** 打开待看目录：切到它的成员列表，并退出收藏夹视图。 */
+  const openQueue = useCallback((queue: Queue) => {
+    setActiveCollectionId(null);
+    setActiveQueue(queue);
+    setQueuePanelOpen(false);
+  }, []);
+
+  /** 回到全部画集。 */
+  const clearActiveQueue = useCallback(() => {
+    setActiveQueue(null);
+  }, []);
   const [search, setSearch] = useState(
     typeof savedPrefs.search === "string" ? savedPrefs.search : "",
   );
@@ -617,6 +639,7 @@ export default function LibraryView({
         sort,
         direction,
         collectionId: activeCollectionId ?? undefined,
+        queueId: activeQueue?.id ?? undefined,
         tagIds: activeTagIds.length > 0 ? activeTagIds : undefined,
         tagMode: activeTagIds.length > 0 ? tagMode : undefined,
         ratingBuckets: ratingBuckets.length > 0 ? ratingBuckets : undefined,
@@ -627,6 +650,7 @@ export default function LibraryView({
       }),
     [
       activeCollectionId,
+      activeQueue,
       activeTagIds,
       direction,
       groupBy,
@@ -1087,6 +1111,33 @@ export default function LibraryView({
       await loadPage(1, true, true);
     }
   }, [activeCollectionId, groupBy, loadCollections, loadPage]);
+
+  /**
+   * 阅读器里直接切上一本 / 下一本。
+   * 走的是「替换当前快照内的 readerCard」，不再新压一条浏览历史：
+   * 否则按后退会退回上一本，而不是退出阅读器。
+   */
+  /** 当前正在读的本子在列表里的位置；-1 表示不在当前列表里。 */
+  const readerIndex = useMemo(
+    () =>
+      readerCard
+        ? items.findIndex((item) => item.id === readerCard.id)
+        : -1,
+    [items, readerCard],
+  );
+
+  const switchReaderArchive = useCallback(
+    (direction: -1 | 1) => {
+      setReaderCard((current) => {
+        if (!current) return current;
+        const index = items.findIndex((item) => item.id === current.id);
+        if (index < 0) return current;
+        const next = items[index + direction];
+        return next ?? current;
+      });
+    },
+    [items],
+  );
 
   const updateReaderProgress = useCallback(
     (id: number, lastPage: number) => {
@@ -1587,8 +1638,13 @@ export default function LibraryView({
         <nav className="sidebar-nav" aria-label="画廊导航">
           <button
             type="button"
-            className={`nav-item${activeCollectionId === null ? " is-active" : ""}`}
-            onClick={() => setActiveCollectionId(null)}
+            className={`nav-item${
+              activeCollectionId === null && !activeQueue ? " is-active" : ""
+            }`}
+            onClick={() => {
+              setActiveCollectionId(null);
+              clearActiveQueue();
+            }}
           >
             <BookIcon />
             <span className="nav-label">全部画集</span>
@@ -1720,6 +1776,54 @@ export default function LibraryView({
             <span className="nav-label">标签中心</span>
             <span className="nav-count">{tags.length}</span>
           </button>
+
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => setQueuePanelOpen(true)}
+            title="随机挑一批画集排队看，带进度"
+          >
+            <BookIcon width={16} height={16} />
+            <span className="nav-label">待看目录</span>
+          </button>
+
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => setReleasePanelOpen(true)}
+            title="设置退出后自动更新，或立即更新"
+          >
+            <RefreshIcon width={16} height={16} />
+            <span className="nav-label">更新画匣</span>
+          </button>
+
+          {activeQueue && (
+            <div className="nav-row is-active">
+              <button
+                type="button"
+                className="nav-item is-active"
+                onClick={() => setQueuePanelOpen(true)}
+                title={`${activeQueue.name}：${activeQueue.finished}/${activeQueue.count} 已读完`}
+              >
+                <BookIcon width={16} height={16} />
+                <span className="nav-label">{activeQueue.name}</span>
+                <span className="nav-count">
+                  {activeQueue.finished}/{activeQueue.count}
+                </span>
+              </button>
+              <div className="nav-row-actions">
+                <button
+                  type="button"
+                  className="nav-mini"
+                  onClick={clearActiveQueue}
+                  title="退出待看目录"
+                  aria-label="退出待看目录"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
 
           <button
             type="button"
@@ -2767,6 +2871,9 @@ export default function LibraryView({
           onClose={() => setReaderCard(null)}
           onNotify={notify}
           onProgress={updateReaderProgress}
+          onSwitchArchive={switchReaderArchive}
+          hasPrevArchive={readerIndex > 0}
+          hasNextArchive={readerIndex >= 0 && readerIndex < items.length - 1}
         />
       )}
 
@@ -2810,6 +2917,23 @@ export default function LibraryView({
         <TrashCenter
           onClose={() => setTrashOpen(false)}
           onChanged={refreshAfterTrashChange}
+          onNotify={notify}
+        />
+      )}
+
+      {queuePanelOpen && (
+        <QueuePanel
+          tags={tags}
+          onClose={() => setQueuePanelOpen(false)}
+          onNotify={notify}
+          onOpenQueue={openQueue}
+          onChanged={() => void loadPage(1, true, true)}
+        />
+      )}
+
+      {releasePanelOpen && (
+        <ReleasePanel
+          onClose={() => setReleasePanelOpen(false)}
           onNotify={notify}
         />
       )}

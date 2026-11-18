@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "画匣",
-  "version": "1.0.0",
+  "version": "1.0.13",
   "identifier": "com.archivegallery.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,13 +26,17 @@
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost gallery: http://gallery.localhost data: blob:; font-src 'self' data:; media-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPCACHE/**"]
+        "scope": [
+          "$APPCACHE/**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "shortDescription": "本地离线的 ZIP / CBZ 画集画廊",
     "longDescription": "画匣把 ZIP / CBZ 图集统一导入本地库目录，支持封面总览、评分、标签、收藏夹、组合筛选与内置阅读器，全程不联网。",
     "publisher": "Archive Gallery",
@@ -48,7 +52,9 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["SimpChinese"],
+        "languages": [
+          "SimpChinese"
+        ],
         "displayLanguageSelector": false
       }
     }

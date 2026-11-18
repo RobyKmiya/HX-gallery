@@ -906,7 +906,8 @@ fn migrates_v1_tags_to_translated_schema() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    // 迁移应当一步推到最新版本（v8 含待看目录与阅读次数）。
+    assert_eq!(version, 8);
     let deleted_column: i64 = context
         .conn
         .query_row(
@@ -1981,5 +1982,304 @@ fn import_stage_preview_and_tags_on_import() {
     assert!(
         attached.iter().any(|tag| tag.name == "补的标签"),
         "重复导入时标签应补到已有画集上"
+    );
+}
+
+/// v8 迁移必须给老库补上 read_count / tags.weight 与两张待看目录表。
+#[test]
+fn migration_v8_adds_read_count_and_queues() {
+    let fixture = Fixture::new();
+    let context = db::open_library(&fixture.library).unwrap();
+
+    for (table, column) in [("archives", "read_count"), ("tags", "weight")] {
+        let count: i64 = context
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                [column],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "{table}.{column} 未建出来");
+    }
+
+    let tables: i64 = context
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN ('queues', 'queue_archives')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 2, "待看目录表未建出来");
+
+    let version: i64 = context
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+}
+
+/// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。
+#[test]
+fn zero_weight_tag_excludes_archive_entirely() {
+    let fixture = Fixture::new();
+
+    let keep = fixture.source.join("保留的本.cbz");
+    let drop = fixture.source.join("排除的本.cbz");
+    write_zip(&keep, &["a.png"], 11);
+    write_zip(&drop, &["b.png"], 22);
+
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![keep, drop],
+        ImportOptions {
+            tags: vec![TagDraft {
+                name: "共同标签".into(),
+                category: None,
+            }],
+            ..Default::default()
+        },
+        |_| {},
+    );
+    assert_eq!(report.imported, 2, "errors: {:?}", report.errors);
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let drop_id = page
+        .items
+        .iter()
+        .find(|item| item.title == "排除的本")
+        .unwrap()
+        .id;
+
+    db::add_tag(&context.conn, drop_id, "不想看的标签").unwrap();
+    let tags = db::list_tags(&context.conn).unwrap();
+    let zero_tag = tags.iter().find(|t| t.name == "不想看的标签").unwrap();
+    assert_eq!(zero_tag.weight, db::DEFAULT_TAG_WEIGHT, "新标签默认 100 权");
+    db::set_tag_weight(&context.conn, zero_tag.id, 0).unwrap();
+
+    let fill = crate::queue::fill_queue(
+        &mut context.conn,
+        "测试目录",
+        &crate::models::QueueFillOptions {
+            size: Some(10),
+            tag_ids: vec![],
+            include_read: None,
+        },
+        Some(1),
+    )
+    .unwrap();
+
+    assert_eq!(fill.added, 1, "应只挑到 1 本：{:?}", fill.titles);
+    assert_eq!(fill.titles, vec!["保留的本".to_string()]);
+    assert_eq!(fill.excluded_by_weight, 1, "被 0 权标签排除 1 本");
+}
+
+/// 看得少的更容易被挑中：连跑多个种子，新本应显著多于已看过很多遍的。
+#[test]
+fn queue_prefers_less_read_archives() {
+    let fixture = Fixture::new();
+
+    let fresh = fixture.source.join("新本.cbz");
+    let seen = fixture.source.join("看过的本.cbz");
+    write_zip(&fresh, &["a.png"], 31);
+    write_zip(&seen, &["b.png"], 44);
+
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![fresh, seen],
+        ImportOptions::default(),
+        |_| {},
+    );
+    assert_eq!(report.imported, 2, "errors: {:?}", report.errors);
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let seen_id = page
+        .items
+        .iter()
+        .find(|item| item.title == "看过的本")
+        .unwrap()
+        .id;
+
+    for _ in 0..9 {
+        db::record_read(&context.conn, seen_id).unwrap();
+    }
+    let reread = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let counter = reread
+        .items
+        .iter()
+        .find(|item| item.title == "看过的本")
+        .unwrap();
+    assert_eq!(counter.read_count, 9, "阅读次数应累计");
+
+    let mut fresh_hits = 0;
+    let mut seen_hits = 0;
+    for seed in 0..120u64 {
+        // 每次换目录名，避免「已在本目录里」把候选清空
+        let name = format!("抽样-{seed}");
+        let fill = crate::queue::fill_queue(
+            &mut context.conn,
+            &name,
+            &crate::models::QueueFillOptions {
+                size: Some(1),
+                tag_ids: vec![],
+                include_read: Some(true),
+            },
+            Some(seed),
+        )
+        .unwrap();
+        match fill.titles.first().map(String::as_str) {
+            Some("新本") => fresh_hits += 1,
+            Some("看过的本") => seen_hits += 1,
+            other => panic!("意外结果：{other:?}"),
+        }
+    }
+    assert!(
+        fresh_hits > seen_hits,
+        "新本应更容易被挑中：fresh={fresh_hits} seen={seen_hits}"
+    );
+}
+
+/// 待看目录最多 3 个，超出的淘汰最旧的。
+#[test]
+fn queues_are_capped_at_three() {
+    let fixture = Fixture::new();
+    let zip = fixture.source.join("A.cbz");
+    write_zip(&zip, &["a.png"], 5);
+
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip],
+        ImportOptions::default(),
+        |_| {},
+    );
+    assert_eq!(report.imported, 1, "errors: {:?}", report.errors);
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    for index in 0..5 {
+        crate::queue::fill_queue(
+            &mut context.conn,
+            &format!("目录-{index}"),
+            &crate::models::QueueFillOptions {
+                size: Some(1),
+                tag_ids: vec![],
+                include_read: Some(true),
+            },
+            Some(index),
+        )
+        .unwrap();
+    }
+
+    let queues = crate::queue::list_queues(&context.conn).unwrap();
+    assert_eq!(queues.len(), 3, "待看目录最多保留 3 个：{queues:?}");
+    assert_eq!(queues[0].name, "目录-4", "最新建的在最前");
+}
+
+/// 待看目录进度：读完的本计入 finished。
+#[test]
+fn queue_progress_counts_finished() {
+    let fixture = Fixture::new();
+    let a = fixture.source.join("A.cbz");
+    let b = fixture.source.join("B.cbz");
+    write_zip(&a, &["1.png", "2.png"], 61);
+    write_zip(&b, &["1.png"], 62);
+
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![a, b],
+        ImportOptions::default(),
+        |_| {},
+    );
+    assert_eq!(report.imported, 2, "errors: {:?}", report.errors);
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    crate::queue::fill_queue(
+        &mut context.conn,
+        "进度测试",
+        &crate::models::QueueFillOptions {
+            size: Some(10),
+            tag_ids: vec![],
+            include_read: Some(true),
+        },
+        Some(9),
+    )
+    .unwrap();
+
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let a_id = page
+        .items
+        .iter()
+        .find(|item| item.title == "A")
+        .unwrap()
+        .id;
+    // A 有两页，标到第 2 页 = 读完
+    db::set_reading_progress(&context.conn, a_id, 2).unwrap();
+
+    let queues = crate::queue::list_queues(&context.conn).unwrap();
+    assert_eq!(queues[0].count, 2);
+    assert_eq!(queues[0].finished, 1, "A 读完应计 1 本");
+}
+
+/// 回收站里的画集不再累计阅读次数。
+#[test]
+fn record_read_rejects_deleted_archive() {
+    let fixture = Fixture::new();
+    let zip = fixture.source.join("A.cbz");
+    write_zip(&zip, &["a.png"], 71);
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip],
+        ImportOptions::default(),
+        |_| {},
+    );
+    assert_eq!(report.imported, 1, "errors: {:?}", report.errors);
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let id = page.items[0].id;
+
+    db::record_read(&context.conn, id).unwrap();
+    db::delete_archive(&context.conn, id).unwrap();
+    assert!(
+        db::record_read(&context.conn, id).is_err(),
+        "已进回收站的画集不应再计数"
     );
 }

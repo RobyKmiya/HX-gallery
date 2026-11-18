@@ -25,6 +25,8 @@ export interface ArchiveCardData {
   error: string | null;
   lastReadAt: number | null;
   lastPage: number;
+  /** 打开过多少次；待看目录的加权挑选按它降权。 */
+  readCount: number;
   groupBucket?: number;
   groupLabel?: string;
   groupCategory?: string;
@@ -104,6 +106,8 @@ export interface Tag {
   mergedInto: number | null;
   deletedAt: number | null;
   count: number;
+  /** 待看目录挑选权重。默认 100；0 表示不想看到带此标签的画集。 */
+  weight: number;
 }
 
 export interface TagEdge {
@@ -156,6 +160,56 @@ export type SortKey =
   | "page_count"
   | "last_read_at";
 
+/** 待看目录。以日期命名，最多同时存在 3 个。 */
+export interface Queue {
+  id: number;
+  name: string;
+  createdAt: number;
+  /** 目录里的画集总数。 */
+  count: number;
+  /** 其中已读完的本数。 */
+  finished: number;
+}
+
+/** 生成待看目录的选项。 */
+export interface QueueFillOptions {
+  /** 每个目录放几本，默认 10。 */
+  size?: number;
+  /** 只在这批标签里挑（并集）；为空表示全库。 */
+  tagIds?: number[];
+  /** 是否允许挑已经看过的本，默认 false。 */
+  includeRead?: boolean;
+}
+
+export interface QueueFillReport {
+  queue: Queue;
+  added: number;
+  /** 候选池里被 0 权重标签排除掉的本数。 */
+  excludedByWeight: number;
+  candidates: number;
+  titles: string[];
+}
+
+/** 「退出后自动发布」的状态。 */
+export interface ReleaseStatus {
+  /** 已经排好一次发布，等应用退出。 */
+  pending: boolean;
+  /** success / failed / running / none */
+  lastResult: string;
+  lastAt: number;
+  lastMessage: string;
+  scriptPath: string;
+  logPath: string;
+}
+
+export interface ReleaseState {
+  /** 画匣源码目录（含 scripts/release.mjs）。 */
+  sourceDir: string | null;
+  autoOnExit: boolean;
+  relaunchAfter: boolean;
+  status: ReleaseStatus;
+}
+
 export type SortDirection = "asc" | "desc";
 
 export type ViewMode = "scroll" | "pages";
@@ -180,6 +234,8 @@ export interface ArchiveQuery {
   sort?: SortKey;
   direction?: SortDirection;
   collectionId?: number;
+  /** 只看某个待看目录里的画集。 */
+  queueId?: number;
   tagIds?: number[];
   tagMode?: TagFilterMode;
   ratingBuckets?: number[];

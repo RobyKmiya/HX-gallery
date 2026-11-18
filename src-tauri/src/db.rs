@@ -15,7 +15,19 @@ use crate::models::{
 };
 use crate::translate;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
+
+/// 同时最多保留多少个待看目录。超出的在新建时按创建时间淘汰最旧的。
+pub const MAX_QUEUES: i64 = 3;
+
+/// 待看目录默认放几本。
+pub const DEFAULT_QUEUE_SIZE: i64 = 10;
+
+/// 标签的默认权重。0 是「不想看」的特例，所以默认值取 100 而不是 1。
+pub const DEFAULT_TAG_WEIGHT: i64 = 100;
+
+/// 标签权重上限。
+pub const MAX_TAG_WEIGHT: i64 = 100;
 
 /// 标签名长度上限。
 ///
@@ -301,6 +313,7 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
             added_at INTEGER NOT NULL,
             last_read_at INTEGER,
             last_page INTEGER NOT NULL DEFAULT 0,
+            read_count INTEGER NOT NULL DEFAULT 0,
             missing INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER,
             error TEXT
@@ -354,7 +367,8 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
             translated_at INTEGER,
             category TEXT,
             deleted_at INTEGER,
-            merged_into INTEGER REFERENCES tags(id) ON DELETE SET NULL
+            merged_into INTEGER REFERENCES tags(id) ON DELETE SET NULL,
+            weight INTEGER NOT NULL DEFAULT 100
         );
 
         CREATE INDEX IF NOT EXISTS idx_tags_deleted_at ON tags(deleted_at);
@@ -391,6 +405,27 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
 
         CREATE INDEX IF NOT EXISTS idx_reader_bookmarks_archive
             ON reader_bookmarks(archive_id, page);
+
+        CREATE TABLE IF NOT EXISTS queues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_queues_name
+            ON queues(name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_queues_created_at
+            ON queues(created_at);
+
+        CREATE TABLE IF NOT EXISTS queue_archives (
+            queue_id INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
+            archive_id INTEGER NOT NULL REFERENCES archives(id) ON DELETE CASCADE,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (queue_id, archive_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_queue_archives_archive
+            ON queue_archives(archive_id);
         "#,
     )
     .map_err(|e| format!("初始化数据库失败: {e}"))?;
@@ -462,6 +497,15 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
     )?;
     add_column_if_missing(conn, "collections", "deleted_at", "INTEGER")?;
     add_column_if_missing(conn, "archives", "deleted_at", "INTEGER")?;
+    // v8：阅读次数与标签权重。read_count 只在真正打开阅读器时自增，
+    // 旧的 last_read_at 表达不了「看过几遍」，而加权挑选要按次数降权。
+    add_column_if_missing(conn, "archives", "read_count", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "tags",
+        "weight",
+        &format!("INTEGER NOT NULL DEFAULT {DEFAULT_TAG_WEIGHT}"),
+    )?;
 
     conn.execute(
         "UPDATE tags SET original_name = name
@@ -504,7 +548,26 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
              UNIQUE (archive_id, page)
          );
          CREATE INDEX IF NOT EXISTS idx_reader_bookmarks_archive
-             ON reader_bookmarks(archive_id, page);",
+             ON reader_bookmarks(archive_id, page);
+
+         CREATE TABLE IF NOT EXISTS queues (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             name TEXT NOT NULL UNIQUE,
+             created_at INTEGER NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_queues_name
+             ON queues(name COLLATE NOCASE);
+         CREATE INDEX IF NOT EXISTS idx_queues_created_at
+             ON queues(created_at);
+
+         CREATE TABLE IF NOT EXISTS queue_archives (
+             queue_id INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
+             archive_id INTEGER NOT NULL REFERENCES archives(id) ON DELETE CASCADE,
+             added_at INTEGER NOT NULL,
+             PRIMARY KEY (queue_id, archive_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_queue_archives_archive
+             ON queue_archives(archive_id);",
     )
     .map_err(|e| format!("创建索引失败: {e}"))?;
 
@@ -997,8 +1060,10 @@ fn normalize_label(raw: &str, max_chars: usize, label: &str) -> Result<String, S
 }
 
 const TAG_SELECT: &str = "t.id, t.name, t.original_name, t.translated_name,
-     t.translation_source, t.translated_at, t.category, t.merged_into, t.deleted_at";
+     t.translation_source, t.translated_at, t.category, t.merged_into, t.deleted_at, t.weight";
 
+/// `count_index` 之后固定跟着 `weight`：weight 放在 TAG_SELECT 末尾，
+/// 各查询自己的聚合列（画集数）仍由调用方给出索引。
 fn read_tag(row: &rusqlite::Row<'_>, count_index: usize) -> rusqlite::Result<Tag> {
     let id: i64 = row.get(0)?;
     Ok(Tag {
@@ -1013,6 +1078,7 @@ fn read_tag(row: &rusqlite::Row<'_>, count_index: usize) -> rusqlite::Result<Tag
         merged_into: row.get(7)?,
         deleted_at: row.get(8)?,
         count: row.get(count_index)?,
+        weight: row.get(9)?,
     })
 }
 
@@ -1024,7 +1090,7 @@ fn tag_by_id(conn: &Connection, tag_id: i64) -> Result<Tag, String> {
              FROM tags t WHERE t.id = ?1"
         ),
         params![tag_id],
-        |row| read_tag(row, 9),
+        |row| read_tag(row, 10),
     )
     .optional()
     .map_err(|e| format!("读取标签失败: {e}"))?
@@ -1045,7 +1111,7 @@ pub fn list_tags(conn: &Connection) -> Result<Vec<Tag>, String> {
         .map_err(|e| format!("准备标签查询失败: {e}"))?;
 
     let rows = statement
-        .query_map([], |row| read_tag(row, 9))
+        .query_map([], |row| read_tag(row, 10))
         .map_err(|e| format!("查询标签失败: {e}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
@@ -1066,7 +1132,7 @@ pub fn list_deleted_tags(conn: &Connection) -> Result<Vec<Tag>, String> {
         .map_err(|e| format!("准备回收站查询失败: {e}"))?;
 
     let rows = statement
-        .query_map([], |row| read_tag(row, 9))
+        .query_map([], |row| read_tag(row, 10))
         .map_err(|e| format!("查询回收站失败: {e}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
@@ -1086,7 +1152,7 @@ pub fn archive_tags(conn: &Connection, archive_id: i64) -> Result<Vec<Tag>, Stri
         .map_err(|e| format!("准备标签查询失败: {e}"))?;
 
     let rows = statement
-        .query_map(params![archive_id], |row| read_tag(row, 9))
+        .query_map(params![archive_id], |row| read_tag(row, 10))
         .map_err(|e| format!("查询画集标签失败: {e}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
@@ -1110,6 +1176,24 @@ pub fn archive_source(conn: &Connection, archive_id: i64) -> Result<ArchiveSourc
     .optional()
     .map_err(|e| format!("查询画集失败: {e}"))?
     .ok_or_else(|| "画集不存在".to_string())
+}
+
+/// 记录一次打开。`read_count` 是加权挑选的依据（看得越少越容易被挑中），
+/// 与 `set_reading_progress` 分开：预览了但一页没翻也算看过，不能只靠翻页计数。
+pub fn record_read(conn: &Connection, archive_id: i64) -> Result<(), String> {
+    let updated = conn
+        .execute(
+            "UPDATE archives SET read_count = read_count + 1
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![archive_id],
+        )
+        .map_err(|e| format!("更新阅读次数失败: {e}"))?;
+
+    if updated == 0 {
+        return Err("画集不存在".to_string());
+    }
+
+    Ok(())
 }
 
 pub fn set_reading_progress(
@@ -1499,6 +1583,27 @@ pub fn update_tag(
             params![name, translated_name, source, translated_at, tag_id],
         )
         .map_err(|e| format!("更新标签失败: {e}"))?;
+
+    if changed == 0 {
+        return Err("标签不存在或已在回收站".to_string());
+    }
+
+    tag_by_id(conn, tag_id)
+}
+
+/// 设置单个标签的权重。0 是有效值，表示「不想看带这个标签的画集」。
+/// 上限与 rating 取同一量级，避免单个标签把权重全吃掉的极端偏斜。
+pub fn set_tag_weight(conn: &Connection, tag_id: i64, weight: i64) -> Result<Tag, String> {
+    if !(0..=MAX_TAG_WEIGHT).contains(&weight) {
+        return Err(format!("权重必须在 0 到 {MAX_TAG_WEIGHT} 之间，收到 {weight}"));
+    }
+
+    let changed = conn
+        .execute(
+            "UPDATE tags SET weight = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            params![weight, tag_id],
+        )
+        .map_err(|e| format!("更新标签权重失败: {e}"))?;
 
     if changed == 0 {
         return Err("标签不存在或已在回收站".to_string());

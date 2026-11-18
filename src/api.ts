@@ -7,10 +7,14 @@ import type {
   ImportOptions,
   ImportReport,
   LibraryState,
+  Queue,
+  QueueFillOptions,
+  QueueFillReport,
   ReaderBookmark,
   ReaderInfo,
   ReaderPage,
   ReaderThumb,
+  ReleaseState,
   ScanReport,
   StageReport,
   Tag,
@@ -176,6 +180,43 @@ export const api = {
 
   removeReaderBookmark: (archiveId: number, bookmarkId: number) =>
     invoke<void>("remove_reader_bookmark", { archiveId, bookmarkId }),
+
+  listQueues: () => invoke<Queue[]>("list_queues"),
+
+  /** 生成（或续满）一个待看目录；同名目录会在此基础上追加。 */
+  fillQueue: (name: string, options: QueueFillOptions) =>
+    invoke<QueueFillReport>("fill_queue", { name, options }),
+
+  deleteQueue: (queueId: number) => invoke<void>("delete_queue", { queueId }),
+
+  listQueueArchives: (queueId: number) =>
+    invoke<number[]>("list_queue_archives", { queueId }),
+
+  /** 标签权重：0 表示不想看到带此标签的画集；默认 100。 */
+  setTagWeight: (tagId: number, weight: number) =>
+    invoke<Tag>("set_tag_weight", { tagId, weight }),
+
+  getReleaseState: () => invoke<ReleaseState>("get_release_state"),
+
+  saveReleaseSettings: (
+    sourceDir: string | null,
+    autoOnExit: boolean,
+    relaunchAfter: boolean,
+  ) =>
+    invoke<ReleaseState>("save_release_settings", {
+      sourceDir,
+      autoOnExit,
+      relaunchAfter,
+    }),
+
+  /** 排好一次发布，但还不退出应用。 */
+  scheduleRelease: () =>
+    invoke<{ scriptPath: string; logPath: string }>("schedule_release"),
+
+  /** 启动更新脚本并退出应用。 */
+  quitForRelease: () => invoke<void>("quit_for_release"),
+
+  cancelRelease: () => invoke<void>("cancel_release"),
 };
 
 export function assetUrl(path: string): string {

@@ -31,6 +31,8 @@ pub struct ArchiveCard {
     pub error: Option<String>,
     pub last_read_at: Option<i64>,
     pub last_page: i64,
+    /// 打开过多少次。用来做「优先挑看得少的」加权随机。
+    pub read_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_bucket: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,6 +133,8 @@ pub struct ArchiveQuery {
     pub sort: Option<String>,
     pub direction: Option<String>,
     pub collection_id: Option<i64>,
+    /// 只看某个待看目录里的画集。与 `collection_id` 同构，二选一使用。
+    pub queue_id: Option<i64>,
     pub tag_ids: Option<Vec<i64>>,
     pub tag_mode: Option<String>,
     pub rating_buckets: Option<Vec<i64>>,
@@ -223,6 +227,9 @@ pub struct Tag {
     pub merged_into: Option<i64>,
     pub deleted_at: Option<i64>,
     pub count: i64,
+    /// 待看目录随机挑选时的权重。默认 100；设为 0 表示「不想看带这个标签的画集」，
+    /// 生成待看目录时带该标签的画集整本排除。
+    pub weight: i64,
 }
 
 /// 批量导入时的一条标签：名字 + 可选大类（已由前端把 `female:` 这类
@@ -319,4 +326,44 @@ pub struct ScanReport {
     pub errors: Vec<String>,
     pub elapsed_ms: u128,
     pub message: String,
+}
+
+/// 待看目录。以日期命名，最多同时存在 3 个（见 `db::MAX_QUEUES`）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Queue {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    /// 目录里的画集总数。
+    pub count: i64,
+    /// 其中已读完的本数，用于显示进度。
+    pub finished: i64,
+}
+
+/// 生成待看目录的结果。排除原因按条数汇总，方便前端解释「为什么只挑到 7 本」。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueFillReport {
+    pub queue: Queue,
+    /// 本次实际加入的本数。
+    pub added: i64,
+    /// 候选池里被 0 权重标签排除掉的本数。
+    pub excluded_by_weight: i64,
+    /// 候选池大小（排除已读完后）。
+    pub candidates: i64,
+    /// 加入的画集标题，按挑选顺序。
+    pub titles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QueueFillOptions {
+    /// 每个目录放几本。默认 10，夹紧到 1..=50。
+    pub size: Option<i64>,
+    /// 只在这批标签里挑（交集）。为空表示全库。
+    #[serde(default)]
+    pub tag_ids: Vec<i64>,
+    /// 是否允许重复挑已经看过的（read_count > 0）。默认 false。
+    pub include_read: Option<bool>,
 }

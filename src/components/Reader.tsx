@@ -30,6 +30,13 @@ interface ReaderProps {
   onClose: () => void;
   onNotify: (message: string, kind?: "info" | "success" | "error") => void;
   onProgress?: (archiveId: number, lastPage: number) => void;
+  /**
+   * 直接切到列表里的上一本 / 下一本，省掉「关阅读器 → 回列表 → 再点开」。
+   * 传 null 表示已经是头/尾。由 LibraryView 按当前列表顺序算出来。
+   */
+  onSwitchArchive?: (direction: -1 | 1) => void;
+  hasPrevArchive?: boolean;
+  hasNextArchive?: boolean;
 }
 
 type ZoomMode = "fit" | "width" | "actual";
@@ -174,6 +181,9 @@ export default function Reader({
   onClose,
   onNotify,
   onProgress,
+  onSwitchArchive,
+  hasPrevArchive = false,
+  hasNextArchive = false,
 }: ReaderProps) {
   const [info, setInfo] = useState<ReaderInfo | null>(null);
   const [page, setPage] = useState(0);
@@ -597,8 +607,26 @@ export default function Reader({
         target &&
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
-          target.isContentEditable)
+          target.tagName === "BUTTON" ||
+          target.tagName === "SELECT" ||
+          target.tagName === "A" ||
+          target.isContentEditable ||
+          // 焦点在能自己响应空格的控件上时让出原生行为：
+          // 否则空格既翻页又吃掉按钮激活，键盘用户没法用空格按按钮。
+          target.closest("[role='button'], [role='link']") !== null)
       ) {
+        return;
+      }
+
+      // 换本键放在 !info 之前：本子打不开时也该能跳去下一本。
+      if (onSwitchArchive && event.key === "[") {
+        event.preventDefault();
+        onSwitchArchive(-1);
+        return;
+      }
+      if (onSwitchArchive && event.key === "]") {
+        event.preventDefault();
+        onSwitchArchive(1);
         return;
       }
 
@@ -657,6 +685,7 @@ export default function Reader({
     zoomOut,
     toggleSpread,
     toggleBookmark,
+    onSwitchArchive,
   ]);
 
   useEffect(() => {
@@ -892,6 +921,30 @@ export default function Reader({
             {currentName}
           </span>
           <div className="reader-head-tools">
+            {onSwitchArchive && (
+              <>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => onSwitchArchive(-1)}
+                  disabled={!hasPrevArchive}
+                  aria-label="上一本画集"
+                  title="上一本 ([)"
+                >
+                  <ChevronLeftIcon width={16} height={16} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => onSwitchArchive(1)}
+                  disabled={!hasNextArchive}
+                  aria-label="下一本画集"
+                  title="下一本 (])"
+                >
+                  <ChevronRightIcon width={16} height={16} />
+                </button>
+              </>
+            )}
             <button
               type="button"
               className={`icon-button${thumbsOpen ? " is-active" : ""}`}
@@ -1122,6 +1175,18 @@ export default function Reader({
 
       <footer className="reader-bar">
         <div className="reader-nav">
+          {onSwitchArchive && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-compact"
+              disabled={!hasPrevArchive}
+              onClick={() => onSwitchArchive(-1)}
+              title="上一本画集 ([)"
+            >
+              <ChevronLeftIcon width={14} height={14} />
+              上一本
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-ghost btn-compact"
@@ -1166,6 +1231,18 @@ export default function Reader({
             下一页
             <ChevronRightIcon width={14} height={14} />
           </button>
+          {onSwitchArchive && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-compact"
+              disabled={!hasNextArchive}
+              onClick={() => onSwitchArchive(1)}
+              title="下一本画集 (])"
+            >
+              下一本
+              <ChevronRightIcon width={14} height={14} />
+            </button>
+          )}
         </div>
 
         <div className="reader-zoom">

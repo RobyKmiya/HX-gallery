@@ -3,11 +3,14 @@ mod asset_protocol;
 pub mod db;
 pub mod fsutil;
 pub mod importer;
+pub mod instance;
 pub mod library;
 pub mod models;
 mod pagecache;
 mod paths;
+pub mod queue;
 mod reader;
+mod release;
 pub mod translate;
 
 use std::fs;
@@ -19,8 +22,9 @@ use tauri::{AppHandle, Manager, State};
 
 use models::{
     ArchivePage, ArchiveQuery, BulkTagReport, Collection, ImportOptions, ImportReport, LibraryState,
-    ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb, ScanReport, StageItem, StageReport, Tag,
-    TagCategory, TagDraft, TagGraph, TagTranslationInput, TrashedArchive,
+    Queue, QueueFillOptions, QueueFillReport, ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb,
+    ScanReport, StageItem, StageReport, Tag, TagCategory, TagDraft, TagGraph, TagTranslationInput,
+    TrashedArchive,
 };
 
 /// 一次导入最多接受多少个入口路径，避免单次 IPC 传入超大数组。
@@ -993,6 +997,8 @@ async fn open_reader(
         }
         let path = fsutil::join_rel(&library.root, &source.rel_path)
             .ok_or_else(|| "画集文件路径无效".to_string())?;
+        // 打开即计一次。放在真正进入阅读器时自增，预览/翻页都不算额外一次。
+        db::record_read(&library.conn, archive_id)?;
         (
             path,
             source.last_page,
@@ -1063,6 +1069,61 @@ async fn set_reading_progress(
 }
 
 #[tauri::command]
+async fn list_queues(state: State<'_, AppState>) -> Result<Vec<Queue>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| queue::list_queues(&library.conn))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn fill_queue(
+    state: State<'_, AppState>,
+    name: String,
+    options: QueueFillOptions,
+) -> Result<QueueFillReport, String> {
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            queue::fill_queue(&mut library.conn, &name, &options, None)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_queue(state: State<'_, AppState>, queue_id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| queue::delete_queue(&library.conn, queue_id))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_queue_archives(
+    state: State<'_, AppState>,
+    queue_id: i64,
+) -> Result<Vec<i64>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| queue::queue_archives(&library.conn, queue_id))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_tag_weight(
+    state: State<'_, AppState>,
+    tag_id: i64,
+    weight: i64,
+) -> Result<Tag, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_tag_weight(&library.conn, tag_id, weight)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 async fn add_reader_bookmark(
     state: State<'_, AppState>,
     archive_id: i64,
@@ -1090,6 +1151,90 @@ async fn remove_reader_bookmark(
     .await
 }
 
+/// 读取「退出后自动发布」的设置与上次结果。
+#[tauri::command]
+fn get_release_state(app: AppHandle) -> serde_json::Value {
+    let settings = release::load_settings(&app);
+    let status = release::load_status(&app);
+    serde_json::json!({
+        "sourceDir": settings.source_dir,
+        "autoOnExit": settings.auto_on_exit,
+        "relaunchAfter": settings.relaunch_after,
+        "status": status,
+    })
+}
+
+/// 保存设置。`sourceDir` 会先校验（必须含 `scripts/release.mjs`）。
+#[tauri::command]
+fn save_release_settings(
+    app: AppHandle,
+    source_dir: Option<String>,
+    auto_on_exit: bool,
+    relaunch_after: bool,
+) -> Result<serde_json::Value, String> {
+    let normalized = match source_dir.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => {
+            Some(release::validate_source_dir(raw)?.to_string_lossy().to_string())
+        }
+        _ => None,
+    };
+
+    // 开了自动发布却没给源码目录，等于给自己埋一个「退出后什么都没发生」的坑。
+    if auto_on_exit && normalized.is_none() {
+        return Err("开启自动发布前，请先选择画匣源码目录".to_string());
+    }
+
+    let settings = release::ReleaseSettings {
+        source_dir: normalized,
+        auto_on_exit,
+        relaunch_after,
+    };
+    release::save_settings(&app, &settings)?;
+
+    let status = release::load_status(&app);
+    Ok(serde_json::json!({
+        "sourceDir": settings.source_dir,
+        "autoOnExit": settings.auto_on_exit,
+        "relaunchAfter": settings.relaunch_after,
+        "status": status,
+    }))
+}
+
+/// 安排一次「退出后发布」，但**不退出**——由前端确认后再调 `quit_app`。
+///
+/// 分开两步是为了让前端有机会先把「正在更新」的提示画出来、把未落盘的进度写完。
+#[tauri::command]
+fn schedule_release(app: AppHandle) -> Result<serde_json::Value, String> {
+    let settings = release::load_settings(&app);
+    let (script, log) = release::schedule_of(&app, &settings)?;
+    Ok(serde_json::json!({ "scriptPath": script, "logPath": log }))
+}
+
+/// 真退出：先确保脚本已经被拉起来，再结束进程。
+#[tauri::command]
+fn quit_for_release(app: AppHandle) -> Result<(), String> {
+    let settings = release::load_settings(&app);
+    let (script, _) = release::schedule_of(&app, &settings)?;
+    release::launch_detached(std::path::Path::new(&script))?;
+
+    // 给脚本一点时间启动，然后退出。脚本那边还会再等一次进程消失。
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    app.exit(0);
+    Ok(())
+}
+
+/// 取消已经排好的发布（还没退出时可用）。
+#[tauri::command]
+fn cancel_release(app: AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法获取配置目录: {error}"))?
+        .join("release");
+    let _ = std::fs::remove_file(dir.join("pending.json"));
+    Ok(())
+}
+
 #[tauri::command]
 async fn query_archives(
     app: AppHandle,
@@ -1106,18 +1251,33 @@ async fn query_archives(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说明已有实例在跑，
+    // 这时去唤醒它并直接退出，避免第二个进程占住 WebView2 用户数据目录、
+    // 也避免关不干净导致 exe 被锁、装完新版还是旧界面。
+    let guard = match instance::acquire() {
+        Some(guard) => guard,
+        None => {
+            if instance::wake_existing() {
+                eprintln!("已有实例在运行，已请求它显示窗口，本次启动退出");
+            } else {
+                eprintln!("已有实例在运行（未能定位窗口），本次启动退出");
+            }
+            return;
+        }
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .register_uri_scheme_protocol("gallery", asset_protocol::serve)
-        .setup(|app| {
+        .setup(move |app| {
             let state = AppState::new(app.handle());
             app.manage(state);
+            // 守卫交给 Tauri 托管，活到进程结束；提前 drop 会立刻放开互斥体。
+            app.manage(guard);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_library_state,
+        .invoke_handler(tauri::generate_handler![            get_library_state,
             open_library,
             import_paths,
             stage_import_paths,
@@ -1165,11 +1325,44 @@ pub fn run() {
             read_reader_thumbnail,
             set_reading_progress,
             add_reader_bookmark,
-            remove_reader_bookmark
+            remove_reader_bookmark,
+            list_queues,
+            fill_queue,
+            delete_queue,
+            list_queue_archives,
+            set_tag_weight,
+            get_release_state,
+            save_release_settings,
+            schedule_release,
+            quit_for_release,
+            cancel_release
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
+        .on_window_event(|window, event| {
+            // 关闭窗口时，如果用户开着「退出后自动发布」，就在这里把脚本排好并拉起。
+            // 放在窗口事件而不是 ExitRequested：后者在 app.exit() 时也会触发，
+            // 容易和「面板里点更新」那条路径重复安排。
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let app = window.app_handle();
+                let settings = release::load_settings(app);
+                if settings.auto_on_exit && settings.source_dir.is_some() {
+                    match release::schedule_of(app, &settings) {
+                        Ok((script, _)) => {
+                            if let Err(error) =
+                                release::launch_detached(std::path::Path::new(&script))
+                            {
+                                eprintln!("安排退出后发布失败: {error}");
+                            } else {
+                                eprintln!("已安排退出后自动发布");
+                            }
+                        }
+                        Err(error) => eprintln!("安排退出后发布失败: {error}"),
+                    }
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {});}
 
 #[cfg(test)]
 mod tests;

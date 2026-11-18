@@ -17,8 +17,10 @@
  * 三点刻意的取舍：
  * - 只认白名单里的命名空间 + 显式带 `/` 的分类路径。像 `re:从零开始的异世界生活`
  *   这种标签名里本来就带冒号，不能当成命名空间，否则会被劈成两半。
- * - 换行一律当分隔符（沿用「每行一个」的老习惯）。从网页复制时若在长标签中间
- *   折行，会切出一个碎片标签 —— 这是可见、可删的，比整段粘成一坨更好收拾。
+ * - 换行与制表符一律当分隔符（沿用「每行一个」的老习惯）。从网页复制时若在长标签
+ *   中间折行，会切出一个碎片标签 —— 这是可见、可删的，比整段粘成一坨更好收拾。
+ *   制表符必须切开：E-Hentai 的 `female://thorse girl\tsole female` 若整段当成一个
+ *   标签，会脏成 `female://thorse girl…` 这种带命名空间前缀的怪名字。
  * - 名字里的下划线换成空格（Danbooru 用 `long_hair` 表示「long hair」这一个标签）。
  */
 
@@ -80,8 +82,8 @@ const NAMESPACE_CATEGORIES: Record<string, string> = {
   杂项: "其他",
 };
 
-/** 标签之间的分隔符：半角/全角逗号、分号、顿号。 */
-const SEPARATORS = /[,，;；、]+/;
+/** 标签之间的分隔符：半角/全角逗号、分号、顿号，以及制表符。 */
+export const TAG_SEPARATORS = /[,，;；、\t]+/;
 
 /** `命名空间: 内容`。冒号前不允许出现分隔符，避免把整个逗号列表误判成头。 */
 const HEADER_PATTERN = /^([^,，;；、:：]{1,24})\s*[:：]\s*(.*)$/;
@@ -156,14 +158,14 @@ export function parseTagInput(raw: string): TagParseResult {
         : NAMESPACE_CATEGORIES[key.toLowerCase()];
       if (mapped) {
         category = mapped;
-        for (const part of header[2].split(SEPARATORS)) {
+        for (const part of header[2].split(TAG_SEPARATORS)) {
           push(part, category);
         }
         continue;
       }
     }
 
-    for (const part of text.split(SEPARATORS)) {
+    for (const part of text.split(TAG_SEPARATORS)) {
       push(part, category);
     }
   }

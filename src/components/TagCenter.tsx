@@ -638,6 +638,8 @@ function TagRow({
   const [translatedName, setTranslatedName] = useState(tag.translatedName ?? "");
   const [category, setCategory] = useState(tag.category ?? "");
   const [busy, setBusy] = useState(false);
+  const [weightDraft, setWeightDraft] = useState(String(tag.weight));
+  const [weightBusy, setWeightBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [archivesOpen, setArchivesOpen] = useState(false);
   const [archives, setArchives] = useState<ArchiveCardData[] | null>(null);
@@ -654,7 +656,39 @@ function TagRow({
     setName(tag.name);
     setTranslatedName(tag.translatedName ?? "");
     setCategory(tag.category ?? "");
-  }, [tag.id, tag.name, tag.translatedName, tag.category]);
+    setWeightDraft(String(tag.weight));
+  }, [tag.id, tag.name, tag.translatedName, tag.category, tag.weight]);
+
+  /** 权重单独保存：它不参与「保存」按钮的 dirty 判定，失焦即提交。 */
+  async function commitWeight() {
+    const parsed = Number(weightDraft);
+    if (!Number.isFinite(parsed)) {
+      setWeightDraft(String(tag.weight));
+      return;
+    }
+    const clamped = Math.min(100, Math.max(0, Math.trunc(parsed)));
+    if (clamped === tag.weight) {
+      setWeightDraft(String(tag.weight));
+      return;
+    }
+    setWeightBusy(true);
+    try {
+      const updated = await api.setTagWeight(tag.id, clamped);
+      setWeightDraft(String(updated.weight));
+      await onSaved(updated);
+      onNotify(
+        updated.weight === 0
+          ? `「${updated.name}」已设为 0 权重：不再进入待看目录`
+          : `「${updated.name}」权重已设为 ${updated.weight}`,
+        "success",
+      );
+    } catch (error) {
+      setWeightDraft(String(tag.weight));
+      onNotify(`保存权重失败：${String(error)}`, "error");
+    } finally {
+      setWeightBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!confirmingDelete) return;
@@ -814,6 +848,32 @@ function TagRow({
             ))}
           </select>
         </label>
+        <label title="待看目录随机挑选时的权重；0 表示不想看到带这个标签的画集">
+          <span>权重</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            className={tag.weight === 0 ? "is-zero-weight" : undefined}
+            value={weightDraft}
+            disabled={busy || weightBusy}
+            onChange={(event) =>
+              setWeightDraft(event.target.value.replace(/[^\d]/g, ""))
+            }
+            onBlur={() => void commitWeight()}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void commitWeight();
+              }
+            }}
+          />
+        </label>
+        {tag.weight === 0 && (
+          <p className="tag-row-origin is-warning">
+            0 权重：生成待看目录时会排除带此标签的画集
+          </p>
+        )}
         {tag.originalName !== tag.name && (
           <p className="tag-row-origin">
             原始名：{tag.originalName}（不随显示名修改）

@@ -3,9 +3,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use archive_gallery_lib::db::{self, LibraryContext};
+use archive_gallery_lib::fsutil;
 use archive_gallery_lib::importer;
 use archive_gallery_lib::library;
-use archive_gallery_lib::models::{ArchiveQuery, ImportOptions, TagTranslationInput};
+use archive_gallery_lib::models::{
+    ArchiveQuery, ImportOptions, QueueFillOptions, TagTranslationInput,
+};
+use archive_gallery_lib::queue;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 
@@ -34,6 +38,11 @@ enum Command {
         #[command(subcommand)]
         command: CollectionCommand,
     },
+    /// 待看目录：按标签权重随机挑画集排队。
+    Queue {
+        #[command(subcommand)]
+        command: QueueCommand,
+    },
     Search {
         #[arg(long)]
         query: Option<String>,
@@ -47,6 +56,9 @@ enum Command {
         direction: Option<String>,
         #[arg(long)]
         collection_id: Option<i64>,
+        /// 只看某个待看目录里的画集。
+        #[arg(long)]
+        queue_id: Option<i64>,
         #[arg(long, value_delimiter = ',')]
         tag_ids: Vec<i64>,
         #[arg(long, default_value = "and")]
@@ -216,6 +228,35 @@ enum ArchiveCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum QueueCommand {
+    /// 列出全部待看目录（含进度）。
+    List,
+    /// 生成（或续满）一个待看目录。
+    Fill {
+        /// 目录名；不传则用今天日期。
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        size: i64,
+        /// 只在这些标签里挑（逗号分隔 id）。
+        #[arg(long, value_delimiter = ',')]
+        tag_ids: Vec<i64>,
+        /// 允许挑已经看过的。
+        #[arg(long)]
+        include_read: bool,
+    },
+    Delete {
+        #[arg(long)]
+        id: i64,
+    },
+    /// 列出某个目录里的画集 id。
+    Archives {
+        #[arg(long)]
+        id: i64,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     let compact = cli.compact;
@@ -256,6 +297,7 @@ fn run(cli: Cli) -> Result<Value, String> {
     let data = match cli.command {
         Command::Tags { command } => run_tags(command, &mut library)?,
         Command::Collections { command } => run_collections(command, &mut library)?,
+        Command::Queue { command } => run_queue(command, &mut library)?,
         Command::Search {
             query,
             page,
@@ -263,6 +305,7 @@ fn run(cli: Cli) -> Result<Value, String> {
             sort,
             direction,
             collection_id,
+            queue_id,
             tag_ids,
             tag_mode,
             rating_buckets,
@@ -282,6 +325,7 @@ fn run(cli: Cli) -> Result<Value, String> {
                     sort,
                     direction,
                     collection_id,
+                    queue_id,
                     tag_ids: if tag_ids.is_empty() {
                         None
                     } else {
@@ -555,6 +599,62 @@ fn run_tags(command: TagCommand, library: &mut LibraryContext) -> Result<Value, 
             }))
         }
     }
+}
+
+fn run_queue(command: QueueCommand, library: &mut db::LibraryContext) -> Result<Value, String> {
+    // 外层 run() 已统一包成 {ok, data}，这里只返回 data 本体。
+    match command {
+        QueueCommand::List => {
+            let queues = queue::list_queues(&library.conn)?;
+            Ok(json!({ "queues": queues }))
+        }
+        QueueCommand::Fill {
+            name,
+            size,
+            tag_ids,
+            include_read,
+        } => {
+            let name = name.unwrap_or_else(today_name);
+            let options = QueueFillOptions {
+                size: Some(size),
+                tag_ids,
+                include_read: Some(include_read),
+            };
+            let report = queue::fill_queue(&mut library.conn, &name, &options, None)?;
+            serde_json::to_value(report).map_err(|e| format!("序列化待看目录失败: {e}"))
+        }
+        QueueCommand::Delete { id } => {
+            queue::delete_queue(&library.conn, id)?;
+            Ok(json!({ "deleted": id }))
+        }
+        QueueCommand::Archives { id } => {
+            let ids = queue::queue_archives(&library.conn, id)?;
+            Ok(json!({ "archives": ids }))
+        }
+    }
+}
+
+/// 今天的日期，用作待看目录的默认名字（本地时区，YYYY-MM-DD）。
+fn today_name() -> String {
+    // chrono 不在依赖里，这里按 UTC+8 粗略换算：本地库的使用者都在东八区。
+    let now = fsutil::now_ms() / 1000 + 8 * 3600;
+    let days = now.div_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// 由「1970-01-01 起的天数」反推年月日（Howard Hinnant 的算法）。
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn run_collections(

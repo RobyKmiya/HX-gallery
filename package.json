@@ -1,7 +1,7 @@
 {
   "name": "archive-gallery",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,9 @@
     "check": "tsc --noEmit",
     "build:cli": "cargo build --manifest-path src-tauri/Cargo.toml --release --bin galleryctl",
     "build:bundle": "npm run tauri build -- --bundles nsis",
+    "release": "node scripts/release.mjs",
+    "release:minor": "node scripts/release.mjs --minor",
+    "release:major": "node scripts/release.mjs --major",
     "preview": "vite preview",
     "tauri": "tauri"
   },

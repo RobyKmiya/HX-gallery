@@ -422,6 +422,15 @@ pub fn query_archives(
         ));
     }
 
+    if let Some(queue_id) = query.queue_id {
+        conditions.push(format!(
+            "EXISTS (
+                SELECT 1 FROM queue_archives qa
+                WHERE qa.archive_id = a.id AND qa.queue_id = {queue_id}
+            )"
+        ));
+    }
+
     let mut tag_ids: Vec<i64> = Vec::new();
     if let Some(ids) = query.tag_ids.as_ref() {
         for id in ids {
@@ -802,7 +811,8 @@ pub fn query_archives(
                 a.note,
                 {group_columns},
                 a.last_read_at,
-                a.last_page
+                a.last_page,
+                a.read_count
          FROM archives a
          {tag_join}{collection_join}
          WHERE {filter}
@@ -851,6 +861,7 @@ pub fn query_archives(
                     group_category: row.get(16)?,
                     last_read_at: row.get(17)?,
                     last_page: row.get(18)?,
+                    read_count: row.get(19)?,
                 })
             },
         )
