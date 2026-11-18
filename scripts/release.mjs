@@ -40,6 +40,22 @@ const log = (msg) => console.log(`\n▸ ${msg}`);
 const ok = (msg) => console.log(`  ✓ ${msg}`);
 const warn = (msg) => console.log(`  ! ${msg}`);
 
+// 打包的是工作区现状：有未提交改动时警告（2026-11-19 教训——
+// 退出后自动发布曾把未验收的半成品改动编进安装包）。只警告不阻止，
+// 因为从应用面板触发的自动发布没法在这里交互确认。
+function warnIfDirtyTree() {
+  try {
+    const status = execSync('git status --porcelain', { cwd: ROOT, encoding: 'utf8' }).trim();
+    if (status) {
+      warn('工作区有未提交改动，它们会被打包进这个版本：');
+      for (const line of status.split('\n').slice(0, 10)) console.log(`    ${line}`);
+      if (status.split('\n').length > 10) console.log('    …');
+    }
+  } catch {
+    // 不在 git 仓库或 git 不可用：跳过检查
+  }
+}
+
 function step(title, fn) {
   log(title);
   if (dryRun) {
@@ -136,6 +152,8 @@ if (explicitVersion && !/^\d+\.\d+\.\d+$/.test(explicitVersion)) {
 
 console.log('画匣 · 一键发布');
 console.log(`  当前版本 ${current} → ${next}${dryRun ? '（dry-run）' : ''}`);
+
+warnIfDirtyTree();
 
 step(`抬版本并同步三处（package.json / Cargo.toml / tauri.conf.json）`, () => {
   syncVersion(next);
