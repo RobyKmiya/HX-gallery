@@ -79,6 +79,16 @@ export interface ReaderPage {
   bytes: number;
 }
 
+/** 动图页（gif / 动画 webp）的帧元数据；静态页 animated=false。 */
+export interface AnimMeta {
+  animated: boolean;
+  frames: number;
+  /** 所有帧时长之和（毫秒），播放模式据此决定「播完翻页」的时刻。 */
+  totalDurationMs: number;
+  width: number;
+  height: number;
+}
+
 /** 缩略图体积小，继续内联成 data URL，省一次协议往返。 */
 export interface ReaderThumb {
   index: number;

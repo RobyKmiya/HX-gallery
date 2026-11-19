@@ -71,9 +71,6 @@ import {
 
 interface NavSnapshot {
   collectionId: number | null;
-  selected: ArchiveCardData | null;
-  quickEdit: ArchiveCardData | null;
-  reader: ArchiveCardData | null;
   tagCenter: boolean;
   trash: boolean;
 }
@@ -115,6 +112,7 @@ interface UiPrefs {
   search?: unknown;
   group?: GroupMode;
   autoSeconds?: number;
+  detailDock?: "dock" | "float";
 }
 
 const RATING_GROUP_LABELS: Record<number, string> = {
@@ -161,7 +159,7 @@ function readUiPrefs(key: string): UiPrefs {
 }
 
 function isSupportedDropPath(path: string): boolean {
-  if (/\.(zip|cbz)$/i.test(path)) return true;
+  if (/\.(zip|cbz|7z|cb7|rar|cbr)$/i.test(path)) return true;
   const name = path.split(/[\\/]/).pop() ?? "";
   return !name.includes(".");
 }
@@ -259,6 +257,12 @@ export default function LibraryView({
   const importDialogRef = useRef<ImportDialogHandle>(null);
   const [selected, setSelected] = useState<ArchiveCardData | null>(null);
   const [readerCard, setReaderCard] = useState<ArchiveCardData | null>(null);
+  /** 详情面板形态：dock = 停靠在画廊旁（外拓），float = 悬浮遮罩。 */
+  const [detailDock, setDetailDock] = useState<"dock" | "float">(
+    savedPrefs.detailDock === "float" ? "float" : "dock",
+  );
+  /** 在阅读器里打开的详情浮层。 */
+  const [readerDetailOpen, setReaderDetailOpen] = useState(false);
   const [toast, setToast] = useState<ToastData | null>(null);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [activeCollectionId, setActiveCollectionId] = useState<number | null>(
@@ -372,20 +376,10 @@ export default function LibraryView({
   const navSnapshot = useMemo<NavSnapshot>(
     () => ({
       collectionId: activeCollectionId,
-      selected,
-      quickEdit: quickEditCard,
-      reader: readerCard,
       tagCenter: tagCenterOpen,
       trash: trashOpen,
     }),
-    [
-      activeCollectionId,
-      selected,
-      quickEditCard,
-      readerCard,
-      tagCenterOpen,
-      trashOpen,
-    ],
+    [activeCollectionId, tagCenterOpen, trashOpen],
   );
 
   useEffect(() => {
@@ -394,9 +388,6 @@ export default function LibraryView({
     if (
       current &&
       current.collectionId === navSnapshot.collectionId &&
-      current.selected?.id === navSnapshot.selected?.id &&
-      current.quickEdit?.id === navSnapshot.quickEdit?.id &&
-      current.reader?.id === navSnapshot.reader?.id &&
       current.tagCenter === navSnapshot.tagCenter &&
       current.trash === navSnapshot.trash
     ) {
@@ -412,19 +403,33 @@ export default function LibraryView({
 
   const applyNavSnapshot = useCallback((snapshot: NavSnapshot) => {
     setActiveCollectionId(snapshot.collectionId);
-    setSelected(snapshot.selected);
-    setQuickEditCard(snapshot.quickEdit);
-    setReaderCard(snapshot.reader);
     setTagCenterOpen(snapshot.tagCenter);
     setTrashOpen(snapshot.trash);
   }, []);
 
+  /**
+   * 后退是「分层退出」：先关最上层的浮层（阅读器 → 详情 → 快速编辑），
+   * 全关了才走集合级历史。快照里只存集合级状态，所以打开/关闭阅读器、
+   * 阅读器里换书都不会压历史——后退永远是「回上一级」，不会回放上一本。
+   */
   const goBack = useCallback(() => {
+    if (readerCard) {
+      setReaderCard(null);
+      return;
+    }
+    if (selected) {
+      setSelected(null);
+      return;
+    }
+    if (quickEditCard) {
+      setQuickEditCard(null);
+      return;
+    }
     if (navIndexRef.current <= 0) return;
     navIndexRef.current -= 1;
     applyNavSnapshot(navHistoryRef.current[navIndexRef.current]);
     refreshNav();
-  }, [applyNavSnapshot]);
+  }, [readerCard, selected, quickEditCard, applyNavSnapshot]);
 
   const goForward = useCallback(() => {
     if (navIndexRef.current >= navHistoryRef.current.length - 1) return;
@@ -598,6 +603,7 @@ export default function LibraryView({
           search,
           group: groupBy,
           autoSeconds: autoPageSeconds,
+          detailDock,
         }),
       );
     } catch {
@@ -617,7 +623,13 @@ export default function LibraryView({
     search,
     groupBy,
     autoPageSeconds,
+    detailDock,
   ]);
+
+  // 关掉阅读器时把「阅读器里的详情」一并收起。
+  useEffect(() => {
+    if (!readerCard) setReaderDetailOpen(false);
+  }, [readerCard]);
 
   const updateRating = useCallback(
     async (id: number, rating: number) => {
@@ -1116,8 +1128,8 @@ export default function LibraryView({
 
   /**
    * 阅读器里直接切上一本 / 下一本。
-   * 走的是「替换当前快照内的 readerCard」，不再新压一条浏览历史：
-   * 否则按后退会退回上一本，而不是退出阅读器。
+   * 浏览历史只记录集合级状态（快照里没有 reader），所以这里换书
+   * 不会压历史——后退永远是「退出阅读器」，不会回放上一本。
    */
   /** 连读跨页取书在途标记：连按 ]/[ 时避免重复发起同一页查询。 */
   const switchingReaderRef = useRef(false);
@@ -2878,11 +2890,37 @@ export default function LibraryView({
               </button>
             </>
           )}
+
+          {/* 详情「外拓」停靠：作为 content-shell 的 flex 兄弟节点渲染，
+              画廊网格 repeat(auto-fill) 自动让位重排，不铺遮罩不遮挡。 */}
+          {selected && detailDock === "dock" && (
+            <DetailDrawer
+              docked
+              dock={detailDock}
+              onDockChange={setDetailDock}
+              card={selected}
+              collections={collections}
+              onClose={() => setSelected(null)}
+              onRead={() => {
+                setReaderCard(selected);
+                setSelected(null);
+              }}
+              onNotify={notify}
+              onRatingChange={updateRating}
+              onCollectionToggle={toggleCollectionMembership}
+              onCollectionCover={setCollectionCover}
+              onNoteChange={updateNote}
+              onTagsChanged={loadTags}
+              onDelete={removeArchive}
+            />
+          )}
         </div>
       </main>
 
-      {selected && (
+      {selected && detailDock === "float" && (
         <DetailDrawer
+          dock={detailDock}
+          onDockChange={setDetailDock}
           card={selected}
           collections={collections}
           onClose={() => setSelected(null)}
@@ -2912,6 +2950,30 @@ export default function LibraryView({
             readerIndex >= 0 &&
             (readerIndex < items.length - 1 || page < totalPagesRef.current)
           }
+          onOpenDetail={() => setReaderDetailOpen(true)}
+          detailOpen={readerDetailOpen}
+        />
+      )}
+
+      {readerCard && readerDetailOpen && (
+        <DetailDrawer
+          card={readerCard}
+          collections={collections}
+          embeddedInReader
+          dock="float"
+          onClose={() => setReaderDetailOpen(false)}
+          onRead={() => setReaderDetailOpen(false)}
+          onNotify={notify}
+          onRatingChange={updateRating}
+          onCollectionToggle={toggleCollectionMembership}
+          onCollectionCover={setCollectionCover}
+          onNoteChange={updateNote}
+          onTagsChanged={loadTags}
+          onDelete={async (id) => {
+            await removeArchive(id);
+            setReaderDetailOpen(false);
+            setReaderCard(null);
+          }}
         />
       )}
 

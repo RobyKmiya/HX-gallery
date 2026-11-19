@@ -7,8 +7,9 @@ import {
   type PointerEvent as ReactPointerEvent,
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
-import { api, readerPageUrl } from "../api";
+import { api, animFrameUrl, readerPageUrl } from "../api";
 import type {
+  AnimMeta,
   ArchiveCardData,
   ReaderBookmark,
   ReaderInfo,
@@ -21,7 +22,10 @@ import {
   ChevronRightIcon,
   CloseIcon,
   GridIcon,
+  PauseIcon,
+  PlayIcon,
   StarIcon,
+  TagIcon,
   TrashIcon,
 } from "./Icons";
 
@@ -37,6 +41,10 @@ interface ReaderProps {
   onSwitchArchive?: (direction: -1 | 1) => void;
   hasPrevArchive?: boolean;
   hasNextArchive?: boolean;
+  /** 在阅读器里打开详情浮层（LibraryView 挂 DetailDrawer）。「详情 (I)」按钮。 */
+  onOpenDetail?: () => void;
+  /** 详情浮层开着时置真：Esc 交给浮层处理，阅读器不抢。 */
+  detailOpen?: boolean;
 }
 
 type ZoomMode = "fit" | "width" | "actual";
@@ -60,6 +68,17 @@ const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 4;
 const ZOOM_STEP = 0.25;
 const SPREAD_STORAGE_KEY = "archive-gallery:reader-spread";
+const PLAYBACK_STORAGE_KEY = "archive-gallery:reader-playback";
+/** 播放模式下静态页的停留时长。 */
+const STATIC_PAGE_DWELL_MS = 2000;
+/** 播放模式下动图页的时长上下限：太短看不清，太长（几分钟的长动图）会卡住模式。 */
+const PLAYBACK_MIN_PAGE_MS = 400;
+const PLAYBACK_MAX_PAGE_MS = 12000;
+
+function isAnimName(name: string): boolean {
+  const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+  return extension === "gif" || extension === "webp";
+}
 
 function trimPageCache(cache: Map<number, ReaderPage>, current: number) {
   if (cache.size <= CACHE_LIMIT) return;
@@ -184,6 +203,8 @@ export default function Reader({
   onSwitchArchive,
   hasPrevArchive = false,
   hasNextArchive = false,
+  onOpenDetail,
+  detailOpen = false,
 }: ReaderProps) {
   const [info, setInfo] = useState<ReaderInfo | null>(null);
   const [page, setPage] = useState(0);
@@ -216,6 +237,20 @@ export default function Reader({
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
+  /** 播放阅读模式（持久化）：开着的书播完自动翻页、翻完自动换下一本。 */
+  const [playback, setPlayback] = useState(() => {
+    try {
+      return window.localStorage.getItem(PLAYBACK_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  /** 播放是否正在进行（模式开着也可以用空格暂停）。 */
+  const [playing, setPlaying] = useState(false);
+  /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。 */
+  const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
+  /** 正在拖帧条时的帧号；null = 交给 <img> 原生播放动画。 */
+  const [scrubFrame, setScrubFrame] = useState<number | null>(null);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const cacheRef = useRef<Map<number, ReaderPage>>(new Map());
@@ -229,6 +264,11 @@ export default function Reader({
   const pageRef = useRef(1);
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const playbackRef = useRef(playback);
+  playbackRef.current = playback;
+  const metaInflightRef = useRef<Set<number>>(new Set());
   const panRef = useRef<{
     pointerId: number;
     startX: number;
@@ -337,10 +377,15 @@ export default function Reader({
     setBookmarks([]);
     setBookmarksOpen(false);
     setThumbsOpen(false);
+    setAnimMetas({});
+    setScrubFrame(null);
+    // 换本（含播放模式跨本连播）保留当前播放状态；模式开着且没被暂停就继续播。
+    setPlaying(playingRef.current);
     cacheRef.current.clear();
     thumbCacheRef.current.clear();
     inflightRef.current.clear();
     decodedRef.current.clear();
+    metaInflightRef.current.clear();
 
     api
       .openReader(card.id)
@@ -433,6 +478,84 @@ export default function Reader({
     }
   }, [spread]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PLAYBACK_STORAGE_KEY, playback ? "1" : "0");
+    } catch {
+      // Local storage may be unavailable; the mode still works for this session.
+    }
+    // 模式开关直接驱动播放：打开就播，关掉就停。
+    setPlaying(playback);
+  }, [playback]);
+
+  // 当前页是动图时拉取帧元数据（帧数 / 总时长），拖条与播放模式都要用。
+  useEffect(() => {
+    if (!pageData || !isAnimName(pageData.name)) return;
+    const index = pageData.index;
+    if (animMetas[index] || metaInflightRef.current.has(index)) return;
+
+    metaInflightRef.current.add(index);
+    let cancelled = false;
+    api
+      .readAnimMeta(card.id, index)
+      .then((meta) => {
+        if (!cancelled) setAnimMetas((previous) => ({ ...previous, [index]: meta }));
+      })
+      .catch(() => {
+        // 拿不到元数据就当作静态页记下来：不出拖条，播放按停留时长走，
+        // 否则这一页会永远等不到时长、播放模式卡死在当前页。
+        if (!cancelled) {
+          setAnimMetas((previous) => ({
+            ...previous,
+            [index]: {
+              animated: false,
+              frames: 0,
+              totalDurationMs: 0,
+              width: 0,
+              height: 0,
+            },
+          }));
+        }
+      })
+      .finally(() => {
+        metaInflightRef.current.delete(index);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pageData, card.id, animMetas]);
+
+  // 播放模式节拍：动图按总时长播完翻页，静态页停 2 秒；
+  // 翻到本尾自动换下一本，没有下一本就结束播放。
+  useEffect(() => {
+    if (!playing || !info || info.pageCount === 0 || !pageData) return;
+    const looksAnim = isAnimName(pageData.name);
+    const meta = animMetas[pageData.index];
+    // 动图页等元数据到位再定时长，避免长动图被当静态页 2 秒翻走。
+    if (looksAnim && !meta) return;
+
+    const duration =
+      meta?.animated && meta.totalDurationMs > 0
+        ? Math.min(Math.max(meta.totalDurationMs, PLAYBACK_MIN_PAGE_MS), PLAYBACK_MAX_PAGE_MS)
+        : STATIC_PAGE_DWELL_MS;
+
+    const timer = window.setTimeout(() => {
+      const count = info.pageCount;
+      const nextIndex = page + (spread ? 2 : 1);
+      if (nextIndex < count) {
+        setPage(nextIndex);
+        return;
+      }
+      if (onSwitchArchive && hasNextArchive) {
+        onSwitchArchive(1);
+        return;
+      }
+      setPlaying(false);
+      onNotify("已经到最后一页，播放结束", "info");
+    }, duration);
+    return () => window.clearTimeout(timer);
+  }, [playing, info, pageData, animMetas, page, spread, hasNextArchive, onSwitchArchive, onNotify]);
+
   // 换页后重新给「自愈」机会：上一次失败的页再回来时可以再试一次。
   useEffect(() => {
     recoveredRef.current.clear();
@@ -518,6 +641,41 @@ export default function Reader({
   const goNext = useCallback(() => goTo(page + step), [goTo, page, step]);
   const goPrev = useCallback(() => goTo(page - step), [goTo, page, step]);
 
+  /** 任何手动操作（翻页/缩放/拖动/跳页）都暂停播放，交给用户接管。 */
+  const pausePlayback = useCallback(() => {
+    setPlaying(false);
+  }, []);
+
+  const togglePlayback = useCallback(() => {
+    setPlayback((value) => !value);
+  }, []);
+
+  /** 预热某帧（解码进后端缓存）；失败静默，拖条只负责擦洗。 */
+  const ensureFrame = useCallback(
+    (index: number, frame: number) => {
+      void api.prepareAnimFrame(card.id, index, frame).catch(() => {});
+    },
+    [card.id],
+  );
+
+  const handleScrub = (value: number) => {
+    if (!pageData) return;
+    pausePlayback();
+    setScrubFrame(value);
+    ensureFrame(pageData.index, value);
+  };
+
+  /** 松开拖条：回到原生动画播放，并顺手预热邻帧让下次擦洗更顺。 */
+  const releaseScrub = () => {
+    if (pageData && scrubFrame !== null) {
+      const total = animMetas[pageData.index]?.frames ?? 0;
+      for (const neighbor of [scrubFrame - 2, scrubFrame - 1, scrubFrame + 1, scrubFrame + 2]) {
+        if (neighbor >= 0 && neighbor < total) ensureFrame(pageData.index, neighbor);
+      }
+    }
+    setScrubFrame(null);
+  };
+
   const toggleSpread = useCallback(() => {
     setSpread((value) => !value);
   }, []);
@@ -596,6 +754,9 @@ export default function Reader({
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
+      // 详情浮层开着时按键全部让给浮层（它自己处理 Esc 关闭）。
+      if (detailOpen) return;
+
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
@@ -621,11 +782,13 @@ export default function Reader({
       // 换本键放在 !info 之前：本子打不开时也该能跳去下一本。
       if (onSwitchArchive && event.key === "[") {
         event.preventDefault();
+        pausePlayback();
         onSwitchArchive(-1);
         return;
       }
       if (onSwitchArchive && event.key === "]") {
         event.preventDefault();
+        pausePlayback();
         onSwitchArchive(1);
         return;
       }
@@ -634,27 +797,42 @@ export default function Reader({
       const last = info.pageCount - 1;
       let handled = true;
 
-      if (
+      if (event.key.toLowerCase() === "p") {
+        togglePlayback();
+      } else if (onOpenDetail && event.key.toLowerCase() === "i") {
+        onOpenDetail();
+      } else if (
         event.key === "ArrowRight" ||
         event.key === "ArrowDown" ||
         event.key === "PageDown" ||
         (event.key === " " && !event.shiftKey)
       ) {
-        goNext();
+        if (event.key === " " && playback) {
+          // 播放模式下空格 = 暂停/继续，不再当翻页键。
+          setPlaying((value) => !value);
+        } else {
+          pausePlayback();
+          goNext();
+        }
       } else if (
         event.key === "ArrowLeft" ||
         event.key === "ArrowUp" ||
         event.key === "PageUp" ||
         (event.key === " " && event.shiftKey)
       ) {
+        pausePlayback();
         goPrev();
       } else if (event.key === "Home") {
+        pausePlayback();
         goTo(0);
       } else if (event.key === "End") {
+        pausePlayback();
         goTo(last);
       } else if (event.key === "+" || event.key === "=") {
+        pausePlayback();
         zoomIn();
       } else if (event.key === "-") {
+        pausePlayback();
         zoomOut();
       } else if (event.key === "0") {
         setZoomMode("fit");
@@ -686,6 +864,11 @@ export default function Reader({
     toggleSpread,
     toggleBookmark,
     onSwitchArchive,
+    detailOpen,
+    playback,
+    pausePlayback,
+    togglePlayback,
+    onOpenDetail,
   ]);
 
   useEffect(() => {
@@ -699,6 +882,7 @@ export default function Reader({
     const handleWheel = (event: WheelEvent) => {
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
+        pausePlayback();
         if (event.deltaY < 0) zoomIn();
         else zoomOut();
         return;
@@ -756,13 +940,14 @@ export default function Reader({
       const direction = accumulated > 0 ? 1 : -1;
       accumulated = 0;
       lastFlipAt = now;
+      pausePlayback();
       if (direction > 0) goNext();
       else goPrev();
     };
 
     stage.addEventListener("wheel", handleWheel, { passive: false });
     return () => stage.removeEventListener("wheel", handleWheel);
-  }, [goNext, goPrev, zoomIn, zoomOut]);
+  }, [goNext, goPrev, zoomIn, zoomOut, pausePlayback]);
 
   const commitPageInput = useCallback(() => {
     const count = info?.pageCount ?? 0;
@@ -772,9 +957,10 @@ export default function Reader({
       setPageInput(String(page + 1));
       return;
     }
+    pausePlayback();
     goTo(parsed - 1);
     setPageInput(String(Math.min(Math.max(parsed, 1), count)));
-  }, [info, pageInput, page, goTo]);
+  }, [info, pageInput, page, goTo, pausePlayback]);
 
   const retry = () => {
     if (!info) {
@@ -832,6 +1018,7 @@ export default function Reader({
     ) {
       return;
     }
+    pausePlayback();
     panRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -888,6 +1075,14 @@ export default function Reader({
       : zoomMode === "width"
         ? "适应宽度"
         : `${Math.round(zoom * 100)}%`;
+
+  const currentMeta = pageData ? animMetas[pageData.index] : undefined;
+  const canScrub = !!currentMeta?.animated && currentMeta.frames > 1;
+  /** 拖帧条时把主 <img> 换成对应单帧 PNG；松手回原生动画。 */
+  const scrubSrc =
+    pageData && scrubFrame !== null && canScrub
+      ? animFrameUrl(card.id, pageData.index, scrubFrame, assetToken, pageData.version)
+      : null;
 
   const imageStyleFor = (data: ReaderPage) => {
     const natural = naturals[data.index];
@@ -977,6 +1172,17 @@ export default function Reader({
                 <span className="reader-bookmark-count">{bookmarks.length}</span>
               )}
             </button>
+            {onOpenDetail && (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={onOpenDetail}
+                aria-label="详情与编辑"
+                title="详情与编辑 (I)"
+              >
+                <TagIcon width={16} height={16} />
+              </button>
+            )}
             <button
               type="button"
               className="icon-button"
@@ -1016,7 +1222,10 @@ export default function Reader({
                   <button
                     type="button"
                     className="reader-bookmark-jump"
-                    onClick={() => goTo(bookmark.page - 1)}
+                    onClick={() => {
+                      pausePlayback();
+                      goTo(bookmark.page - 1);
+                    }}
                   >
                     第 {bookmark.page} 页
                   </button>
@@ -1063,7 +1272,10 @@ export default function Reader({
                   index={index}
                   active={index === page || (spread && index === page + 1)}
                   cache={thumbCacheRef.current}
-                  onSelect={goTo}
+                  onSelect={(index) => {
+                    pausePlayback();
+                    goTo(index);
+                  }}
                 />
               ))}
             </div>
@@ -1090,13 +1302,16 @@ export default function Reader({
             (spread ? (
               <div className="reader-spread">
                 <img
-                  key={`${pageData.index}-${assetToken}`}
-                  src={readerPageUrl(
-                    card.id,
-                    pageData.index,
-                    assetToken,
-                    pageData.version,
-                  )}
+                  key={`${pageData.index}-${scrubSrc ? `f${scrubFrame}` : assetToken}`}
+                  src={
+                    scrubSrc ??
+                    readerPageUrl(
+                      card.id,
+                      pageData.index,
+                      assetToken,
+                      pageData.version,
+                    )
+                  }
                   alt={pageData.name}
                   style={imageStyleFor(pageData)}
                   decoding="sync"
@@ -1126,13 +1341,16 @@ export default function Reader({
               </div>
             ) : (
               <img
-                key={`${pageData.index}-${assetToken}`}
-                src={readerPageUrl(
-                  card.id,
-                  pageData.index,
-                  assetToken,
-                  pageData.version,
-                )}
+                key={`${pageData.index}-${scrubSrc ? `f${scrubFrame}` : assetToken}`}
+                src={
+                  scrubSrc ??
+                  readerPageUrl(
+                    card.id,
+                    pageData.index,
+                    assetToken,
+                    pageData.version,
+                  )
+                }
                 alt={pageData.name}
                 style={imageStyleFor(pageData)}
                 decoding="sync"
@@ -1245,6 +1463,25 @@ export default function Reader({
           )}
         </div>
 
+        {canScrub && currentMeta && (
+          <div className="reader-frame-scrub">
+            <span className="reader-frame-label">
+              帧 {scrubFrame !== null ? scrubFrame + 1 : "—"} / {currentMeta.frames}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={currentMeta.frames - 1}
+              step={1}
+              value={scrubFrame ?? 0}
+              onChange={(event) => handleScrub(Number(event.target.value))}
+              onPointerUp={releaseScrub}
+              onBlur={releaseScrub}
+              aria-label="动画帧擦洗"
+            />
+          </div>
+        )}
+
         <div className="reader-zoom">
           <button
             type="button"
@@ -1297,6 +1534,19 @@ export default function Reader({
               title="双页模式 (D)"
             >
               双页
+            </button>
+            <button
+              type="button"
+              className={playback ? "is-active" : ""}
+              onClick={togglePlayback}
+              title="播放阅读模式 (P)：动图播完自动翻页，翻完换下一本；空格暂停/继续"
+            >
+              {playback && playing ? (
+                <PauseIcon width={11} height={11} />
+              ) : (
+                <PlayIcon width={11} height={11} />
+              )}
+              播放
             </button>
           </div>
         </div>

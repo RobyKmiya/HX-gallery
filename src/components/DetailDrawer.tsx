@@ -21,6 +21,7 @@ import {
   RevealIcon,
   SearchIcon,
   StarIcon,
+  SwapIcon,
   TagIcon,
   TrashIcon,
 } from "./Icons";
@@ -44,6 +45,17 @@ interface DetailDrawerProps {
   onNoteChange: (id: number, note: string | null) => void;
   onTagsChanged: () => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  /**
+   * 停靠模式：不铺遮罩，作为画廊 content-shell 的 flex 兄弟节点渲染，
+   * 画廊网格自动让位重排（「外拓」）。
+   */
+  docked?: boolean;
+  /** 当前停靠形态，供标题栏的切换按钮显示。 */
+  dock?: "dock" | "float";
+  /** 切换停靠/浮层（由 LibraryView 持久化）。不传则不显示切换按钮。 */
+  onDockChange?: (dock: "dock" | "float") => void;
+  /** 在阅读器里打开：隐藏「开始阅读」按钮，Esc 归阅读器统一分发。 */
+  embeddedInReader?: boolean;
 }
 
 const RATING_PRESETS = [0, 20, 40, 60, 80, 100];
@@ -114,6 +126,10 @@ export default function DetailDrawer({
   onNoteChange,
   onTagsChanged,
   onDelete,
+  docked = false,
+  dock = "dock",
+  onDockChange,
+  embeddedInReader = false,
 }: DetailDrawerProps) {
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -591,11 +607,16 @@ export default function DetailDrawer({
       : "开始阅读";
 
   return (
-    <div className="drawer-backdrop" onClick={() => void requestClose()}>
+    <div
+      className={`drawer-backdrop${docked ? " is-docked" : ""}${
+        embeddedInReader ? " is-in-reader" : ""
+      }`}
+      onClick={docked ? undefined : () => void requestClose()}
+    >
       <aside
-        className="detail-drawer"
-        role="dialog"
-        aria-modal="true"
+        className={`detail-drawer${docked ? " is-docked" : ""}`}
+        role={docked ? "complementary" : "dialog"}
+        aria-modal={docked ? undefined : true}
         aria-label={card.title}
         onClick={(event) => event.stopPropagation()}
       >
@@ -604,13 +625,29 @@ export default function DetailDrawer({
             <p className="eyebrow">ARCHIVE DETAIL</p>
             <h2>{card.title}</h2>
           </div>
-          <button
-            className="icon-button"
-            onClick={() => void requestClose()}
-            aria-label="关闭详情"
-          >
-            <CloseIcon />
-          </button>
+          <div className="drawer-header-tools">
+            {onDockChange && (
+              <button
+                className="icon-button"
+                onClick={() => onDockChange(dock === "dock" ? "float" : "dock")}
+                aria-label={dock === "dock" ? "切换为浮层" : "切换为停靠"}
+                title={
+                  dock === "dock"
+                    ? "切换为浮层（悬浮在画廊上方）"
+                    : "切换为停靠（画廊自动让位）"
+                }
+              >
+                <SwapIcon />
+              </button>
+            )}
+            <button
+              className="icon-button"
+              onClick={() => void requestClose()}
+              aria-label="关闭详情"
+            >
+              <CloseIcon />
+            </button>
+          </div>
         </div>
 
         <div className="detail-cover">
@@ -1189,18 +1226,20 @@ export default function DetailDrawer({
         </dl>
 
         <div className="drawer-actions">
-          <button
-            className="btn btn-primary"
-            onClick={onRead}
-            title={
-              hasProgress && !finished
-                ? `从第 ${card.lastPage} 页继续`
-                : undefined
-            }
-          >
-            <BookIcon />
-            {readLabel}
-          </button>
+          {!embeddedInReader && (
+            <button
+              className="btn btn-primary"
+              onClick={onRead}
+              title={
+                hasProgress && !finished
+                  ? `从第 ${card.lastPage} 页继续`
+                  : undefined
+              }
+            >
+              <BookIcon />
+              {readLabel}
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={reveal}>
             <RevealIcon />
             显示文件
