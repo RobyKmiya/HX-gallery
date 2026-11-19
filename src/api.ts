@@ -4,6 +4,7 @@ import type {
   ArchiveQuery,
   BulkTagReport,
   Collection,
+  D2FetchReport,
   ImportOptions,
   ImportReport,
   LibraryState,
@@ -36,6 +37,10 @@ export const api = {
 
   importPaths: (paths: string[], options: ImportOptions) =>
     invoke<ImportReport>("import_paths", { paths, options }),
+
+  /** D2 M1：打开 exhentai 作品页，抓取第一页并打包入库。 */
+  d2FetchFirst: (url: string) =>
+    invoke<D2FetchReport>("d2_fetch_first", { url }),
 
   /** 导入前的暂存：展开路径、给出大小 / 页数 / 疑似重复，不做任何复制。 */
   stageImportPaths: (paths: string[]) =>

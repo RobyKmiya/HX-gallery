@@ -1,7 +1,7 @@
 # D2 设计方案：画匣内建下载器（受控 WebView 路线）
 
 - 建立时间：2026-11-19
-- 状态：**设计方案完成，待管理员确认后开工**（对应施工日志 D2）
+- 状态：**管理员已确认；M1 最小闭环已实现，待用户 exhentai 登录态下端到端验收**（对应施工日志 D2）
 - 参考素材：`D:\MESAVAGE\LINGSHI\下载内容\Comic Looms-4.16.1.txt`（油猴脚本，v4.16.1，约 1.5 万行，58 个站点适配器）
 - 关联文档：[施工日志](施工日志.md) · [AGENT_API](AGENT_API.md) · [UI 清爽化方案](UI-PROPOSAL-2026-11-19.md)
 
@@ -196,3 +196,11 @@ interface SiteAdapter {
 1. 是否保持“不做自动脚本更新、不做分卷”两项非目标？
 2. pica.fanjugou18.top 与 h-comic.com 是否允许我实际打开页面做结构勘察（仅看 DOM/网络结构，不下载内容）？
 3. 入库成功后是否默认删除 staging 下载缓存？（默认保留，手动清理）
+
+---
+
+## 8. 实施进展
+
+- **2026-11-19 · M1**：管理员确认上述默认项后开工。已实现 `d2_fetch_first` 命令与最小 UI 入口：打开 exhentai/e-hentai 作品页 → 页面内解析 `#gd2 h1`、`#taglist`、第一张缩略图链接 → 在图片页取原图 → 字节回传 Rust → 写单页 CBZ → 复用 `importer` 入库并挂标签。
+- 当前实现刻意只抓第一页、不做 schema v10、不做任务中心；这些属于 M3/M5。端到端验收需要用户在弹出窗口内完成 exhentai 登录。
+- 验证状态：`npm run check`、`npm run build`、`cargo check`、`cargo test --lib`（45 项，含 2 项 D2 辅助函数测试）均通过；真实站点 E2E 待登录验收。

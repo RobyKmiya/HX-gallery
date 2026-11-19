@@ -316,6 +316,16 @@ export interface ImportReport {
   message: string;
 }
 
+/** D2 M1：一次受控 WebView 抓取并入库的结果。 */
+export interface D2FetchReport {
+  title: string;
+  sourceUrl: string;
+  pageUrl: string;
+  imageUrl: string;
+  cbzPath: string;
+  importReport: ImportReport;
+}
+
 export interface ScanReport {
   found: number;
   added: number;

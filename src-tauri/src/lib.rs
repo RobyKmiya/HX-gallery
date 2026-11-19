@@ -1,5 +1,6 @@
 mod archive;
 mod asset_protocol;
+mod d2;
 pub mod db;
 pub mod fsutil;
 pub mod importer;
@@ -1313,6 +1314,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             open_library,
             import_paths,
             stage_import_paths,
+            d2::d2_fetch_first,
             scan_library,
             query_archives,
             set_rating,

@@ -41,6 +41,7 @@ import ImportResultDialog from "./ImportResultDialog";
 import QueuePanel from "./QueuePanel";
 import Reader from "./Reader";
 import ReleasePanel from "./ReleasePanel";
+import D2Panel from "./D2Panel";
 import TagCenter from "./TagCenter";
 import Toast, { type ToastData, type ToastKind } from "./Toast";
 import TrashCenter from "./TrashCenter";
@@ -318,6 +319,7 @@ export default function LibraryView({
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [releasePanelOpen, setReleasePanelOpen] = useState(false);
+  const [d2PanelOpen, setD2PanelOpen] = useState(false);
   /**
    * 正在浏览的待看目录。非空时列表只显示这个目录的成员；
    * 它和收藏夹是两套筛选，进待看目录时把收藏夹选择清掉。
@@ -1821,6 +1823,15 @@ export default function LibraryView({
             <span className="nav-label">更新画匣</span>
           </button>
 
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => setD2PanelOpen(true)}
+            title="D2 下载器最小闭环测试（exhentai 第一页）"
+          >
+            <span className="nav-label">下载测试</span>
+          </button>
+
           {activeQueue && (
             <div className="nav-row is-active">
               <button
@@ -2961,6 +2972,13 @@ export default function LibraryView({
       {releasePanelOpen && (
         <ReleasePanel
           onClose={() => setReleasePanelOpen(false)}
+          onNotify={notify}
+        />
+      )}
+
+      {d2PanelOpen && (
+        <D2Panel
+          onClose={() => setD2PanelOpen(false)}
           onNotify={notify}
         />
       )}
