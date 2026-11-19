@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
-import type { D2FetchReport } from "../types";
+import type { D2Done, D2FetchReport } from "../types";
 
 interface D2PanelProps {
   onClose: () => void;
@@ -11,29 +12,71 @@ interface D2PanelProps {
  * D2 M1 的临时入口。
  *
  * 打开 exhentai 作品页 → 抓第一页 → 打包 CBZ → 复用 importer 入库。
- * 正式 UI 会在 M5 重做，这里先把闭环打通并保留可观察的结果。
+ *
+ * 注意：这里**故意不等长任务**。早期版本 `await api.d2FetchFirst()` 会挂到
+ * 60 秒超时才返回，期间界面只剩一个「抓取中…」，管理员实测就是「点击直接卡死」。
+ * 现在改成 `d2Start` 立即返回 + 事件回报，任何时候都能取消。
  */
 export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
   const [report, setReport] = useState<D2FetchReport | null>(null);
+
+  useEffect(() => {
+    const unlistenStatus = listen<{ message: string }>("d2://status", (event) => {
+      setStatus(event.payload.message);
+    });
+    const unlistenDone = listen<D2Done>("d2://done", (event) => {
+      const payload = event.payload;
+      setBusy(false);
+      setStatus("");
+      if (payload.ok && payload.report) {
+        setReport(payload.report);
+        setError("");
+        onNotify(`D2 抓取完成：${payload.report.title}`, "success");
+      } else {
+        const message = payload.error ?? "抓取失败";
+        setError(message);
+        onNotify(`D2 抓取失败：${message}`, "error");
+      }
+    });
+    return () => {
+      void unlistenStatus.then((unlisten) => unlisten());
+      void unlistenDone.then((unlisten) => unlisten());
+    };
+  }, [onNotify]);
 
   async function run() {
     if (!url.trim()) {
       onNotify("请填写作品页网址", "error");
       return;
     }
-    setBusy(true);
     setReport(null);
+    setError("");
+    setStatus("正在打开浏览窗口…");
+    setBusy(true);
     try {
-      const result = await api.d2FetchFirst(url.trim());
-      setReport(result);
-      onNotify(`D2 抓取完成：${result.title}`, "success");
-    } catch (error) {
-      onNotify(`D2 抓取失败：${String(error)}`, "error");
-    } finally {
+      await api.d2Start(url.trim());
+    } catch (err) {
       setBusy(false);
+      setStatus("");
+      const message = String(err);
+      setError(message);
+      onNotify(`D2 抓取失败：${message}`, "error");
     }
+  }
+
+  async function cancel() {
+    try {
+      await api.d2Cancel();
+    } catch {
+      // 取消失败不影响界面恢复
+    }
+    setBusy(false);
+    setStatus("");
+    onNotify("已取消本次抓取", "info");
   }
 
   return (
@@ -81,17 +124,28 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
           </section>
 
           <section className="release-section">
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy}
-              onClick={() => void run()}
-            >
-              {busy ? "抓取中…" : "开始抓取并入库"}
-            </button>
-            <p className="queue-hint">
-              M1 只抓第一页，打包成单页 CBZ 后调用现有 importer 入库；暂存文件保留在缓存目录。
-            </p>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy}
+                onClick={() => void run()}
+              >
+                {busy ? "抓取中…" : "开始抓取并入库"}
+              </button>
+              {busy && (
+                <button type="button" className="btn btn-quiet" onClick={() => void cancel()}>
+                  取消
+                </button>
+              )}
+            </div>
+            {busy && status && <p className="queue-hint">{status}</p>}
+            {!busy && !error && (
+              <p className="queue-hint">
+                M1 只抓第一页，打包成单页 CBZ 后调用现有 importer 入库；暂存文件保留在缓存目录。
+              </p>
+            )}
+            {error && <p className="queue-hint" style={{ color: "var(--danger, #d9534f)" }}>{error}</p>}
           </section>
 
           {report && (

@@ -326,6 +326,14 @@ export interface D2FetchReport {
   importReport: ImportReport;
 }
 
+/** D2：`d2://done` 事件负载。 */
+export interface D2Done {
+  ok: boolean;
+  stage: string;
+  report: D2FetchReport | null;
+  error: string | null;
+}
+
 export interface ScanReport {
   found: number;
   added: number;

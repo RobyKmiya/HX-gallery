@@ -2,25 +2,48 @@
 //!
 //! 只做 exhentai 作品页的「打开 → 解析首页 → 打包 CBZ → 入库」。
 //! 页面侧只解析与取字节，Rust 侧负责落盘与入库。
+//!
+//! ## 为什么是「后台线程 + 事件回报」而不是一个长命令
+//!
+//! 管理员 2026-11-19 反馈「粘贴链接后点击直接卡死」。实测：点击后界面变成
+//! 「抓取中…」，但浏览窗口根本没建出来，命令一直挂到 60 秒超时才结束，
+//! 期间无法取消、没有任何反馈——用户感知就是卡死。
+//!
+//! 所以这里把整个流程拆到后台线程，命令本身**立即返回**：
+//! `d2_start` → 立刻 Ok，前端进入等待态并可随时 `d2_cancel`；
+//! 后台线程负责建窗口、轮询解析、打包入库，结束时 `emit("d2://done")`。
+//! 建窗口这一步再套 30 秒超时，避免 WebView2 初始化卡住时无人收场。
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::sync::{mpsc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::utils::config::WebviewUrl;
 use tauri::webview::{PageLoadEvent, WebviewWindow};
-use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 use zip::write::SimpleFileOptions;
 
 use crate::models::{ImportOptions, ImportReport, TagDraft};
 use crate::{importer, paths, AppState};
+
+/// 建窗口最多等这么久；超时说明 WebView2 初始化卡住，直接报错收场。
+const WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
+/// 整个抓取流程的上限，超过就报超时，不再无限等。
+const FETCH_TIMEOUT: Duration = Duration::from_secs(180);
+/// 页面打开后多久仍没有任何解析结果，就提示用户检查登录/代理。
+const NO_RESULT_HINT: Duration = Duration::from_secs(30);
+
+static PAGE_READY: AtomicBool = AtomicBool::new(false);
+static PARSE_STARTED: AtomicBool = AtomicBool::new(false);
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+static WINDOW: Mutex<Option<WebviewWindow>> = Mutex::new(None);
 
 /// 注入到 exhentai 页面里的解析脚本。
 ///
@@ -85,7 +108,6 @@ const D2_INIT_SCRIPT: &str = r###"
       var img = doc.querySelector("#img");
       var normal =
         (img && (img.getAttribute("data-src") || img.src)) ||
-        (doc.querySelector("#image") || {}).getAttribute?.("src") ||
         "";
       var imageUrl = original || normal;
       if (!imageUrl) throw new Error("图片页里没找到原图地址");
@@ -121,7 +143,7 @@ const D2_INIT_SCRIPT: &str = r###"
 })();
 "###;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct D2FetchReport {
     pub title: String,
@@ -130,6 +152,23 @@ pub struct D2FetchReport {
     pub image_url: String,
     pub cbz_path: String,
     pub import_report: ImportReport,
+}
+
+/// `d2://done` 事件负载。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct D2Done {
+    pub ok: bool,
+    pub stage: String,
+    pub report: Option<D2FetchReport>,
+    pub error: Option<String>,
+}
+
+/// `d2://status` 事件负载（过程中的一句话进度）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct D2Status {
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +189,32 @@ struct PagePayload {
     image_base64: String,
     #[serde(default)]
     mime: String,
+}
+
+fn log_file(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_cache_dir().ok()?.join("d2");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("d2.log"))
+}
+
+fn log(app: &AppHandle, message: &str) {
+    let Some(path) = log_file(app) else { return };
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{stamp}] {message}");
+    }
+}
+
+fn status(app: &AppHandle, message: &str) {
+    log(app, message);
+    let _ = app.emit("d2://status", D2Status { message: message.to_string() });
+}
+
+fn emit_done(app: &AppHandle, done: D2Done) {
+    let _ = app.emit("d2://done", done);
 }
 
 fn sanitize_file_name(input: &str) -> String {
@@ -206,7 +271,11 @@ fn tag_drafts(tags: &HashMap<String, Vec<String>>) -> Vec<TagDraft> {
     drafts
 }
 
-async fn eval_json(window: &WebviewWindow, expression: &str) -> Result<String, String> {
+/// 同步执行一段 JS 并取回结果字符串（最多等 `wait`）。
+///
+/// 注意：`eval_with_callback` 必须由**非主线程**发起在这里没有硬性要求，
+/// 但我们要保证主线程不被脚本执行阻塞，所以调用方都是后台线程。
+fn eval_json(window: &WebviewWindow, expression: &str, wait: Duration) -> Result<String, String> {
     let (tx, rx) = mpsc::channel::<String>();
     window
         .eval_with_callback(expression, move |value| {
@@ -214,100 +283,142 @@ async fn eval_json(window: &WebviewWindow, expression: &str) -> Result<String, S
         })
         .map_err(|error| format!("读取页面结果失败：{error}"))?;
 
-    let raw = tauri::async_runtime::spawn_blocking(move || {
-        rx.recv_timeout(Duration::from_secs(5))
-            .unwrap_or_else(|_| String::new())
-    })
-    .await
-    .map_err(|error| format!("读取页面结果任务异常：{error}"))?;
-
+    let raw = rx.recv_timeout(wait).unwrap_or_default();
     if raw.trim().is_empty() {
         return Ok(String::new());
     }
     Ok(serde_json::from_str::<String>(&raw).unwrap_or(raw))
 }
 
-#[tauri::command]
-pub async fn d2_fetch_first(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    url: String,
-) -> Result<D2FetchReport, String> {
-    let parsed = tauri::Url::parse(&url).map_err(|_| "网址格式不正确".to_string())?;
-    if parsed.scheme() != "https" {
-        return Err("D2 只接受 https 网址".to_string());
-    }
-    let host = parsed.host_str().unwrap_or("");
-    if !host.eq_ignore_ascii_case("exhentai.org")
-        && !host.eq_ignore_ascii_case("e-hentai.org")
-    {
-        return Err("M1 目前只支持 exhentai.org / e-hentai.org".to_string());
-    }
+fn build_window(app: &AppHandle, url: tauri::Url, label: String) -> Result<WebviewWindow, String> {
+    WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        .title("画匣 · D2 浏览")
+        .inner_size(1180.0, 860.0)
+        .initialization_script(D2_INIT_SCRIPT)
+        .on_page_load(|_window, payload| {
+            // 这个回调跑在事件循环（主线程）上，只做标记，绝不在这里执行脚本，
+            // 否则主线程被页面拖住，整个应用都会失去响应。
+            if !matches!(payload.event(), PageLoadEvent::Finished) {
+                return;
+            }
+            let href = payload.url().as_str();
+            if href.contains("/g/") || href.contains("/gallery/") {
+                PAGE_READY.store(true, Ordering::SeqCst);
+            }
+        })
+        .build()
+        .map_err(|error| format!("打开浏览窗口失败：{error}"))
+}
 
-    let (root, library_id) = {
-        let inner = state.lock()?;
-        let library = inner
-            .library
-            .as_ref()
-            .ok_or_else(|| "请先选择库目录".to_string())?;
-        (library.root.clone(), library.library_id.clone())
-    };
-
-    let label = format!("d2-browser-{}", uuid::Uuid::new_v4());
-    let started = Arc::new(AtomicBool::new(false));
-    let window = {
-        let started = Arc::clone(&started);
-        WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::External(parsed))
-            .title("画匣 · D2 浏览")
-            .inner_size(1120.0, 820.0)
-            .initialization_script(D2_INIT_SCRIPT)
-            .on_page_load(move |window, payload| {
-                if !matches!(payload.event(), PageLoadEvent::Finished) {
-                    return;
-                }
-                // 登录页 / 首页不触发解析；等用户进入作品详情页再抓。
-                let href = payload.url().as_str();
-                if !href.contains("/g/") && !href.contains("/gallery/") {
-                    return;
-                }
-                if started.swap(true, Ordering::SeqCst) {
-                    return;
-                }
-                let _ = window.eval("window.__d2Parse && window.__d2Parse()");
-            })
-            .build()
-            .map_err(|error| format!("打开浏览窗口失败：{error}"))?
-    };
-
-    let mut payload: Option<PagePayload> = None;
-    let mut last_error = String::new();
-    for _ in 0..120 {
-        let json = eval_json(&window, "window.__d2Result ? JSON.stringify(window.__d2Result) : ''").await?;
-        if json.trim().is_empty() {
-            tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(500)))
-                .await
-                .ok();
-            continue;
+fn close_window() {
+    if let Ok(mut guard) = WINDOW.lock() {
+        if let Some(window) = guard.take() {
+            let _ = window.close();
         }
-        let parsed: PagePayload = serde_json::from_str(&json)
-            .map_err(|error| format!("解析页面结果失败：{error}"))?;
-        if !parsed.ok {
-            last_error = parsed.error.clone().unwrap_or_else(|| "页面解析失败".to_string());
+    }
+}
+
+fn fetch_flow(
+    app: &AppHandle,
+    url: String,
+    root: PathBuf,
+    library_id: String,
+    parsed: tauri::Url,
+) -> Result<D2FetchReport, String> {
+    let label = format!("d2-browser-{}", uuid::Uuid::new_v4());
+    status(app, "正在打开浏览窗口…");
+
+    // 建窗口放到独立线程并加超时：WebView2 初始化卡住时也不至于永远没有下文。
+    let (tx, rx) = mpsc::channel::<Result<WebviewWindow, String>>();
+    let app_for_window = app.clone();
+    std::thread::spawn(move || {
+        let result = build_window(&app_for_window, parsed, label);
+        let _ = tx.send(result);
+    });
+    let window = match rx.recv_timeout(WINDOW_TIMEOUT) {
+        Ok(Ok(window)) => window,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err("打开浏览窗口超时（30 秒），WebView2 没有响应".to_string()),
+    };
+    log(app, "窗口已创建");
+    if let Ok(mut guard) = WINDOW.lock() {
+        *guard = Some(window.clone());
+    }
+    status(app, "窗口已打开：请登录，并进入作品详情页（地址含 /g/）");
+
+    let started = Instant::now();
+    let mut last_error = String::new();
+    let mut parsed_payload: Option<PagePayload> = None;
+    let mut parse_kicked = false;
+
+    loop {
+        if CANCELLED.load(Ordering::SeqCst) {
+            close_window();
+            return Err("已取消".to_string());
+        }
+        if started.elapsed() > FETCH_TIMEOUT {
+            close_window();
+            let hint = if !PAGE_READY.load(Ordering::SeqCst) {
+                "目标页面在 3 分钟内没有打开。请确认：① 系统代理已开启（WebView 走系统代理）；② 已在该窗口里登录 exhentai；③ 打开的是作品详情页（地址含 /g/）。"
+            } else {
+                "页面已打开，但 3 分钟内没有解析出结果。请确认进入的是作品详情页，且图片页能正常显示。"
+            };
+            return Err(format!("抓取超时：{hint}"));
+        }
+
+        // 页面进入作品页后才触发一次解析。
+        if PAGE_READY.load(Ordering::SeqCst) && !parse_kicked {
+            parse_kicked = true;
+            let _ = window.eval("window.__d2Parse && window.__d2Parse()");
+            status(app, "已进入作品页，正在解析并下载第一页…");
+        }
+        if PAGE_READY.load(Ordering::SeqCst) {
+            PARSE_STARTED.store(true, Ordering::SeqCst);
+        }
+
+        let json = match eval_json(
+            &window,
+            "window.__d2Result ? JSON.stringify(window.__d2Result) : ''",
+            Duration::from_secs(3),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                log(app, &format!("读取页面结果失败：{error}"));
+                String::new()
+            }
+        };
+
+        if !json.trim().is_empty() {
+            let payload: PagePayload = serde_json::from_str(&json)
+                .map_err(|error| format!("解析页面结果失败：{error}"))?;
+            if payload.ok {
+                parsed_payload = Some(payload);
+                break;
+            }
+            last_error = payload.error.unwrap_or_else(|| "页面解析失败".to_string());
             break;
         }
-        payload = Some(parsed);
-        break;
-    }
-    let _ = window.close();
 
-    let payload = payload.ok_or_else(|| {
-        if last_error.is_empty() {
-            "解析超时：请确认已登录并且页面是作品详情页".to_string()
+        let wait_ms = if started.elapsed() > NO_RESULT_HINT {
+            800
+        } else {
+            500
+        };
+        std::thread::sleep(Duration::from_millis(wait_ms));
+    }
+
+    close_window();
+
+    let payload = match parsed_payload {
+        Some(payload) => payload,
+        None => return Err(if last_error.is_empty() {
+            "没有取到页面结果".to_string()
         } else {
             last_error
-        }
-    })?;
+        }),
+    };
 
+    status(app, "正在打包 CBZ…");
     let bytes = STANDARD
         .decode(payload.image_base64.as_bytes())
         .map_err(|error| format!("图片数据解码失败：{error}"))?;
@@ -330,8 +441,7 @@ pub async fn d2_fetch_first(
     ));
     let file = fs::File::create(&cbz_path).map_err(|error| format!("创建 CBZ 失败：{error}"))?;
     let mut writer = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let file_name = format!("0001.{}", extension_for_mime(&payload.mime));
     writer
         .start_file(file_name, options)
@@ -343,26 +453,21 @@ pub async fn d2_fetch_first(
         .finish()
         .map_err(|error| format!("写入 CBZ 失败：{error}"))?;
 
-    let covers_dir = paths::covers_dir(&app, &library_id)?;
-    let app_for_import = app.clone();
-    let report_path = cbz_path.clone();
-    let import_report: ImportReport = tauri::async_runtime::spawn_blocking(move || -> Result<ImportReport, String> {
-        let _guard = crate::try_maintenance()?;
-        let options = ImportOptions {
-            add_to_collection: None,
-            preserve_structure: None,
-            tags: tag_drafts(&payload.tags),
-        };
-        Ok(importer::import_blocking(
-            &app_for_import,
-            &root,
-            &covers_dir,
-            vec![report_path],
-            options,
-        ))
-    })
-    .await
-    .map_err(|error| format!("入库任务异常：{error}"))??;
+    status(app, "正在入库…");
+    let covers_dir = paths::covers_dir(app, &library_id)?;
+    let _guard = crate::try_maintenance()?;
+    let options = ImportOptions {
+        add_to_collection: None,
+        preserve_structure: None,
+        tags: tag_drafts(&payload.tags),
+    };
+    let import_report = importer::import_blocking(
+        app,
+        &root,
+        &covers_dir,
+        vec![cbz_path.clone()],
+        options,
+    );
 
     Ok(D2FetchReport {
         title: payload.title,
@@ -372,6 +477,81 @@ pub async fn d2_fetch_first(
         cbz_path: cbz_path.to_string_lossy().to_string(),
         import_report,
     })
+}
+
+/// 启动一次抓取。**立即返回**，进度与结果通过事件推送：
+/// - `d2://status`：一句话进度
+/// - `d2://done`：成功带 report，失败带 error
+#[tauri::command]
+pub fn d2_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|_| "网址格式不正确".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("D2 只接受 https 网址".to_string());
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if !host.eq_ignore_ascii_case("exhentai.org") && !host.eq_ignore_ascii_case("e-hentai.org") {
+        return Err("M1 目前只支持 exhentai.org / e-hentai.org".to_string());
+    }
+
+    let (root, library_id) = {
+        let inner = state.lock()?;
+        let library = inner
+            .library
+            .as_ref()
+            .ok_or_else(|| "请先选择库目录".to_string())?;
+        (library.root.clone(), library.library_id.clone())
+    };
+
+    if PARSE_STARTED.swap(false, Ordering::SeqCst) {
+        // 上一轮已结束，清个标记继续。
+    }
+    CANCELLED.store(false, Ordering::SeqCst);
+    PAGE_READY.store(false, Ordering::SeqCst);
+
+    let worker = app.clone();
+    std::thread::spawn(move || {
+        let result = fetch_flow(&worker, url, root, library_id, parsed);
+        match result {
+            Ok(report) => {
+                log(&worker, "完成");
+                emit_done(
+                    &worker,
+                    D2Done {
+                        ok: true,
+                        stage: "done".to_string(),
+                        report: Some(report),
+                        error: None,
+                    },
+                );
+            }
+            Err(error) => {
+                log(&worker, &format!("失败：{error}"));
+                emit_done(
+                    &worker,
+                    D2Done {
+                        ok: false,
+                        stage: "error".to_string(),
+                        report: None,
+                        error: Some(error),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// 取消当前抓取：关掉浏览窗口，后台循环会退出。
+#[tauri::command]
+pub fn d2_cancel() -> Result<(), String> {
+    CANCELLED.store(true, Ordering::SeqCst);
+    close_window();
+    Ok(())
 }
 
 #[cfg(test)]
