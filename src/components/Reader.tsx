@@ -251,6 +251,8 @@ export default function Reader({
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
   /** 正在拖帧条时的帧号；null = 交给 <img> 原生播放动画。 */
   const [scrubFrame, setScrubFrame] = useState<number | null>(null);
+  /** 每页已解码就绪的预览帧数（顺序解码会话的进度）。 */
+  const [framesReady, setFramesReady] = useState<Record<number, number>>({});
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const cacheRef = useRef<Map<number, ReaderPage>>(new Map());
@@ -269,6 +271,12 @@ export default function Reader({
   const playbackRef = useRef(playback);
   playbackRef.current = playback;
   const metaInflightRef = useRef<Set<number>>(new Set());
+  /** 帧解码会话循环的去重状态：同一页只跑一条循环，target 只增不减。 */
+  const framesLoopRef = useRef<{ page: number; target: number; running: boolean }>({
+    page: -1,
+    target: 0,
+    running: false,
+  });
   const panRef = useRef<{
     pointerId: number;
     startX: number;
@@ -379,6 +387,8 @@ export default function Reader({
     setThumbsOpen(false);
     setAnimMetas({});
     setScrubFrame(null);
+    setFramesReady({});
+    framesLoopRef.current = { page: -1, target: 0, running: false };
     // 换本（含播放模式跨本连播）保留当前播放状态；模式开着且没被暂停就继续播。
     setPlaying(playingRef.current);
     cacheRef.current.clear();
@@ -501,9 +511,10 @@ export default function Reader({
       .then((meta) => {
         if (!cancelled) setAnimMetas((previous) => ({ ...previous, [index]: meta }));
       })
-      .catch(() => {
+      .catch((error) => {
         // 拿不到元数据就当作静态页记下来：不出拖条，播放按停留时长走，
         // 否则这一页会永远等不到时长、播放模式卡死在当前页。
+        // 失败原因必须浮出来：静默吞掉会让「动图没被识别」无从排查。
         if (!cancelled) {
           setAnimMetas((previous) => ({
             ...previous,
@@ -515,6 +526,7 @@ export default function Reader({
               height: 0,
             },
           }));
+          onNotify(`动画信息读取失败，本页按静态页处理：${String(error)}`, "error");
         }
       })
       .finally(() => {
@@ -523,7 +535,7 @@ export default function Reader({
     return () => {
       cancelled = true;
     };
-  }, [pageData, card.id, animMetas]);
+  }, [pageData, card.id, animMetas, onNotify]);
 
   // 播放模式节拍：动图按总时长播完翻页，静态页停 2 秒；
   // 翻到本尾自动换下一本，没有下一本就结束播放。
@@ -650,10 +662,50 @@ export default function Reader({
     setPlayback((value) => !value);
   }, []);
 
-  /** 预热某帧（解码进后端缓存）；失败静默，拖条只负责擦洗。 */
-  const ensureFrame = useCallback(
-    (index: number, frame: number) => {
-      void api.prepareAnimFrame(card.id, index, frame).catch(() => {});
+  /**
+   * 顺序解码会话循环：把帧推进到目标帧。
+   * 动画 gif/webp 无法随机访问帧（只能顺序解），单帧请求是 O(N)——
+   * 拖条每格解一遍会把 CPU 打满。这里整页只跑一条循环：后端会话复用
+   * 解码器增量推进（每帧只解一次，整体 O(target)），3 秒预算到就返回
+   * 进度，ready 没到目标就自动续跑。
+   */
+  const ensureFramesTo = useCallback(
+    (index: number, target: number) => {
+      const loop = framesLoopRef.current;
+      if (loop.page !== index) {
+        loop.page = index;
+        loop.target = 0;
+      }
+      if (target <= loop.target) return;
+      loop.target = target;
+      if (loop.running) return;
+      loop.running = true;
+
+      const step = async () => {
+        const current = framesLoopRef.current;
+        try {
+          const progress = await api.prepareAnimFrames(
+            card.id,
+            current.page,
+            current.target,
+          );
+          setFramesReady((previous) => ({
+            ...previous,
+            [current.page]: Math.max(progress.ready, previous[current.page] ?? 0),
+          }));
+          if (
+            framesLoopRef.current.page === current.page &&
+            framesLoopRef.current.target > progress.ready
+          ) {
+            void step();
+            return;
+          }
+        } catch {
+          // 解码失败静默：拖条仍然可拖，帧就绪前显示最近的一帧。
+        }
+        framesLoopRef.current.running = false;
+      };
+      void step();
     },
     [card.id],
   );
@@ -662,17 +714,11 @@ export default function Reader({
     if (!pageData) return;
     pausePlayback();
     setScrubFrame(value);
-    ensureFrame(pageData.index, value);
+    ensureFramesTo(pageData.index, value);
   };
 
-  /** 松开拖条：回到原生动画播放，并顺手预热邻帧让下次擦洗更顺。 */
+  /** 松开拖条：回到原生动画播放（后台会话继续把目标帧解完）。 */
   const releaseScrub = () => {
-    if (pageData && scrubFrame !== null) {
-      const total = animMetas[pageData.index]?.frames ?? 0;
-      for (const neighbor of [scrubFrame - 2, scrubFrame - 1, scrubFrame + 1, scrubFrame + 2]) {
-        if (neighbor >= 0 && neighbor < total) ensureFrame(pageData.index, neighbor);
-      }
-    }
     setScrubFrame(null);
   };
 
@@ -1078,10 +1124,14 @@ export default function Reader({
 
   const currentMeta = pageData ? animMetas[pageData.index] : undefined;
   const canScrub = !!currentMeta?.animated && currentMeta.frames > 1;
-  /** 拖帧条时把主 <img> 换成对应单帧 PNG；松手回原生动画。 */
+  const readyFrames = pageData ? framesReady[pageData.index] ?? 0 : 0;
+  /** 拖到的帧可能还没解出来：显示已就绪里最接近的那帧，避免闪破图。 */
+  const displayFrame =
+    scrubFrame !== null ? Math.min(scrubFrame, Math.max(readyFrames - 1, 0)) : null;
+  /** 拖帧条时把主 <img> 换成对应预览帧 PNG；松手回原生动画。 */
   const scrubSrc =
-    pageData && scrubFrame !== null && canScrub
-      ? animFrameUrl(card.id, pageData.index, scrubFrame, assetToken, pageData.version)
+    pageData && displayFrame !== null && canScrub && readyFrames > 0
+      ? animFrameUrl(card.id, pageData.index, displayFrame, assetToken, pageData.version)
       : null;
 
   const imageStyleFor = (data: ReaderPage) => {
@@ -1302,7 +1352,7 @@ export default function Reader({
             (spread ? (
               <div className="reader-spread">
                 <img
-                  key={`${pageData.index}-${scrubSrc ? `f${scrubFrame}` : assetToken}`}
+                  key={`${pageData.index}-${scrubSrc ? `f${displayFrame}` : assetToken}`}
                   src={
                     scrubSrc ??
                     readerPageUrl(
@@ -1317,7 +1367,12 @@ export default function Reader({
                   decoding="sync"
                   draggable={false}
                   onLoad={(event) => handleImageLoad(pageData.index, event)}
-                  onError={() => handleImageError(pageData.index)}
+                  onError={() => {
+                    // 拖条帧未就绪时 404 属正常（会话还在解码），不要触发
+                    // 页面级自愈/错误态——那会把整页切到「加载失败」。
+                    if (scrubSrc) return;
+                    handleImageError(pageData.index);
+                  }}
                 />
                 {visibleSecond && (
                   <img
@@ -1341,7 +1396,7 @@ export default function Reader({
               </div>
             ) : (
               <img
-                key={`${pageData.index}-${scrubSrc ? `f${scrubFrame}` : assetToken}`}
+                key={`${pageData.index}-${scrubSrc ? `f${displayFrame}` : assetToken}`}
                 src={
                   scrubSrc ??
                   readerPageUrl(
@@ -1356,7 +1411,10 @@ export default function Reader({
                 decoding="sync"
                 draggable={false}
                 onLoad={(event) => handleImageLoad(pageData.index, event)}
-                onError={() => handleImageError(pageData.index)}
+                onError={() => {
+                  if (scrubSrc) return;
+                  handleImageError(pageData.index);
+                }}
               />
             ))}
 
@@ -1466,7 +1524,11 @@ export default function Reader({
         {canScrub && currentMeta && (
           <div className="reader-frame-scrub">
             <span className="reader-frame-label">
-              帧 {scrubFrame !== null ? scrubFrame + 1 : "—"} / {currentMeta.frames}
+              帧 {displayFrame !== null ? displayFrame + 1 : "—"} /{" "}
+              {currentMeta.frames}
+              {readyFrames < currentMeta.frames
+                ? ` · 解码中 ${readyFrames}/${currentMeta.frames}`
+                : ""}
             </span>
             <input
               type="range"

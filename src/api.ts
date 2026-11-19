@@ -177,6 +177,9 @@ export const api = {
   /** 预热某页第 frame 帧为 PNG；帧字节随后经 animFrameUrl 的 gallery:// URL 取用。 */
   prepareAnimFrame: (archiveId: number, index: number, frame: number) =>
     invoke<void>("prepare_anim_frame", { archiveId, index, frame }),
+  /** 顺序解码会话：把帧推进到 upto（含），3 秒预算到即返回进度，前端循环续跑。 */
+  prepareAnimFrames: (archiveId: number, index: number, upto: number) =>
+    invoke<{ ready: number }>("prepare_anim_frames", { archiveId, index, upto }),
 
   readReaderThumbnail: (archiveId: number, index: number, maxEdge?: number) =>
     invoke<ReaderThumb>("read_reader_thumbnail", {

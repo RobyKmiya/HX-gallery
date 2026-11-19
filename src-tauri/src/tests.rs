@@ -2582,7 +2582,7 @@ fn gif_anim_meta_and_frame_roundtrip() {
     // 两帧都能解码成 PNG；第 3 帧必须越界
     for frame_index in 0..2u32 {
         let cached = crate::anim::prepare_frame(&path, 0, frame_index).unwrap();
-        assert_eq!(cached.mime, "image/png");
+        assert_eq!(cached.mime, "image/jpeg");
         assert!(cached.bytes.len() > 0);
         let decoded = image::ImageReader::new(Cursor::new(cached.bytes.as_slice()))
             .with_guessed_format()
@@ -2595,7 +2595,15 @@ fn gif_anim_meta_and_frame_roundtrip() {
 
     // 帧缓存命中：第二次 prepare 不再解码也能拿到同样的字节
     let cached = crate::anim::prepare_frame(&path, 0, 0).unwrap();
-    assert_eq!(cached.mime, "image/png");
+    assert_eq!(cached.mime, "image/jpeg");
+
+    // 顺序解码会话：推进到帧 1 → 缓存里有 0/1 两帧；越界目标停在结尾
+    let progress = crate::anim::prepare_anim_frames(&path, 0, 1).unwrap();
+    assert_eq!(progress.ready, 2);
+    assert!(crate::anim::cached_frame(&path, 0, 0).is_some());
+    assert!(crate::anim::cached_frame(&path, 0, 1).is_some());
+    let progress = crate::anim::prepare_anim_frames(&path, 0, 9).unwrap();
+    assert_eq!(progress.ready, 2, "两帧动画的目标 9 应停在结尾 ready=2");
 
     // 静态页：meta 必须报 animated=false
     let static_zip = fixture.source.join("static-in-zip.zip");
@@ -2609,4 +2617,70 @@ fn gif_anim_meta_and_frame_roundtrip() {
     let static_meta = crate::anim::anim_meta(&static_zip, 0).unwrap();
     assert!(!static_meta.animated);
     assert_eq!(static_meta.frames, 0);
+}
+
+#[test]
+#[ignore]
+fn real_pack_anim_meta_diagnostics() {
+    let path = std::path::Path::new(
+        r"F:\Hthings\BENZI\[HajiMi] Amiya [Animated WEBP] [AI Generated].zip",
+    );
+    if !path.exists() {
+        eprintln!("[diag] 真实包不存在，跳过");
+        return;
+    }
+
+    let started = std::time::Instant::now();
+    match crate::anim::anim_meta(path, 0) {
+        Ok(meta) => eprintln!("[diag] page0({:?}) meta={meta:?}", started.elapsed()),
+        Err(error) => eprintln!("[diag] page0 ERROR: {error}"),
+    }
+
+    let started = std::time::Instant::now();
+    match crate::anim::anim_meta(path, 1) {
+        Ok(meta) => eprintln!("[diag] page1 meta={meta:?} (耗时 {:?})", started.elapsed()),
+        Err(error) => eprintln!("[diag] page1 ERROR: {error}"),
+    }
+
+    let started = std::time::Instant::now();
+    match crate::anim::prepare_frame(path, 1, 0) {
+        Ok(cached) => eprintln!(
+            "[diag] frame0 PNG {}B (耗时 {:?})",
+            cached.bytes.len(),
+            started.elapsed()
+        ),
+        Err(error) => eprintln!("[diag] frame0 ERROR: {error}"),
+    }
+
+    let ttako = std::path::Path::new(r"F:\Hthings\BENZI\TTAKO 26.09 GIF [AI Generated].zip");
+    if ttako.exists() {
+        let started = std::time::Instant::now();
+        match crate::anim::anim_meta(ttako, 0) {
+            Ok(meta) => eprintln!(
+                "[diag] ttako page0 meta={meta:?} (耗时 {:?})",
+                started.elapsed()
+            ),
+            Err(error) => eprintln!("[diag] ttako page0 ERROR: {error}"),
+        }
+    }
+
+    let started = std::time::Instant::now();
+    match crate::anim::prepare_anim_frames(path, 1, 11) {
+        Ok(progress) => eprintln!(
+            "[diag] session ready={} (耗时 {:?})",
+            progress.ready,
+            started.elapsed()
+        ),
+        Err(error) => eprintln!("[diag] session ERROR: {error}"),
+    }
+
+    let started = std::time::Instant::now();
+    match crate::anim::prepare_frame(path, 1, 5) {
+        Ok(cached) => eprintln!(
+            "[diag] frame5 PNG {}B (耗时 {:?})",
+            cached.bytes.len(),
+            started.elapsed()
+        ),
+        Err(error) => eprintln!("[diag] frame5 ERROR: {error}"),
+    }
 }
