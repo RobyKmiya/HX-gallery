@@ -196,11 +196,38 @@ pub fn has_source_changes(app: &AppHandle, settings: &ReleaseSettings) -> bool {
     let head = git_output(&source, &["rev-parse", "HEAD"])
         .ok()
         .map(|s| s.trim().to_string());
+    // 注意：只脏「版本号文件」不算改动。发布脚本自己抬版本就会让工作区变脏，
+    // 若照旧算作「有更新」，关窗 → 发布 → 抬版本 → 又脏 → 再发布，会无限自激。
     let dirty = git_output(&source, &["status", "--porcelain"])
         .ok()
-        .map(|s| !s.trim().is_empty());
+        .map(|s| has_real_changes(&s));
 
     decide_has_changes(&baseline.head, head.as_deref(), dirty)
+}
+
+/// 抬版本会改到的文件：它们的改动是发布流程自己造的，不该再触发一轮发布。
+const VERSION_FILES: [&str; 4] = [
+    "package.json",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/tauri.conf.json",
+];
+
+/// `git status --porcelain` 里是否存在「版本号文件以外」的改动。
+///
+/// 纯函数，便于单测。porcelain 每行形如 ` M path` / `?? path` / `R  old -> new`。
+fn has_real_changes(porcelain: &str) -> bool {
+    porcelain.lines().any(|line| {
+        if line.trim().is_empty() {
+            return false;
+        }
+        let raw = line.get(3..).unwrap_or("").trim();
+        // 重命名行取箭头右边的新路径
+        let path = raw.rsplit(" -> ").next().unwrap_or(raw).trim();
+        // 含空格/中文的路径会被 git 加引号
+        let path = path.trim_matches('"');
+        !VERSION_FILES.contains(&path)
+    })
 }
 
 /// 关窗耗时诊断：往 `release/close-timing.log` 追加一行。
@@ -293,12 +320,39 @@ pub fn schedule_release_now(app: &AppHandle, settings: &ReleaseSettings) {
     }
 }
 
+/// 发布失败后的冷却期：避免「编译失败 → 关窗 → 又编译」反复拖死机器。
+const FAIL_COOLDOWN_MS: i64 = 30 * 60 * 1000;
+
+/// 上一次发布失败且仍在冷却期内。
+fn in_fail_cooldown(app: &AppHandle) -> bool {
+    let Ok(path) = status_file(app) else {
+        return false;
+    };
+    let status: ReleaseStatus = read_json(&path);
+    if status.last_result != "failed" {
+        return false;
+    }
+    crate::fsutil::now_ms().saturating_sub(status.last_at) < FAIL_COOLDOWN_MS
+}
+
 /// 退出前的收尾：判断源码有没有实质更新，有就把发布脚本排好并拉起。
 ///
 /// 调用方保证**只能在后台线程调用**：这里会起 git 子进程、写脚本、用 explorer
 /// 拉起隐藏启动器，全在主线程上做会让窗口消失得慢半拍
 /// （管理员 2026-11-19 反馈「关窗卡好一会，不能秒关」）。
 pub fn run_exit_release(app: &AppHandle, settings: &ReleaseSettings) {
+    // 闸门一：已经排好一次发布就等它跑完，绝不再叠第二份。
+    // 2026-11-20 管理员反馈「一直闪黑色窗口、开了马上关好几次」：没有这道闸门时，
+    // 连按几次关闭就拉起多份 release-on-exit.cmd，各自 npm/cargo/taskkill 互踩。
+    if pending_file(app).map(|path| path.exists()).unwrap_or(false) {
+        eprintln!("已有排队的发布任务，跳过本次关窗触发");
+        return;
+    }
+    // 闸门二：上次发布刚失败过，冷却期内不再自动重试。
+    if in_fail_cooldown(app) {
+        eprintln!("上次发布失败且仍在冷却期，跳过本次关窗触发");
+        return;
+    }
     if !has_source_changes(app, settings) {
         eprintln!("源码无实质更新，正常退出（不发布、不抬版本）");
         return;
@@ -690,7 +744,33 @@ pub fn launch_detached(script: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::decide_has_changes;
+    use super::{decide_has_changes, has_real_changes};
+
+    #[test]
+    fn version_bump_alone_is_not_a_change() {
+        // 发布脚本自己抬版本产生的脏，不能算「有新东西要发」，否则会自激
+        let porcelain = " M package.json\n M src-tauri/Cargo.lock\n M src-tauri/Cargo.toml\n M src-tauri/tauri.conf.json\n";
+        assert!(!has_real_changes(porcelain));
+    }
+
+    #[test]
+    fn real_source_edit_is_a_change() {
+        assert!(has_real_changes(" M src-tauri/src/d2.rs\n M package.json\n"));
+        assert!(has_real_changes("?? src-tauri/src/new_module.rs\n"));
+        assert!(has_real_changes("M  src/components/D2Panel.tsx\n"));
+    }
+
+    #[test]
+    fn rename_takes_the_new_path() {
+        // 重命名到版本文件之外，仍算改动
+        assert!(has_real_changes("R  src/old.ts -> src/new.ts\n"));
+    }
+
+    #[test]
+    fn empty_porcelain_is_clean() {
+        assert!(!has_real_changes(""));
+        assert!(!has_real_changes("   \n"));
+    }
 
     #[test]
     fn no_baseline_allows_first_release() {

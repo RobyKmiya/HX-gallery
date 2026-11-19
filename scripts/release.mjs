@@ -232,6 +232,27 @@ if (dryRun) {
   console.log(`\n完成。新版 ${next} 已安装，直接双击桌面「画匣」就是最新版。`);
   console.log(`安装包留档：${setupPath}`);
 
+  // 把「抬版本」本身提交掉，让工作区回到干净状态。
+  // 不提交的话 release.rs 的关窗判断会一直看到 dirty，
+  // 形成「关窗 → 发布 → 抬版本 → 又脏 → 又发布」的自激循环（2026-11-20 连环闪黑窗）。
+  // 只 add 这 4 个版本文件，绝不碰用户其他改动。
+  try {
+    const versionFiles = [
+      'package.json',
+      'src-tauri/Cargo.toml',
+      'src-tauri/Cargo.lock',
+      'src-tauri/tauri.conf.json',
+    ];
+    execSync(`git add ${versionFiles.join(' ')}`, { cwd: ROOT, stdio: 'ignore' });
+    const staged = execSync('git diff --cached --name-only', { cwd: ROOT, encoding: 'utf8' }).trim();
+    if (staged) {
+      execSync(`git commit -m "chore: 发布 ${next}"`, { cwd: ROOT, stdio: 'inherit' });
+      ok(`版本文件已提交（${staged.split('\n').length} 个），工作区不再因此变脏`);
+    }
+  } catch (error) {
+    warn(`提交版本文件失败（不影响安装，但下次关窗可能再次触发发布）: ${String(error)}`);
+  }
+
   // 发布成功后顺手导出真实库的标签译名快照（docs/tag-translations.json），
   // 防止译名只存在库文件单点丢失。失败只警告，不影响发布结果。
   try {
