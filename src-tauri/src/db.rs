@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::translate;
 
-const SCHEMA_VERSION: i64 = 8;
+pub(crate) const SCHEMA_VERSION: i64 = 9;
 
 /// 同时最多保留多少个待看目录。超出的在新建时按创建时间淘汰最旧的。
 pub const MAX_QUEUES: i64 = 3;
@@ -79,28 +79,65 @@ const FULL_TEXT_SCHEMA: &str = r#"
         title,
         file_name,
         note,
+        tag_text,
         content='archives',
         content_rowid='id',
         tokenize='trigram'
     );
 
     CREATE TRIGGER IF NOT EXISTS archives_fts_ai AFTER INSERT ON archives BEGIN
-        INSERT INTO archives_fts(rowid, title, file_name, note)
-        VALUES (new.id, new.title, new.file_name, new.note);
+        INSERT INTO archives_fts(rowid, title, file_name, note, tag_text)
+        VALUES (new.id, new.title, new.file_name, new.note, new.tag_text);
     END;
 
     CREATE TRIGGER IF NOT EXISTS archives_fts_ad AFTER DELETE ON archives BEGIN
-        INSERT INTO archives_fts(archives_fts, rowid, title, file_name, note)
-        VALUES ('delete', old.id, old.title, old.file_name, old.note);
+        INSERT INTO archives_fts(archives_fts, rowid, title, file_name, note, tag_text)
+        VALUES ('delete', old.id, old.title, old.file_name, old.note, old.tag_text);
     END;
 
-    CREATE TRIGGER IF NOT EXISTS archives_fts_au AFTER UPDATE OF title, file_name, note ON archives BEGIN
-        INSERT INTO archives_fts(archives_fts, rowid, title, file_name, note)
-        VALUES ('delete', old.id, old.title, old.file_name, old.note);
-        INSERT INTO archives_fts(rowid, title, file_name, note)
-        VALUES (new.id, new.title, new.file_name, new.note);
+    CREATE TRIGGER IF NOT EXISTS archives_fts_au AFTER UPDATE OF title, file_name, note, tag_text ON archives BEGIN
+        INSERT INTO archives_fts(archives_fts, rowid, title, file_name, note, tag_text)
+        VALUES ('delete', old.id, old.title, old.file_name, old.note, old.tag_text);
+        INSERT INTO archives_fts(rowid, title, file_name, note, tag_text)
+        VALUES (new.id, new.title, new.file_name, new.note, new.tag_text);
     END;
 "#;
+
+/// tag_text 的取值表达式：该画集全部有效标签的「原文名 译名」空格拼接。
+/// 标签名与译名本身不含空格（导入清洗保证），空格分隔刚好配合 trigram 切词。
+const TAG_TEXT_EXPR: &str = "COALESCE((SELECT group_concat(t.name || ' ' || COALESCE(t.translated_name, ''), ' ') \
+FROM tags t WHERE t.deleted_at IS NULL AND t.id IN (SELECT tag_id FROM archive_tags WHERE archive_id = archives.id)), '')";
+
+/// tag_text 冗余列的维护触发器：标签挂上/摘下、改名/翻译/回收时重算受影响画集。
+/// 放在独立常量里，新库（create_schema）与旧库升级（upgrade_schema）共用。
+const TAG_TEXT_MAINTENANCE_SCHEMA_BODY: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS archive_tags_tagtext_ai AFTER INSERT ON archive_tags BEGIN
+        UPDATE archives SET tag_text = {expr} WHERE id = new.archive_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS archive_tags_tagtext_ad AFTER DELETE ON archive_tags BEGIN
+        UPDATE archives SET tag_text = {expr} WHERE id = old.archive_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS tags_tagtext_au AFTER UPDATE OF name, translated_name, deleted_at ON tags BEGIN
+        UPDATE archives SET tag_text = {expr}
+        WHERE id IN (SELECT archive_id FROM archive_tags WHERE tag_id = old.id);
+    END;
+"#;
+
+fn ensure_tag_text_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(&TAG_TEXT_MAINTENANCE_SCHEMA_BODY.replace("{expr}", TAG_TEXT_EXPR))
+        .map_err(|e| format!("创建标签文本触发器失败: {e}"))
+}
+
+/// 旧库升级时一次性回填 tag_text；新库由触发器随导入逐步写入，无需回填。
+fn backfill_tag_text(conn: &Connection) -> Result<(), String> {
+    let changed = conn
+        .execute(&format!("UPDATE archives SET tag_text = {TAG_TEXT_EXPR}"), [])
+        .map_err(|e| format!("回填标签文本失败: {e}"))?;
+    eprintln!("tag_text backfilled for {changed} archives");
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryMeta {
@@ -319,6 +356,7 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
             last_page INTEGER NOT NULL DEFAULT 0,
             read_count INTEGER NOT NULL DEFAULT 0,
             missing INTEGER NOT NULL DEFAULT 0,
+            tag_text TEXT NOT NULL DEFAULT '',
             deleted_at INTEGER,
             error TEXT
         );
@@ -441,6 +479,8 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
         params![fsutil::now_ms()],
     )
     .map_err(|e| format!("创建默认收藏夹失败: {e}"))?;
+
+    ensure_tag_text_schema(conn)?;
 
     Ok(())
 }
@@ -589,6 +629,19 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
         "weight",
         &format!("INTEGER NOT NULL DEFAULT {DEFAULT_TAG_WEIGHT}"),
     )?;
+
+    // v9：标签搜索。archives.tag_text 冗余存「原文名 译名」拼接串，由触发器
+    // 随标签挂载/摘除/改名/翻译/回收维护；旧全文索引缺 tag_text 列，整体
+    // 丢弃后由 migrate 尾部的 ensure_full_text 重建（重建会读到已回填的数据）。
+    add_column_if_missing(conn, "archives", "tag_text", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_tag_text_schema(conn)?;
+    for name in ["archives_fts_ai", "archives_fts_ad", "archives_fts_au"] {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {name}"), [])
+            .map_err(|e| format!("删除旧全文触发器失败: {e}"))?;
+    }
+    conn.execute("DROP TABLE IF EXISTS archives_fts", [])
+        .map_err(|e| format!("删除旧全文索引失败: {e}"))?;
+    backfill_tag_text(conn)?;
 
     conn.execute(
         "UPDATE tags SET original_name = name

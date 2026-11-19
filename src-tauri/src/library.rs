@@ -533,6 +533,7 @@ pub fn query_archives(
 
     if let Some(search) = query.search.as_deref().and_then(normalize_search) {
         // 3 字以上走 trigram 全文索引；1–2 字 trigram 无法命中，退回 LIKE。
+        // 两条路径都覆盖 tag_text（v9 冗余列：标签原文名+译名），搜中文标签名也能找到画集。
         if search.chars().count() >= 3 {
             let escaped = search.replace('"', "\"\"");
             conditions.push(
@@ -544,9 +545,11 @@ pub fn query_archives(
             conditions.push(
                 "(COALESCE(a.title, '') LIKE ? ESCAPE '\\'
                   OR a.file_name LIKE ? ESCAPE '\\'
-                  OR COALESCE(a.note, '') LIKE ? ESCAPE '\\')"
+                  OR COALESCE(a.note, '') LIKE ? ESCAPE '\\'
+                  OR a.tag_text LIKE ? ESCAPE '\\')"
                     .to_string(),
             );
+            params.push(Value::Text(like.clone()));
             params.push(Value::Text(like.clone()));
             params.push(Value::Text(like.clone()));
             params.push(Value::Text(like));

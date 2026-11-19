@@ -906,8 +906,8 @@ fn migrates_v1_tags_to_translated_schema() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    // 迁移应当一步推到最新版本（v8 含待看目录与阅读次数）。
-    assert_eq!(version, 8);
+    // 迁移应当一步推到最新版本（当前 v9，含 tag_text 标签搜索列）。
+    assert_eq!(version, db::SCHEMA_VERSION);
     let deleted_column: i64 = context
         .conn
         .query_row(
@@ -2018,7 +2018,7 @@ fn migration_v8_adds_read_count_and_queues() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, db::SCHEMA_VERSION);
 }
 
 /// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。
@@ -2328,4 +2328,77 @@ fn daily_backup_skips_fresh_and_prunes_old() {
         !names.iter().any(|name| name.contains("1000000000000")),
         "最老的过期日备应被清理"
     );
+}
+
+#[test]
+fn search_matches_tag_translated_names() {
+    let fixture = Fixture::new();
+
+    for (name, salt) in [("城市 夜景.cbz", 5u8), ("海边 日落.cbz", 45)] {
+        write_zip(&fixture.source.join(name), &["001.png"], salt);
+    }
+    let inputs = archive_files(&fixture.source);
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        inputs,
+        ImportOptions::default(),
+        |_| {},
+    );
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let all = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(all.total, 2);
+    let city = all
+        .items
+        .iter()
+        .find(|item| item.title.contains("城市"))
+        .map(|item| item.id)
+        .unwrap();
+    let sea = all
+        .items
+        .iter()
+        .find(|item| item.title.contains("海边"))
+        .map(|item| item.id)
+        .unwrap();
+
+    let landscape = db::add_tag(&context.conn, city, "Landscape").unwrap();
+    let sunset = db::add_tag(&context.conn, sea, "Sunset").unwrap();
+    db::set_tag_translation(&context.conn, landscape.id, Some("风景摄影"), "ai").unwrap();
+    db::set_tag_translation(&context.conn, sunset.id, Some("日落"), "ai").unwrap();
+
+    let search = |keyword: &str| {
+        library::query_archives(
+            &context.conn,
+            &fixture.library,
+            &fixture.covers,
+            &ArchiveQuery {
+                search: Some(keyword.to_string()),
+                ..ArchiveQuery::default()
+            },
+        )
+        .unwrap()
+        .total
+    };
+
+    // ≥3 字走 FTS：原文名与中文译名都要命中（英文 9 字符、中文 4 字）。
+    assert_eq!(search("Landscape"), 1, "FTS 应命中标签原文名");
+    assert_eq!(search("风景摄影"), 1, "FTS 应命中中文译名");
+    assert_eq!(search("Sunset"), 1);
+    // 2 字走 LIKE 兜底：trigram 打不中的短中文译名也要命中。
+    assert_eq!(search("日落"), 1, "2 字译名应由 LIKE 兜底命中");
+    assert_eq!(search("风景"), 1, "2 字译名前缀也应命中");
+
+    // 摘掉标签后不再命中，且重挂后恢复（触发器双向维护）。
+    db::remove_tag(&context.conn, city, landscape.id).unwrap();
+    assert_eq!(search("风景摄影"), 0, "摘除标签后 tag_text 应清空");
+    assert_eq!(search("日落"), 1, "另一本不受影响");
+    db::add_tag(&context.conn, city, "Landscape").unwrap();
+    assert_eq!(search("风景摄影"), 1, "重挂标签后译名搜索应恢复");
 }
