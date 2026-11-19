@@ -203,6 +203,27 @@ pub fn has_source_changes(app: &AppHandle, settings: &ReleaseSettings) -> bool {
     decide_has_changes(&baseline.head, head.as_deref(), dirty)
 }
 
+/// 关窗耗时诊断：往 `release/close-timing.log` 追加一行。
+///
+/// 只用于定位「关窗卡顿」，写一行几字节，失败就算了，绝不能因此影响关闭。
+pub fn log_close_timing(app: &AppHandle, stage: &str, elapsed: std::time::Duration) {
+    use std::io::Write;
+    let Ok(dir) = release_dir(app) else { return };
+    let line = format!(
+        "[{}] {:>18} {:>7.1}ms\n",
+        crate::fsutil::now_ms(),
+        stage,
+        elapsed.as_secs_f64() * 1000.0
+    );
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("close-timing.log"))
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// 退出前的收尾：判断源码有没有实质更新，有就把发布脚本排好并拉起。
 ///
 /// 调用方保证**只能在后台线程调用**：这里会起 git 子进程、写脚本、用 explorer

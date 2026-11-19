@@ -1397,8 +1397,10 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                 if window.label() != "main" {
                     return;
                 }
+                let close_started = std::time::Instant::now();
                 let app = window.app_handle().clone();
                 let settings = release::load_settings(&app);
+                release::log_close_timing(&app, "进入关闭处理", close_started.elapsed());
                 // 没开自动发布、或没登记源码目录：不需要任何收尾，正常关闭即可。
                 if !settings.auto_on_exit || settings.source_dir.is_none() {
                     return;
@@ -1411,6 +1413,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
 
                 api.prevent_close();
                 let _ = window.hide();
+                release::log_close_timing(&app, "窗口已隐藏", close_started.elapsed());
 
                 let guard = app.clone();
                 std::thread::spawn(move || {
@@ -1421,6 +1424,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                 let worker = app.clone();
                 std::thread::spawn(move || {
                     release::run_exit_release(&worker, &settings);
+                    release::log_close_timing(&worker, "发布判断结束，准备退出", close_started.elapsed());
                     let _ = worker.exit(0);
                 });
             }
