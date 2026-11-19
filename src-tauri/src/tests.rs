@@ -1791,12 +1791,17 @@ fn archive_query_rejects_unknown_field_typos() {
 
 #[test]
 fn concurrent_writes_wait_for_the_lock_instead_of_failing() {
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let fixture = Fixture::new();
     let holder_path = fixture.library.clone();
+    let (locked_tx, locked_rx) = mpsc::channel();
 
-    // 另一条连接先拿走写锁并持有 700ms
+    // 另一条连接先拿走写锁并持有 700ms。
+    // 用 channel 握手而不是 sleep 固定时长：机器负载高时（并行跑测试、后台在编译）
+    // 占锁线程可能 120ms 还没跑到 INSERT，主线程就会立刻拿到锁、误判「没有等待」，
+    // 所以改成「占锁线程确认拿到锁之后再放主线程去抢」。
     let holder = std::thread::spawn(move || {
         let connection = db::open_worker_connection(&holder_path).unwrap();
         let transaction = db::begin_write(&connection).unwrap();
@@ -1807,11 +1812,14 @@ fn concurrent_writes_wait_for_the_lock_instead_of_failing() {
                 [],
             )
             .unwrap();
+        locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(700));
         transaction.commit().unwrap();
     });
 
-    std::thread::sleep(Duration::from_millis(120));
+    locked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("占锁线程没能及时拿到写锁");
     let other = db::open_worker_connection(&fixture.library).unwrap();
     let started = Instant::now();
     let transaction =
