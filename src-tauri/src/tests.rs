@@ -1463,7 +1463,7 @@ fn reader_reads_pages_and_persists_progress() {
     let zip = fixture.source.join("Reader.cbz");
     write_zip(
         &zip,
-        &["10.png", "2.png", "page1.png", ".hidden.png", "notes.txt"],
+        &["10.png", "2.png", "page1.png", "._hidden.png", "notes.txt"],
         30,
     );
 
@@ -2467,4 +2467,146 @@ fn queue_manual_add_and_remove() {
     queue::remove_from_queue(&context.conn, queue_id, archive_id).unwrap();
     assert!(queue::queue_archives(&context.conn, queue_id).unwrap().is_empty());
     queue::remove_from_queue(&context.conn, queue_id, archive_id).unwrap();
+}
+
+#[test]
+fn dot_prefixed_page_files_are_not_ignored() {
+    use crate::archive::{is_ignored_entry, is_image_name};
+
+    // 「.Amiya._0.webp」这类以点开头的正常动画页必须保留（2026-11-20 实测包全被误杀）
+    assert!(!is_ignored_entry(".Amiya._0.webp"));
+    assert!(is_image_name(".Amiya._0.webp"));
+    assert!(!is_ignored_entry("pages/.Hello._1of39.webp"));
+
+    // 点目录整棵跳过、AppleDouble 资源叉跳过、原有垃圾规则不变
+    assert!(is_ignored_entry(".git/config"));
+    assert!(is_ignored_entry(".hidden/pic.jpg"));
+    assert!(is_ignored_entry("._cover.jpg"));
+    assert!(is_ignored_entry("__MACOSX/._a.jpg"));
+    assert!(is_ignored_entry("sub/.DS_Store"));
+    assert!(is_ignored_entry("sub/thumbs.db"));
+    // 文件名层面不再按点前缀误杀；垃圾最终由扩展名白名单兜底
+    // （.DS_Store.md 不是 ignored，但 is_image_name("md")=false，进不了页清单）
+    assert!(!is_ignored_entry(".DS_Store.md"));
+    assert!(!is_image_name(".DS_Store.md"));
+}
+
+#[test]
+fn sevenz_container_lists_and_reads_entries() {
+    use std::io::Cursor;
+
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+
+    let fixture = Fixture::new();
+    let path = fixture.source.join("Container.7z");
+    {
+        let mut writer = ArchiveWriter::create(&path).unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_file("b.png"), Some(Cursor::new(vec![1u8, 2, 3])))
+            .unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_file(".A._0.webp"), Some(Cursor::new(vec![9u8; 2048])))
+            .unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_directory("sub"), None::<std::io::Empty>)
+            .unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_file("sub/a.jpg"), Some(Cursor::new(vec![7u8; 512])))
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    let entries = crate::container::list_entries(&path).unwrap();
+    // 目录不占文件序号
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].name, "b.png");
+    assert_eq!(entries[1].name, ".A._0.webp");
+    assert_eq!(entries[2].name, "sub/a.jpg");
+
+    // 首读触发解包缓存，二读走缓存，字节必须一致
+    let bytes = crate::container::read_entry(&path, 1).unwrap();
+    assert_eq!(bytes, vec![9u8; 2048]);
+    let bytes = crate::container::read_entry(&path, 0).unwrap();
+    assert_eq!(bytes, vec![1u8, 2, 3]);
+    let bytes = crate::container::read_entry(&path, 2).unwrap();
+    assert_eq!(bytes, vec![7u8; 512]);
+    assert!(crate::container::read_entry(&path, 3).is_err());
+
+    // 与白名单/忽略规则协同：点前缀动画页也在内
+    assert_eq!(crate::archive::count_pages(&path).unwrap(), 3);
+}
+
+#[test]
+fn gif_anim_meta_and_frame_roundtrip() {
+    use std::io::Cursor;
+
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame, RgbaImage};
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let fixture = Fixture::new();
+    let path = fixture.source.join("anim-in-zip.zip");
+
+    // 造一个两帧、100ms+200ms 的真 GIF，装进 zip 模拟真实页路径
+    let mut gif_bytes: Vec<u8> = Vec::new();
+    {
+        let mut img1 = RgbaImage::new(4, 4);
+        img1.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        let mut img2 = RgbaImage::new(4, 4);
+        img2.put_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        let mut encoder = GifEncoder::new(&mut gif_bytes);
+        encoder
+            .encode_frame(Frame::from_parts(img1, 0, 0, Delay::from_numer_denom_ms(100, 1)))
+            .unwrap();
+        encoder
+            .encode_frame(Frame::from_parts(img2, 0, 0, Delay::from_numer_denom_ms(200, 1)))
+            .unwrap();
+        drop(encoder);
+    }
+
+    {
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("a.gif", SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, &gif_bytes).unwrap();
+        zip.finish().unwrap();
+    }
+
+    let meta = crate::anim::anim_meta(&path, 0).unwrap();
+    assert!(meta.animated);
+    assert_eq!(meta.frames, 2);
+    assert_eq!(meta.total_duration_ms, 300);
+    assert_eq!((meta.width, meta.height), (4, 4));
+
+    // 两帧都能解码成 PNG；第 3 帧必须越界
+    for frame_index in 0..2u32 {
+        let cached = crate::anim::prepare_frame(&path, 0, frame_index).unwrap();
+        assert_eq!(cached.mime, "image/png");
+        assert!(cached.bytes.len() > 0);
+        let decoded = image::ImageReader::new(Cursor::new(cached.bytes.as_slice()))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (4, 4));
+    }
+    assert!(crate::anim::prepare_frame(&path, 0, 2).is_err());
+
+    // 帧缓存命中：第二次 prepare 不再解码也能拿到同样的字节
+    let cached = crate::anim::prepare_frame(&path, 0, 0).unwrap();
+    assert_eq!(cached.mime, "image/png");
+
+    // 静态页：meta 必须报 animated=false
+    let static_zip = fixture.source.join("static-in-zip.zip");
+    {
+        let file = std::fs::File::create(&static_zip).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("b.png", SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, &png_bytes([10, 20, 30])).unwrap();
+        zip.finish().unwrap();
+    }
+    let static_meta = crate::anim::anim_meta(&static_zip, 0).unwrap();
+    assert!(!static_meta.animated);
+    assert_eq!(static_meta.frames, 0);
 }

@@ -1,10 +1,10 @@
-use std::fs::{self, File};
-use std::io::{Cursor, Read};
+use std::fs::{self};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, ImageDecoder};
-use zip::ZipArchive;
 
+use crate::container::{self, ContainerEntry};
 use crate::fsutil;
 
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
@@ -13,8 +13,9 @@ const COVER_MAX_HEIGHT: u32 = 720;
 
 /// 解码后像素边长上限，防止声明超大尺寸的压缩包图片申请 GB 级内存。
 const MAX_PIXEL_EDGE: u32 = 12_000;
-/// 封面 / 缩略图解码允许的最大分配量。
-pub(crate) const THUMB_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
+/// 封面 / 缩略图解码允许的最大分配量。4K 级动画 webp 首帧解码轻松超过 64MB，
+/// 太小会让大页集体的封面/缩略图集体失败。
+pub(crate) const THUMB_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 /// 阅读器整页解码允许的最大分配量。
 pub(crate) const PAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
@@ -50,15 +51,14 @@ pub(crate) fn decode_image(bytes: &[u8], max_alloc: u64) -> Result<DynamicImage,
 ///
 /// 导入面板要在用户点确认之前就报出「这本大概多少页」，而 `inspect_archive`
 /// 会顺带解码一张封面（几十到几百毫秒）；一次拖 30 本进来就是十几秒的空白。
-/// 这里只读 zip 的中央目录，30 本通常几十毫秒。
+/// ZIP 只读中央目录（几十毫秒）；RAR 只扫头部；7z solid 包要付一次全量
+/// 解码的枚举成本，这是格式本身决定的。
 pub fn count_pages(path: &Path) -> Result<i64, String> {
-    let file = File::open(path).map_err(|error| format!("无法打开压缩包: {error}"))?;
-    let archive =
-        ZipArchive::new(file).map_err(|error| format!("压缩包损坏或格式不支持: {error}"))?;
+    let entries = container::list_entries(path)?;
 
-    let total = archive
-        .file_names()
-        .filter(|name| !is_ignored_entry(name) && is_image_name(name))
+    let total = entries
+        .iter()
+        .filter(|entry| !is_ignored_entry(&entry.name) && is_image_name(&entry.name))
         .count();
 
     Ok(total as i64)
@@ -72,13 +72,7 @@ pub struct ArchiveInspection {
 }
 
 pub fn is_supported_archive(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.to_ascii_lowercase())
-            .as_deref(),
-        Some("zip") | Some("cbz")
-    )
+    container::kind_for(path).is_some()
 }
 
 pub(crate) fn is_image_name(name: &str) -> bool {
@@ -89,7 +83,7 @@ pub(crate) fn is_image_name(name: &str) -> bool {
         .to_ascii_lowercase();
     matches!(
         extension.as_str(),
-        "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff"
+        "jpg" | "jpeg" | "jfif" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff"
     )
 }
 
@@ -103,9 +97,20 @@ pub(crate) fn is_ignored_entry(name: &str) -> bool {
         return true;
     }
 
-    normalized
-        .split('/')
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let (dirs, file) = parts.split_at(parts.len() - 1);
+    // 点开头的「目录段」（.git/、.trashes/ 等）整棵跳过；但最后一段是文件名，
+    // 不在这里按点前缀误杀——「.Amiya._0.webp」这类以点开头的正常动画页要放行，
+    // 是否算图片交给 is_image_name 白名单判断。
+    if dirs
+        .iter()
         .any(|part| part.starts_with('.') && part.len() > 1)
+    {
+        return true;
+    }
+    // AppleDouble 资源叉（._xxx.jpg）是 macOS 解压垃圾，文件名层面仍然跳过。
+    let file = file[0];
+    file.starts_with("._") && file.len() > 2
 }
 
 fn inspection_error(message: impl Into<String>) -> ArchiveInspection {
@@ -121,48 +126,26 @@ pub fn inspect_archive(
     covers_dir: &Path,
     content_hash: &str,
 ) -> ArchiveInspection {
-    let file = match File::open(archive_path) {
-        Ok(file) => file,
-        Err(error) => return inspection_error(format!("无法打开压缩包: {error}")),
+    let entries = match container::list_entries(archive_path) {
+        Ok(entries) => entries,
+        Err(error) => return inspection_error(error),
     };
 
-    let mut archive = match ZipArchive::new(file) {
-        Ok(archive) => archive,
-        Err(error) => {
-            return inspection_error(format!("压缩包损坏或格式不支持: {error}"));
-        }
-    };
-
-    let mut images: Vec<(usize, String)> = Vec::new();
-
-    for index in 0..archive.len() {
-        let entry = match archive.by_index(index) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-
-        if entry.is_dir() {
-            continue;
-        }
-
-        let name = entry.name().to_string();
-        if is_ignored_entry(&name) || !is_image_name(&name) {
-            continue;
-        }
-
-        images.push((index, name));
-    }
+    let mut images: Vec<ContainerEntry> = entries
+        .into_iter()
+        .filter(|entry| !is_ignored_entry(&entry.name) && is_image_name(&entry.name))
+        .collect();
 
     if images.is_empty() {
         return inspection_error("压缩包内没有可识别的图片");
     }
 
-    images.sort_by(|left, right| natord::compare(&left.1, &right.1));
+    images.sort_by(|left, right| natord::compare(&left.name, &right.name));
 
     let cover_position = images
         .iter()
-        .position(|(_, name)| {
-            Path::new(name)
+        .position(|entry| {
+            Path::new(&entry.name)
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .map(|value| value.eq_ignore_ascii_case("cover"))
@@ -186,8 +169,7 @@ pub fn inspect_archive(
     if !cover_ready() {
         if let Err(create_error) = fs::create_dir_all(covers_dir) {
             error = Some(format!("无法创建封面缓存目录: {create_error}"));
-        } else if let Err(write_error) =
-            write_cover(&mut archive, images[cover_position].0, &cover_path)
+        } else if let Err(write_error) = write_cover(archive_path, &images[cover_position], &cover_path)
         {
             error = Some(write_error);
         }
@@ -200,28 +182,14 @@ pub fn inspect_archive(
     }
 }
 
-fn write_cover(
-    archive: &mut ZipArchive<File>,
-    index: usize,
-    destination: &Path,
-) -> Result<(), String> {
-    let entry = archive
-        .by_index(index)
-        .map_err(|error| format!("无法读取封面图片: {error}"))?;
-
-    if entry.size() > MAX_IMAGE_BYTES {
+fn write_cover(path: &Path, entry: &ContainerEntry, destination: &Path) -> Result<(), String> {
+    // 大小在列表阶段就已知，超限直接放弃，不把整条读进内存。
+    if entry.size > MAX_IMAGE_BYTES {
         return Err("封面图片过大，已跳过".to_string());
     }
 
-    let mut bytes = Vec::new();
-    entry
-        .take(MAX_IMAGE_BYTES + 1)
-        .read_to_end(&mut bytes)
+    let bytes = container::read_entry(path, entry.raw_index)
         .map_err(|error| format!("读取封面图片失败: {error}"))?;
-
-    if bytes.len() as u64 > MAX_IMAGE_BYTES {
-        return Err("封面图片过大，已跳过".to_string());
-    }
 
     let image = decode_image(&bytes, THUMB_DECODE_ALLOC)?;
     let thumbnail = image.thumbnail(COVER_MAX_WIDTH, COVER_MAX_HEIGHT);

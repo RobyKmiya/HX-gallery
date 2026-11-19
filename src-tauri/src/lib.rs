@@ -1,5 +1,7 @@
+mod anim;
 mod archive;
 mod asset_protocol;
+mod container;
 mod d2;
 pub mod db;
 pub mod fsutil;
@@ -1039,6 +1041,41 @@ async fn read_reader_page(
     .map_err(|error| format!("读取页面异常结束: {error}"))?
 }
 
+/// 预热某页的动画元数据（帧数/总时长），供帧拖条与播放模式使用。
+#[tauri::command]
+async fn read_anim_meta(
+    state: State<'_, AppState>,
+    archive_id: i64,
+    index: i64,
+) -> Result<anim::AnimMeta, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = archive_file_path(&state, archive_id)?;
+        reader::remember_archive(archive_id, &path);
+        anim::anim_meta(&path, index)
+    })
+    .await
+    .map_err(|error| format!("读取动画信息异常结束: {error}"))?
+}
+
+/// 预热某页的第 `frame` 帧为 PNG 并放进帧缓存；帧字节由 `gallery://` 协议取用。
+#[tauri::command]
+async fn prepare_anim_frame(
+    state: State<'_, AppState>,
+    archive_id: i64,
+    index: i64,
+    frame: u32,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = archive_file_path(&state, archive_id)?;
+        reader::remember_archive(archive_id, &path);
+        anim::prepare_frame(&path, index, frame).map(|_| ())
+    })
+    .await
+    .map_err(|error| format!("读取动画帧异常结束: {error}"))?
+}
+
 #[tauri::command]
 async fn read_reader_thumbnail(
     state: State<'_, AppState>,
@@ -1366,6 +1403,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             set_archive_collection,
             open_reader,
             read_reader_page,
+            read_anim_meta,
+            prepare_anim_frame,
             read_reader_thumbnail,
             set_reading_progress,
             add_reader_bookmark,

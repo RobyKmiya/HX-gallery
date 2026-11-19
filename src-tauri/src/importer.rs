@@ -558,7 +558,7 @@ fn collect_candidates(inputs: &[PathBuf], errors: &mut Vec<ImportErrorItem>) -> 
             } else {
                 errors.push(ImportErrorItem {
                     file: input.to_string_lossy().to_string(),
-                    message: "不支持的文件格式，目前仅支持 ZIP/CBZ".to_string(),
+                    message: "不支持的文件格式，目前仅支持 ZIP/CBZ/7Z/RAR".to_string(),
                 });
             }
             continue;
