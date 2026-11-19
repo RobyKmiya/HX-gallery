@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "archive-gallery"
-version = "1.0.18"
+version = "1.0.19"
 dependencies = [
  "base64 0.23.1",
  "blake3",
