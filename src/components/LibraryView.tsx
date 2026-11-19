@@ -1117,6 +1117,9 @@ export default function LibraryView({
    * 走的是「替换当前快照内的 readerCard」，不再新压一条浏览历史：
    * 否则按后退会退回上一本，而不是退出阅读器。
    */
+  /** 连读跨页取书在途标记：连按 ]/[ 时避免重复发起同一页查询。 */
+  const switchingReaderRef = useRef(false);
+
   /** 当前正在读的本子在列表里的位置；-1 表示不在当前列表里。 */
   const readerIndex = useMemo(
     () =>
@@ -1128,15 +1131,36 @@ export default function LibraryView({
 
   const switchReaderArchive = useCallback(
     (direction: -1 | 1) => {
-      setReaderCard((current) => {
-        if (!current) return current;
-        const index = items.findIndex((item) => item.id === current.id);
-        if (index < 0) return current;
-        const next = items[index + direction];
-        return next ?? current;
-      });
+      if (!readerCard) return;
+      const index = items.findIndex((item) => item.id === readerCard.id);
+      if (index < 0) return;
+      const next = items[index + direction];
+      if (next) {
+        setReaderCard(next);
+        return;
+      }
+      // 页边界：直接向库查相邻页的端点本子。不动 items/页码——画廊列表保持
+      // 原样，只有阅读器快照换书；连点用 switchingReaderRef 去重。
+      if (switchingReaderRef.current) return;
+      const targetPage = direction === 1 ? page + 1 : page - 1;
+      if (targetPage < 1 || targetPage > totalPagesRef.current) return;
+      switchingReaderRef.current = true;
+      void (async () => {
+        try {
+          const result = await queryPage(targetPage);
+          const adjacent =
+            direction === 1
+              ? result.items[0]
+              : result.items[result.items.length - 1];
+          if (adjacent) setReaderCard(adjacent);
+        } catch {
+          // 取不到相邻页就停在当前本子，不打断阅读
+        } finally {
+          switchingReaderRef.current = false;
+        }
+      })();
     },
-    [items],
+    [items, page, queryPage, readerCard],
   );
 
   const updateReaderProgress = useCallback(
@@ -2872,8 +2896,11 @@ export default function LibraryView({
           onNotify={notify}
           onProgress={updateReaderProgress}
           onSwitchArchive={switchReaderArchive}
-          hasPrevArchive={readerIndex > 0}
-          hasNextArchive={readerIndex >= 0 && readerIndex < items.length - 1}
+          hasPrevArchive={readerIndex > 0 || (readerIndex === 0 && page > 1)}
+          hasNextArchive={
+            readerIndex >= 0 &&
+            (readerIndex < items.length - 1 || page < totalPagesRef.current)
+          }
         />
       )}
 
