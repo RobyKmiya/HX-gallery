@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -264,6 +265,8 @@ export default function LibraryView({
   /** 在阅读器里打开的详情浮层。 */
   const [readerDetailOpen, setReaderDetailOpen] = useState(false);
   const [toast, setToast] = useState<ToastData | null>(null);
+  /** 应用版本号（来自安装包），显示在侧栏底部，一眼确认有没有更新。 */
+  const [appVersion, setAppVersion] = useState("");
   const [collections, setCollections] = useState<Collection[]>([]);
   const [activeCollectionId, setActiveCollectionId] = useState<number | null>(
     null,
@@ -630,6 +633,19 @@ export default function LibraryView({
   useEffect(() => {
     if (!readerCard) setReaderDetailOpen(false);
   }, [readerCard]);
+
+  // 版本号取自安装包（tauri.conf.json），只取一次；失败就静默，不影响别的功能。
+  useEffect(() => {
+    let cancelled = false;
+    getVersion()
+      .then((version) => {
+        if (!cancelled && version) setAppVersion(version);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const updateRating = useCallback(
     async (id: number, rating: number) => {
@@ -1929,7 +1945,7 @@ export default function LibraryView({
 
         <div className="sidebar-footer">
           <span className="footer-dot" />
-          M1 · ZIP / CBZ · 完全离线
+          {appVersion ? `v${appVersion}` : "画匣"} · ZIP/CBZ/7Z/RAR · 完全离线
         </div>
       </aside>
 
