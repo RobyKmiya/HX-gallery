@@ -60,7 +60,7 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
             <div className="release-row-text">
               <strong>作品页网址</strong>
               <p className="queue-hint">
-                当前仅支持 exhentai.org / e-hentai.org 的作品详情页；需要在弹出的窗口里先登录。
+                当前仅支持 exhentai.org / e-hentai.org。点击后会在弹窗中打开站点；请先登录，再导航到作品详情页（地址含 /g/），画匣会自动抓取第一页。
               </p>
               <input
                 value={url}

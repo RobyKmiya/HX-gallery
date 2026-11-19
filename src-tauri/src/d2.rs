@@ -265,6 +265,11 @@ pub async fn d2_fetch_first(
                 if !matches!(payload.event(), PageLoadEvent::Finished) {
                     return;
                 }
+                // 登录页 / 首页不触发解析；等用户进入作品详情页再抓。
+                let href = payload.url().as_str();
+                if !href.contains("/g/") && !href.contains("/gallery/") {
+                    return;
+                }
                 if started.swap(true, Ordering::SeqCst) {
                     return;
                 }
