@@ -2684,3 +2684,56 @@ fn real_pack_anim_meta_diagnostics() {
         Err(error) => eprintln!("[diag] frame5 ERROR: {error}"),
     }
 }
+
+#[test]
+#[ignore]
+fn generate_progress_hud_preview() {
+    let dir = std::env::temp_dir().join("huaxia-hud-preview");
+    let _ = std::fs::create_dir_all(&dir);
+    let hud = dir.join("release-progress.ps1");
+    let source = crate::release::progress_hud_source(
+        &dir.join("progress.json").to_string_lossy().to_string(),
+        r"C:\Users\Administrator\AppData\Local\画匣\archive-gallery.exe",
+    );
+    let mut bytes: Vec<u8> = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend(source.as_bytes());
+    std::fs::write(&hud, bytes).unwrap();
+    eprintln!("[hud] generated: {}", hud.display());
+}
+
+#[test]
+fn progress_hud_source_drag_minimize_weighted_eta() {
+    let source = crate::release::progress_hud_source(
+        r"C:\r\progress.json",
+        r"C:\app\archive-gallery.exe",
+    );
+    // 占位符必须全部替换，路径按 PS 单引号字面量落进去
+    assert!(!source.contains("__PROGRESS_PATH__"));
+    assert!(!source.contains("__EXE_PATH__"));
+    assert!(source.contains(r"'C:\r\progress.json'"));
+    assert!(source.contains(r"'C:\app\archive-gallery.exe'"));
+    // 可拖动：模拟标题栏三件套（ReleaseCapture + WM_NCLBUTTONDOWN）
+    assert!(source.contains("ReleaseCapture"));
+    assert!(source.contains("0xA1"));
+    // 可最小化成小条再还原
+    assert!(source.contains("Set-Collapsed"));
+    assert!(source.contains("restoreButton"));
+    assert!(source.contains("AutoEllipsis"));
+    // 加权进度：预计时长字段 + 预计剩余 + 超时标注
+    assert!(source.contains("stageExpectedSec"));
+    assert!(source.contains("totalExpectedSec"));
+    assert!(source.contains("预计剩约"));
+    assert!(source.contains("本步比平时慢"));
+    // 高缩放屏不发虚：启动即声明 DPI aware
+    assert!(source.contains("SetProcessDPIAware"));
+    // PS5.1 兼容：不用空值合并 ??（5.1 不支持，写坏直接语法错）
+    assert!(!source.contains("??"));
+}
+
+#[test]
+fn progress_hud_source_raw_string_is_safe() {
+    // 模板正文一旦出现 "## 会截断 Rust 原始字符串——编译期发现不了，跑一下才算数
+    let source = crate::release::progress_hud_source("p", "e");
+    assert!(source.starts_with("# 由画匣生成"));
+    assert!(source.contains("$form.ShowDialog()"));
+}

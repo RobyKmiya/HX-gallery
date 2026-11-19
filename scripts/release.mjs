@@ -56,13 +56,68 @@ function warnIfDirtyTree() {
   }
 }
 
-function step(title, fn) {
+// ── 关窗更新悬浮进度窗的数据源 ────────────────────────────
+// release.rs 生成的 release-progress.ps1（PowerShell WinForms，置顶、可拖动、
+// 可最小化成小条）每 0.5 秒读这个文件画进度条。除阶段名外还写各阶段的
+// 「预计时长」（按本机历史构建校准，2026-11-20 实测全程约 21 分钟，大头是
+// cargo 编译），HUD 用它做加权进度和「预计剩约」——7 个阶段等分会让进度条
+// 在 cargo 编译那一步停十几分钟，看起来像卡死。只影响显示，写不进去绝不
+// 影响发布本身：HUD 只是个观察窗。
+const RELEASE_DIR = path.join(
+  os.homedir(),
+  'AppData',
+  'Roaming',
+  'com.archivegallery.desktop',
+  'release',
+);
+const PROGRESS_FILE = path.join(RELEASE_DIR, 'progress.json');
+const STAGE_TOTAL = 7;
+// 每阶段预计秒数，与下面 7 个 step() 调用一一对应。快了 ETA 偏乐观、
+// 慢了 HUD 会标注「本步比平时慢」——只影响进度观感，不改变发布行为。
+const STAGE_EXPECTED_SEC = [2, 30, 240, 3, 1080, 15, 10];
+const TOTAL_EXPECTED_SEC = STAGE_EXPECTED_SEC.reduce((sum, sec) => sum + sec, 0);
+let stageIndex = 0;
+let doneExpectedSec = 0;
+let startedAt = Date.now();
+
+function writeProgress(extra = {}) {
+  try {
+    fs.mkdirSync(RELEASE_DIR, { recursive: true });
+    fs.writeFileSync(
+      PROGRESS_FILE,
+      JSON.stringify({
+        startedAt,
+        stageIndex,
+        stageTotal: STAGE_TOTAL,
+        at: Date.now(),
+        ...extra,
+      }),
+      'utf8',
+    );
+  } catch {
+    // 进度窗读不到就退化为「只看到时长在走」，发布流程不受影响
+  }
+}
+
+function step(title, expectedSec, fn) {
+  if (!dryRun) {
+    writeProgress({
+      stage: title,
+      version: next,
+      stageStartedAt: Date.now(),
+      stageExpectedSec: expectedSec,
+      doneExpectedSec,
+      totalExpectedSec: TOTAL_EXPECTED_SEC,
+    });
+  }
+  stageIndex += 1;
   log(title);
   if (dryRun) {
     console.log('  (dry-run，跳过执行)');
     return;
   }
   fn();
+  doneExpectedSec += expectedSec;
 }
 
 // ── 版本号 ────────────────────────────────────────────────
@@ -142,6 +197,7 @@ function runNpm(script) {
 
 // ── 主流程 ────────────────────────────────────────────────
 
+try {
 const current = readVersion();
 const next = explicitVersion ?? bump(current, bumpKind);
 
@@ -155,22 +211,22 @@ console.log(`  当前版本 ${current} → ${next}${dryRun ? '（dry-run）' : '
 
 warnIfDirtyTree();
 
-step(`抬版本并同步三处（package.json / Cargo.toml / tauri.conf.json）`, () => {
+step(`抬版本并同步三处（package.json / Cargo.toml / tauri.conf.json）`, 2, () => {
   syncVersion(next);
   ok(`三处已同步为 ${next}`);
 });
 
-step('前端类型检查', () => {
+step('前端类型检查', 30, () => {
   runNpm('check');
   ok('tsc 通过');
 });
 
-step('Rust 单元测试', () => {
+step('Rust 单元测试', 240, () => {
   run('cargo', ['test', '--manifest-path', path.join(TAURI_DIR, 'Cargo.toml'), '--lib']);
   ok('测试通过');
 });
 
-step('结束正在运行的实例', () => {
+step('结束正在运行的实例', 3, () => {
   const count = killRunning();
   ok(count > 0 ? `已结束 ${count} 个进程` : '没有运行中的实例');
   // 给系统一点时间释放文件句柄
@@ -180,7 +236,7 @@ step('结束正在运行的实例', () => {
   );
 });
 
-step('打包（含 Rust release 编译）', () => {
+step('打包（含 Rust release 编译）', 1080, () => {
   runNpm('build:bundle');
   ok('安装包已生成');
 });
@@ -194,7 +250,7 @@ const setupPath = path.join(
   `画匣_${next}_x64-setup.exe`,
 );
 
-step(`安装到 ${INSTALL_DIR}`, () => {
+step(`安装到 ${INSTALL_DIR}`, 15, () => {
   if (!fs.existsSync(setupPath)) {
     throw new Error(`找不到安装包：${setupPath}`);
   }
@@ -202,7 +258,7 @@ step(`安装到 ${INSTALL_DIR}`, () => {
   ok('安装完成');
 });
 
-step('验证', () => {
+step('验证', 10, () => {
   if (!fs.existsSync(INSTALLED_EXE)) {
     throw new Error(`安装后找不到 exe：${INSTALLED_EXE}`);
   }
@@ -260,4 +316,18 @@ if (dryRun) {
   } catch (error) {
     warn(`标签译名导出失败（不影响发布）: ${String(error)}`);
   }
+}
+
+if (!dryRun) writeProgress({ stage: '更新完成', result: 'success', version: next, stageIndex: STAGE_TOTAL });
+} catch (error) {
+  if (!dryRun) {
+    writeProgress({
+      stage: '更新失败',
+      result: 'failed',
+      error: String(error && error.message ? error.message : error),
+    });
+  }
+  console.error(`
+发布失败：${String(error && error.message ? error.message : error)}`);
+  process.exit(1);
 }

@@ -543,7 +543,13 @@ if (command === 'log') {{
 "#,
     )
 }
-fn script_body(source_dir: &Path, helper: &Path, log: &Path, pending: &Path) -> String {
+fn script_body(
+    source_dir: &Path,
+    helper: &Path,
+    log: &Path,
+    pending: &Path,
+    hud_script: &Path,
+) -> String {
     let source = source_dir.to_string_lossy().replace('/', "\\");
 
     // 编码这件事踩了两次坑，最终方案如下：
@@ -578,6 +584,9 @@ call :sleep2\r\n\
 \r\n\
 :waitdone\r\n\
 call :say exited\r\n\
+\r\n\
+rem Floating progress HUD (PowerShell WinForms, TopMost): reads progress.json per stage.\r\n\
+start \"\" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{hud_script}\"\r\n\
 \r\n\
 cd /d \"%SRC%\"\r\n\
 if errorlevel 1 goto failed\r\n\
@@ -627,6 +636,7 @@ exit /b\r\n",
         rawlog = log.to_string_lossy().replace('/', "\\"),
         rawpending = pending.to_string_lossy().replace('/', "\\"),
         helper = helper.to_string_lossy().replace('/', "\\"),
+        hud_script = hud_script.to_string_lossy().replace('/', "\\"),
     )
 }
 
@@ -642,6 +652,333 @@ fn launcher_source(script: &Path) -> String {
 Set sh = CreateObject(\"WScript.Shell\")\r\n\
 sh.Run Chr(34) & \"{path_vbs}\" & Chr(34), 0, False\r\n"
     )
+}
+
+/// 关窗更新期间的悬浮进度窗（PowerShell WinForms，DPI aware）。
+///
+/// 主程序退出后，发布脚本在后台跑约 20 分钟，没有任何可见反馈——用户没法
+/// 判断「什么时候更新好」。release.mjs 在每个阶段写 `progress.json`（含各阶段
+/// 预计时长），这个置顶小窗每 0.5 秒读一次：加权进度条 + 已用时长 + 预计剩余；
+/// 可拖动（模拟标题栏 HTCAPTION）、可最小化成小条再还原；完成后自动关闭并给出
+/// 「打开画匣」，失败则停留并显示错误。用 PowerShell WinForms 而不是 HTA：
+/// mshta 窗口置不了顶（会被前台应用整个盖住，「悬浮」名存实亡），WinForms 有
+/// 原生 TopMost。启动即 SetProcessDPIAware，控件尺寸乘缩放系数——高缩放屏
+/// 文字不发虚、坐标按物理像素算。PS 这里按 5.1 兼容写法（无三元、无链式 ??），
+/// 脚本由 `write_utf8_bom` 落盘（PS5.1 读无 BOM UTF-8 会按 ANSI 拆坏中文）。
+pub(crate) fn progress_hud_source(progress_json: &str, installed_exe: &str) -> String {
+    let ps_quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let template = r##"# 由画匣生成，随一次更新任务存在。勿手改。
+# 关窗更新悬浮进度窗：主程序已退出，后台发布约 20 分钟，置顶显示阶段进度。
+# - 0.5 秒轮询 progress.json；
+# - 可拖动（模拟标题栏 HTCAPTION）、可最小化成小条（再点还原）；
+# - 进度按 release.mjs 提供的各阶段预计时长加权，本步内按已用时间推进，
+#   并给出「预计剩约」。预计值按本机历史构建校准，快了 ETA 偏乐观，
+#   慢了进度条会在 96% 前缓慢爬行并标注「本步比平时慢」。
+# - 启动即声明 DPI aware：高缩放屏上文字不发虚，坐标全按物理像素算，
+#   控件尺寸统一乘缩放系数 $s（96dpi 屏 $s=1，与设计稿一致）。
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
+
+# 无边框窗体拖动靠这个：把左键按下伪装成标题栏拖动（HTCAPTION）
+Add-Type -TypeDefinition @"
+namespace HudNative {
+    using System;
+    using System.Runtime.InteropServices;
+    public static class Drag {
+        [DllImport("user32.dll")]
+        public static extern bool ReleaseCapture();
+        [DllImport("user32.dll")]
+        public static extern int SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")]
+        public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")]
+        public static extern uint GetDpiForSystem();
+    }
+}
+"@
+[void][HudNative.Drag]::SetProcessDPIAware()
+try { $script:s = [double][HudNative.Drag]::GetDpiForSystem() / 96.0 } catch { $script:s = 1.0 }
+if ($script:s -le 0) { $script:s = 1.0 }
+
+$progressPath = __PROGRESS_PATH__
+$exePath = __EXE_PATH__
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = '画匣更新'
+$form.FormBorderStyle = 'None'
+$form.TopMost = $true
+$form.StartPosition = 'Manual'
+$form.Size = New-Object System.Drawing.Size(396, 172)
+$form.BackColor = [System.Drawing.Color]::FromArgb(16, 18, 22)
+
+$fg = [System.Drawing.Color]::FromArgb(232, 234, 240)
+$muted = [System.Drawing.Color]::FromArgb(139, 147, 167)
+$accent = [System.Drawing.Color]::FromArgb(124, 147, 255)
+$danger = [System.Drawing.Color]::FromArgb(255, 107, 107)
+
+$title = New-Object System.Windows.Forms.Label
+$title.Bounds = New-Object System.Drawing.Rectangle(16, 12, 306, 22)
+$title.ForeColor = $fg
+$title.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
+$title.BackColor = [System.Drawing.Color]::Transparent
+$title.Text = '画匣 · 正在更新'
+$form.Controls.Add($title)
+
+$closeButton = New-Object System.Windows.Forms.Button
+$closeButton.Bounds = New-Object System.Drawing.Rectangle(360, 8, 28, 24)
+$closeButton.Text = [char]0x00d7
+$closeButton.FlatStyle = 'Flat'
+$closeButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 45, 54)
+$closeButton.ForeColor = $muted
+$closeButton.Add_Click({ $form.Close() })
+$form.Controls.Add($closeButton)
+
+$minButton = New-Object System.Windows.Forms.Button
+$minButton.Bounds = New-Object System.Drawing.Rectangle(328, 8, 28, 24)
+$minButton.Text = [char]0x2013
+$minButton.FlatStyle = 'Flat'
+$minButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 45, 54)
+$minButton.ForeColor = $muted
+$minButton.Add_Click({ Set-Collapsed $true })
+$form.Controls.Add($minButton)
+
+$barBack = New-Object System.Windows.Forms.Panel
+$barBack.Bounds = New-Object System.Drawing.Rectangle(16, 46, 364, 8)
+$barBack.BackColor = [System.Drawing.Color]::FromArgb(42, 45, 54)
+$form.Controls.Add($barBack)
+
+$bar = New-Object System.Windows.Forms.Panel
+$bar.Bounds = New-Object System.Drawing.Rectangle(0, 0, 2, 8)
+$bar.BackColor = $accent
+$barBack.Controls.Add($bar)
+
+$stage = New-Object System.Windows.Forms.Label
+$stage.Bounds = New-Object System.Drawing.Rectangle(16, 62, 364, 20)
+$stage.ForeColor = [System.Drawing.Color]::FromArgb(198, 203, 216)
+$stage.BackColor = [System.Drawing.Color]::Transparent
+$stage.Text = '正在启动更新…'
+$form.Controls.Add($stage)
+
+$meta = New-Object System.Windows.Forms.Label
+$meta.Bounds = New-Object System.Drawing.Rectangle(16, 84, 364, 18)
+$meta.ForeColor = $muted
+$meta.BackColor = [System.Drawing.Color]::Transparent
+$meta.Text = '已用 00:00'
+$form.Controls.Add($meta)
+
+$errorLabel = New-Object System.Windows.Forms.Label
+$errorLabel.Bounds = New-Object System.Drawing.Rectangle(16, 104, 364, 30)
+$errorLabel.ForeColor = [System.Drawing.Color]::FromArgb(255, 157, 157)
+$errorLabel.BackColor = [System.Drawing.Color]::Transparent
+$errorLabel.Visible = $false
+$form.Controls.Add($errorLabel)
+
+$actions = New-Object System.Windows.Forms.Panel
+$actions.Bounds = New-Object System.Drawing.Rectangle(16, 134, 364, 30)
+$actions.Visible = $false
+$openButton = New-Object System.Windows.Forms.Button
+$openButton.Bounds = New-Object System.Drawing.Rectangle(0, 0, 110, 28)
+$openButton.Text = '打开画匣'
+$openButton.FlatStyle = 'Flat'
+$openButton.FlatAppearance.BorderColor = $accent
+$openButton.ForeColor = $fg
+$openButton.Add_Click({ Start-Process -FilePath $exePath; $form.Close() })
+$actions.Controls.Add($openButton)
+$dismissButton = New-Object System.Windows.Forms.Button
+$dismissButton.Bounds = New-Object System.Drawing.Rectangle(118, 0, 80, 28)
+$dismissButton.Text = '关闭'
+$dismissButton.FlatStyle = 'Flat'
+$dismissButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(58, 62, 74)
+$dismissButton.ForeColor = $fg
+$dismissButton.Add_Click({ $form.Close() })
+$actions.Controls.Add($dismissButton)
+$form.Controls.Add($actions)
+
+# 最小化成的小条：一个标签 + 还原按钮，位置尺寸在 Set-Collapsed 里切换
+$pill = New-Object System.Windows.Forms.Label
+$pill.Bounds = New-Object System.Drawing.Rectangle(12, 10, 178, 24)
+$pill.ForeColor = $fg
+$pill.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+$pill.BackColor = [System.Drawing.Color]::Transparent
+$pill.Text = '画匣更新…'
+$pill.AutoEllipsis = $true
+$pill.Visible = $false
+$form.Controls.Add($pill)
+
+$restoreButton = New-Object System.Windows.Forms.Button
+$restoreButton.Bounds = New-Object System.Drawing.Rectangle(194, 8, 32, 28)
+$restoreButton.Text = [char]0x25ad
+$restoreButton.FlatStyle = 'Flat'
+$restoreButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(58, 62, 74)
+$restoreButton.ForeColor = $fg
+$restoreButton.Visible = $false
+$restoreButton.Add_Click({ Set-Collapsed $false })
+$form.Controls.Add($restoreButton)
+
+# 高缩放屏：整体按物理像素放大（字体用磅值，DPI aware 下系统自己缩放）
+$scaleFactor = New-Object System.Drawing.SizeF($script:s, $script:s)
+$form.Scale($scaleFactor)
+$normSize = New-Object System.Drawing.Size([int](396 * $script:s), [int](172 * $script:s))
+$pillSize = New-Object System.Drawing.Size([int](268 * $script:s), [int](44 * $script:s))
+$barFull = [int](364 * $script:s)
+$normCloseRect = New-Object System.Drawing.Rectangle([int](360 * $script:s), [int](8 * $script:s), [int](28 * $script:s), [int](24 * $script:s))
+$pillCloseRect = New-Object System.Drawing.Rectangle([int](232 * $script:s), [int](8 * $script:s), [int](28 * $script:s), [int](28 * $script:s))
+
+$script:collapsed = $false
+function Set-Collapsed {
+    param([bool]$On)
+    $script:collapsed = $On
+    if ($On) {
+        foreach ($c in @($title, $barBack, $stage, $meta, $errorLabel, $actions, $minButton)) { $c.Visible = $false }
+        $pill.Visible = $true
+        $restoreButton.Visible = $true
+        $closeButton.Bounds = $pillCloseRect
+        $form.Size = $pillSize
+    } else {
+        $pill.Visible = $false
+        $restoreButton.Visible = $false
+        $closeButton.Bounds = $normCloseRect
+        foreach ($c in @($title, $barBack, $stage, $meta, $minButton)) { $c.Visible = $true }
+        $form.Size = $normSize
+    }
+}
+
+# 拖动：窗体本体和所有会吞鼠标事件的标签/面板都挂上模拟标题栏处理
+$dragHandler = {
+    param($sender, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        [void][HudNative.Drag]::ReleaseCapture()
+        [void][HudNative.Drag]::SendMessage($form.Handle, 0xA1, [IntPtr]2, [IntPtr]0)
+    }
+}
+$form.Add_MouseDown($dragHandler)
+foreach ($c in @($title, $stage, $meta, $pill, $barBack, $bar, $errorLabel)) { $c.Add_MouseDown($dragHandler) }
+
+$startedAt = $null
+$closing = $false
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 500
+$timer.Add_Tick({
+    try {
+        if (-not (Test-Path -LiteralPath $progressPath)) { return }
+        $data = Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($data.startedAt) { $script:startedAt = [int64]$data.startedAt }
+        $elapsedText = '00:00'
+        if ($script:startedAt) {
+            $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:startedAt
+            if ($elapsed -lt 0) { $elapsed = 0 }
+            $elapsedText = '{0:mm\:ss}' -f [TimeSpan]::FromMilliseconds($elapsed)
+        }
+        if ($null -eq $data) { return }
+
+        $result = ''
+        if ($data.result) { $result = [string]$data.result }
+        $pct = $null
+        $etaText = ''
+        $pillText = ''
+        if ($data.version) { $title.Text = ('画匣 · 正在更新 v' + $data.version) }
+
+        if ($result -eq 'success') {
+            $bar.BackColor = $accent
+            $stage.Text = '更新完成，新版已安装'
+            $pillText = '更新完成'
+            if (-not $script:collapsed) { $actions.Visible = $true }
+            if (-not $script:closing) {
+                $script:closing = $true
+                $autoClose = New-Object System.Windows.Forms.Timer
+                $autoClose.Interval = 20000
+                $autoClose.Add_Tick({ $form.Close() })
+                $autoClose.Start()
+            }
+        } elseif ($result -eq 'failed') {
+            $bar.BackColor = $danger
+            $stage.Text = '更新失败（不影响当前安装的版本）'
+            $errorLabel.Text = [string]$data.error
+            $errorLabel.Visible = $true
+            $pillText = '更新失败'
+            if (-not $script:collapsed) { $actions.Visible = $true }
+        } else {
+            $index = 0
+            if ($data.stageIndex) { $index = [int]$data.stageIndex }
+            $total = 7
+            if ($data.stageTotal) { $total = [int]$data.stageTotal }
+            $stageName = ''
+            if ($data.stage) { $stageName = [string]$data.stage }
+            if ($data.totalExpectedSec -and $data.stageExpectedSec -and $data.stageStartedAt) {
+                # 加权进度：已完成阶段的预计时长 + 本步内已用时间（超过预计就封顶再缓慢爬行）
+                $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                $elapsedStage = $nowMs - [int64]$data.stageStartedAt
+                if ($elapsedStage -lt 0) { $elapsedStage = 0 }
+                $stageExpMs = [double]$data.stageExpectedSec * 1000
+                $doneSec = [double]$data.doneExpectedSec
+                $totalSec = [double]$data.totalExpectedSec
+                $effStageMs = $elapsedStage
+                if ($effStageMs -gt $stageExpMs) { $effStageMs = $stageExpMs }
+                $frac = ($doneSec * 1000 + $effStageMs) / ($totalSec * 1000)
+                if ($elapsedStage -gt $stageExpMs) {
+                    $overMs = $elapsedStage - $stageExpMs
+                    $extraMs = [Math]::Min($totalSec * 30, $stageExpMs * 0.25 * (1.0 - [Math]::Exp(-$overMs / 120000.0)))
+                    $frac = $frac + $extraMs / ($totalSec * 1000)
+                    $etaText = '（本步比平时慢，仍在进行）'
+                }
+                $pct = [Math]::Round($frac * 100)
+                if ($pct -gt 96) { $pct = 96 }
+                if ($pct -lt 1) { $pct = 1 }
+                if ($etaText -eq '') {
+                    $remainSec = $totalSec - $doneSec - $effStageMs / 1000
+                    if ($remainSec -lt 0) { $remainSec = 0 }
+                    if ($remainSec -ge 60) {
+                        $etaText = '预计剩约 {0} 分' -f [Math]::Round($remainSec / 60)
+                    } else {
+                        $etaText = '预计剩约 {0} 秒' -f [Math]::Round($remainSec)
+                    }
+                }
+                $stage.Text = ('第 {0}/{1} 步 · {2}' -f ($index + 1), $total, $stageName)
+            } else {
+                $pct = [Math]::Min(96, [Math]::Round(($index / $total) * 100))
+                $stage.Text = $stageName
+            }
+            $pillText = ('{0}%' -f $pct)
+        }
+
+        if ($script:collapsed) {
+            if ($pillText -ne '') { $pill.Text = ('画匣 {0} · {1}' -f $pillText, $elapsedText) }
+        } else {
+            if ($result -eq 'success' -or $result -eq 'failed') {
+                $bar.Width = $barFull
+            } elseif ($pct -ne $null) {
+                $bar.Width = [Math]::Max(2, [int]($barFull * $pct / 100))
+            }
+            if ($etaText -ne '') {
+                $meta.Text = ('已用 {0} · {1}' -f $elapsedText, $etaText)
+            } else {
+                $meta.Text = ('已用 {0}' -f $elapsedText)
+            }
+        }
+        $form.TopMost = $true
+    } catch {}
+})
+$timer.Start()
+
+# 右下角定位：等 Scale 之后的最终尺寸再算
+$work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$form.Location = New-Object System.Drawing.Point(
+    ($work.Right - $form.Width - [int](16 * $script:s)),
+    ($work.Bottom - $form.Height - [int](16 * $script:s)))
+
+$form.Add_Shown({ $form.TopMost = $true; $form.Activate() })
+[void]$form.ShowDialog()
+"##;
+    template
+        .replace("__PROGRESS_PATH__", &ps_quote(progress_json))
+        .replace("__EXE_PATH__", &ps_quote(installed_exe))
+}
+
+/// PowerShell 5.1 按 ANSI 解读无 BOM 的 UTF-8，中文会碎——脚本必须带 BOM 落盘。
+fn write_utf8_bom(path: &Path, source: &str) -> Result<(), String> {
+    let mut bytes: Vec<u8> = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend(source.as_bytes());
+    fs::write(path, bytes).map_err(|error| format!("写入更新进度窗失败: {error}"))
 }
 
 fn write_launcher(launcher: &Path, script: &Path) -> Result<(), String> {
@@ -668,13 +1005,24 @@ pub fn schedule_of(app: &AppHandle, settings: &ReleaseSettings) -> Result<(Strin
     let log = dir.join("release.log");
     let status = dir.join("status.json");
     let pending = dir.join("pending.json");
+    let progress = dir.join("progress.json");
+    let hud_script = dir.join("release-progress.ps1");
 
     // node 助手：日志、状态、重启都走它，绕开 cmd 的中文/编码问题。
     let helper_code = helper_source(&exe, &log, &status, settings.relaunch_after);
     fs::write(&helper, helper_code.as_bytes())
         .map_err(|error| format!("写入更新助手失败: {error}"))?;
 
-    let body = script_body(&source, &helper, &log, &pending);
+    // 悬浮进度窗：release.mjs 每阶段写 progress.json，HUD 置顶读它画进度条。
+    write_utf8_bom(
+        &hud_script,
+        &progress_hud_source(
+            &progress.to_string_lossy(),
+            &exe.to_string_lossy(),
+        ),
+    )?;
+
+    let body = script_body(&source, &helper, &log, &pending, &hud_script);
     // 纯 ASCII 写盘：脚本正文不含中文，中文路径只出现在 helper 里。
     fs::write(&script, body.as_bytes()).map_err(|error| format!("写入更新脚本失败: {error}"))?;
 
@@ -685,6 +1033,8 @@ pub fn schedule_of(app: &AppHandle, settings: &ReleaseSettings) -> Result<(Strin
     // 清掉上一轮的日志尾巴，避免面板读到旧结果。
     let _ = fs::remove_file(&log);
     let _ = fs::remove_file(&status);
+    // 进度文件同理：HUD 在 npm run release 写入前显示「正在启动更新…」。
+    let _ = fs::remove_file(&progress);
 
     // pending 标记：有它才代表「已经排好一次发布」。
     write_json(
