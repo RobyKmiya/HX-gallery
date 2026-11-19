@@ -1,24 +1,27 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use zip::ZipArchive;
 
 use crate::archive::{
     PAGE_DECODE_ALLOC, THUMB_DECODE_ALLOC, decode_image, is_ignored_entry, is_image_name,
 };
+use crate::container;
 use crate::fsutil;
 use crate::models::{ReaderInfo, ReaderPage, ReaderThumb};
 use crate::pagecache::{ByteCache, Cached};
 
-const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
+/// 单页原始字节上限。动画 webp/gif 单文件超过 32MB 很常见（大合集包单页可达
+/// 40MB+），32MiB 会把这类页整页拒绝；放宽到 256MiB。超过 PAGE_CACHE_BUDGET 的页
+/// 不进内存缓存（pagecache 对超预算单条本来就不落缓存），按需直读，靠 `?v=` 的
+/// HTTP 缓存（max-age=3600）避免反复解压。
+const MAX_PAGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// 页面字节缓存预算。至少能装下两页上限大小的图，避免大图把自己挤出去；
-/// 动图常见 20–30MB，留到 128MB 才够「当前页 + 一两页邻页」共存。
+/// 页面字节缓存预算。动图常见 20–30MB，128MB 够「当前页 + 一两页邻页」共存；
+/// 超过预算的单页不缓存，走直读路径。
 const PAGE_CACHE_BUDGET: usize = 128 * 1024 * 1024;
 const THUMB_CACHE_BUDGET: usize = 24 * 1024 * 1024;
 /// 记住多少个「正在读」的压缩包路径，供自定义协议解析。
@@ -26,8 +29,11 @@ const MAX_REMEMBERED_ARCHIVES: usize = 32;
 
 #[derive(Clone, Debug)]
 struct ReaderEntry {
-    zip_index: usize,
+    /// 条目在容器内的原始序号（container::list_entries 的 raw_index）。
+    raw_index: usize,
     name: String,
+    /// 原始字节大小，清单阶段即可判超限，不必先整条读入内存。
+    size: u64,
 }
 
 struct Manifest {
@@ -76,7 +82,7 @@ pub fn remembered_archive(archive_id: i64) -> Option<PathBuf> {
         .and_then(|paths| paths.get(&archive_id).cloned())
 }
 
-fn file_stamp(path: &Path) -> Result<(i64, u64), String> {
+pub(crate) fn file_stamp(path: &Path) -> Result<(i64, u64), String> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             "文件不存在，可能已被移动或删除".to_string()
@@ -88,7 +94,7 @@ fn file_stamp(path: &Path) -> Result<(i64, u64), String> {
 }
 
 /// 缓存键带上文件大小与修改时间：体积没有变化就不可能换了内容。
-fn cache_key(kind: &str, path: &Path, index: i64, suffix: &str) -> Result<String, String> {
+pub(crate) fn cache_key(kind: &str, path: &Path, index: i64, suffix: &str) -> Result<String, String> {
     let (modified, size) = file_stamp(path)?;
     Ok(format!(
         "{kind}|{}|{index}|{suffix}|{modified}|{size}",
@@ -96,25 +102,18 @@ fn cache_key(kind: &str, path: &Path, index: i64, suffix: &str) -> Result<String
     ))
 }
 
-fn build_entries(archive: &mut ZipArchive<File>) -> Vec<ReaderEntry> {
+fn build_entries(items: Vec<container::ContainerEntry>) -> Vec<ReaderEntry> {
     let mut entries = Vec::new();
 
-    for index in 0..archive.len() {
-        let Ok(entry) = archive.by_index(index) else {
-            continue;
-        };
-        if entry.is_dir() {
-            continue;
-        }
-
-        let name = entry.name().to_string();
-        if is_ignored_entry(&name) || !is_image_name(&name) {
+    for item in items {
+        if is_ignored_entry(&item.name) || !is_image_name(&item.name) {
             continue;
         }
 
         entries.push(ReaderEntry {
-            zip_index: index,
-            name,
+            raw_index: item.raw_index,
+            name: item.name,
+            size: item.size,
         });
     }
 
@@ -133,10 +132,8 @@ fn entries_for(path: &Path) -> Result<Vec<ReaderEntry>, String> {
         }
     }
 
-    let file = File::open(path).map_err(|error| format!("无法打开压缩包: {error}"))?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|error| format!("压缩包损坏或格式不支持: {error}"))?;
-    let entries = build_entries(&mut archive);
+    let items = container::list_entries(path)?;
+    let entries = build_entries(items);
 
     if entries.is_empty() {
         return Err("压缩包内没有可识别的图片".to_string());
@@ -282,7 +279,7 @@ pub fn read_thumbnail(
     })
 }
 
-fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, Vec<u8>), String> {
+pub(crate) fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, Vec<u8>), String> {
     if page_index < 0 {
         return Err("页码不能为负数".to_string());
     }
@@ -292,26 +289,16 @@ fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, Vec<u8>), St
         .get(page_index as usize)
         .ok_or_else(|| "页码超出范围".to_string())?;
 
-    let file = File::open(path).map_err(|error| format!("无法打开压缩包: {error}"))?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|error| format!("压缩包损坏或格式不支持: {error}"))?;
-    let zip_entry = archive
-        .by_index(entry.zip_index)
-        .map_err(|error| format!("无法读取页面: {error}"))?;
-
-    if zip_entry.size() > MAX_PAGE_BYTES {
+    // 大小在清单阶段就已知（ZIP 中央目录 / RAR 头部 / 7z 元数据），超限直接拒绝，
+    // 不把整条读进内存。
+    if entry.size > MAX_PAGE_BYTES {
         return Err(format!(
             "页面图片超过 {} MB，暂不支持在阅读器中打开",
             MAX_PAGE_BYTES / 1024 / 1024
         ));
     }
 
-    let mut bytes = Vec::new();
-    zip_entry
-        .take(MAX_PAGE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("读取页面失败: {error}"))?;
-
+    let bytes = container::read_entry(path, entry.raw_index)?;
     if bytes.len() as u64 > MAX_PAGE_BYTES {
         return Err(format!(
             "页面图片超过 {} MB，暂不支持在阅读器中打开",
@@ -331,7 +318,7 @@ fn extension_of(name: &str) -> String {
 
 fn mime_for(extension: &str) -> &'static str {
     match extension {
-        "jpg" | "jpeg" => "image/jpeg",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
         "webp" => "image/webp",

@@ -43,6 +43,26 @@ fn parse_page_path(path: &str) -> Option<(i64, i64)> {
     Some((archive_id, index))
 }
 
+/// 解析 `/frame/<archiveId>/<index>/<frame>`（动图单帧 PNG）。
+fn parse_frame_path(path: &str) -> Option<(i64, i64, u32)> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    if parts.next()? != "frame" {
+        return None;
+    }
+
+    let archive_id: i64 = parts.next()?.parse().ok()?;
+    let index: i64 = parts.next()?.parse().ok()?;
+    let frame: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if archive_id <= 0 || index < 0 {
+        return None;
+    }
+
+    Some((archive_id, index, frame))
+}
+
 /// 从 query 里取 `v=`（压缩包版本号）。
 fn query_version(query: Option<&str>) -> Option<&str> {
     query?
@@ -55,7 +75,9 @@ pub fn serve(
     _context: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
-    let Some((archive_id, index)) = parse_page_path(request.uri().path()) else {
+    let page = parse_page_path(request.uri().path());
+    let frame = parse_frame_path(request.uri().path());
+    let Some((archive_id, index)) = page.map(|(id, index)| (id, index)).or(frame.map(|(id, index, _)| (id, index))) else {
         return plain(StatusCode::BAD_REQUEST, "请求路径无效");
     };
 
@@ -72,9 +94,21 @@ pub fn serve(
         return plain(StatusCode::NOT_FOUND, "画集文件已更新，请重新打开");
     }
 
-    let Some(payload) = reader::cached_page(&path, index) else {
-        // 页面还没预热（或已被 LRU 淘汰）：交给前端重新走一次命令。
-        return plain(StatusCode::NOT_FOUND, "页面尚未准备完成");
+    let payload = if let Some((_, _, frame_index)) = frame {
+        // 帧还没预热（或已被 LRU 淘汰）：交给前端重新走一次命令。
+        crate::anim::cached_frame(&path, index, frame_index)
+    } else {
+        reader::cached_page(&path, index)
+    };
+    let Some(payload) = payload else {
+        return plain(
+            StatusCode::NOT_FOUND,
+            if frame.is_some() {
+                "帧尚未准备完成"
+            } else {
+                "页面尚未准备完成"
+            },
+        );
     };
 
     // 带 `?v=` 的 URL 与压缩包内容一一对应，可以放心让 webview 自己缓存：
@@ -97,7 +131,7 @@ pub fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_page_path;
+    use super::{parse_frame_path, parse_page_path};
 
     #[test]
     fn parses_only_well_formed_page_paths() {
@@ -110,5 +144,17 @@ mod tests {
         assert_eq!(parse_page_path("/page/12/3/extra"), None);
         assert_eq!(parse_page_path("/thumb/12/3"), None);
         assert_eq!(parse_page_path("/page/12/3/../../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn parses_only_well_formed_frame_paths() {
+        assert_eq!(parse_frame_path("/frame/12/3/7"), Some((12, 3, 7)));
+        assert_eq!(parse_frame_path("frame/1/0/0"), Some((1, 0, 0)));
+        assert_eq!(parse_frame_path("/frame/12/3"), None);
+        assert_eq!(parse_frame_path("/frame/12/3/x"), None);
+        assert_eq!(parse_frame_path("/frame/12/3/7/extra"), None);
+        assert_eq!(parse_frame_path("/frame/0/3/7"), None);
+        assert_eq!(parse_frame_path("/frame/12/-1/7"), None);
+        assert_eq!(parse_frame_path("/page/12/3"), None);
     }
 }
