@@ -192,6 +192,13 @@ export const api = {
   listQueueArchives: (queueId: number) =>
     invoke<number[]>("list_queue_archives", { queueId }),
 
+  /** 手动把单本画集加入待看目录；重复加入返回 false。 */
+  addToQueue: (queueId: number, archiveId: number) =>
+    invoke<boolean>("add_to_queue", { queueId, archiveId }),
+
+  removeFromQueue: (queueId: number, archiveId: number) =>
+    invoke<void>("remove_from_queue", { queueId, archiveId }),
+
   /** 标签权重：0 表示不想看到带此标签的画集；默认 100。 */
   setTagWeight: (tagId: number, weight: number) =>
     invoke<Tag>("set_tag_weight", { tagId, weight }),

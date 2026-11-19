@@ -3,7 +3,13 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import { formatBytes, formatDateTime } from "../format";
 import { parseTagInput, summarizeByCategory } from "../tags";
-import type { ArchiveCardData, BulkTagReport, Collection, Tag } from "../types";
+import type {
+  ArchiveCardData,
+  BulkTagReport,
+  Collection,
+  Queue,
+  Tag,
+} from "../types";
 import {
   AlertIcon,
   BookIcon,
@@ -132,6 +138,9 @@ export default function DetailDrawer({
   const [noteState, setNoteState] = useState<"idle" | "saved" | "error">(
     "idle",
   );
+  const [queues, setQueues] = useState<Queue[]>([]);
+  const [queueMemberIds, setQueueMemberIds] = useState<number[]>([]);
+  const [queueBusyId, setQueueBusyId] = useState<number | null>(null);
 
   const ratingRef = useRef(card.rating);
   const lastRequestedRef = useRef(card.rating);
@@ -182,6 +191,37 @@ export default function DetailDrawer({
       cancelled = true;
     };
   }, [card.id, onNotify]);
+
+  // 待看目录：目录最多 3 个，逐个查成员关系判断本子是否已在里面。
+  // 读取失败静默降级（不出区块），不影响抽屉其他功能。
+  useEffect(() => {
+    let cancelled = false;
+    setQueues([]);
+    setQueueMemberIds([]);
+    (async () => {
+      try {
+        const list = await api.listQueues();
+        const memberships = await Promise.all(
+          list.map((queue) => api.listQueueArchives(queue.id)),
+        );
+        if (cancelled) return;
+        setQueues(list);
+        setQueueMemberIds(
+          list
+            .filter((_, index) => memberships[index].includes(card.id))
+            .map((queue) => queue.id),
+        );
+      } catch {
+        if (!cancelled) {
+          setQueues([]);
+          setQueueMemberIds([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [card.id]);
 
   const tagSuggestions = useMemo(() => {
     const query = tagInput.trim().replace(/^#/, "").toLowerCase();
@@ -398,6 +438,32 @@ export default function DetailDrawer({
       onNotify(`移除标签失败：${String(error)}`, "error");
     } finally {
       setTagBusy(false);
+    }
+  }
+
+  /** 加入/移出待看目录（点亮 = 已加入）。 */
+  async function toggleQueue(queue: Queue) {
+    if (queueBusyId !== null) return;
+    const member = queueMemberIds.includes(queue.id);
+    setQueueBusyId(queue.id);
+    try {
+      if (member) {
+        await api.removeFromQueue(queue.id, card.id);
+        setQueueMemberIds((previous) =>
+          previous.filter((id) => id !== queue.id),
+        );
+        onNotify(`已移出「${queue.name}」`, "success");
+      } else {
+        await api.addToQueue(queue.id, card.id);
+        setQueueMemberIds((previous) =>
+          previous.includes(queue.id) ? previous : [...previous, queue.id],
+        );
+        onNotify(`已加入「${queue.name}」`, "success");
+      }
+    } catch (error) {
+      onNotify(`更新待看目录失败：${String(error)}`, "error");
+    } finally {
+      setQueueBusyId(null);
     }
   }
 
@@ -1038,6 +1104,44 @@ export default function DetailDrawer({
             </button>
           </form>
         </section>
+
+        {queues.length > 0 && (
+          <section className="meta-panel">
+            <div className="meta-panel-head">
+              <span>
+                <BookIcon width={14} height={14} />
+                待看目录
+              </span>
+              <span className="meta-hint">
+                {queueMemberIds.length > 0
+                  ? `已加入 ${queueMemberIds.length} 个`
+                  : "未加入"}
+              </span>
+            </div>
+
+            <div className="collection-toggles">
+              {queues.map((queue) => {
+                const active = queueMemberIds.includes(queue.id);
+                return (
+                  <button
+                    key={queue.id}
+                    type="button"
+                    className={`collection-toggle${active ? " is-active" : ""}`}
+                    onClick={() => void toggleQueue(queue)}
+                    disabled={queueBusyId !== null}
+                    title={active ? "点击移出该目录" : "点击加入该目录"}
+                  >
+                    <span className="collection-check">
+                      {active && <CheckIcon width={12} height={12} />}
+                    </span>
+                    <span className="collection-name">{queue.name}</span>
+                    <span className="collection-count">{queue.count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         <dl className="detail-list">
           <div>

@@ -418,6 +418,53 @@ pub fn delete_queue(conn: &Connection, queue_id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// 手动把单本画集加入待看目录。
+///
+/// 返回是否真的新增（重复加入不算错误，返回 false）。目录与画集都必须
+/// 有效：目录要存在，画集要存在且不在回收站——否则加权挑选会把它算进
+/// 进度统计造成「已读完」虚高。
+pub fn add_to_queue(conn: &Connection, queue_id: i64, archive_id: i64) -> Result<bool, String> {
+    let queue_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM queues WHERE id = ?1",
+            [queue_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询待看目录失败: {e}"))?;
+    if queue_exists == 0 {
+        return Err("待看目录不存在".to_string());
+    }
+
+    let archive_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archives WHERE id = ?1 AND deleted_at IS NULL",
+            [archive_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询画集失败: {e}"))?;
+    if archive_exists == 0 {
+        return Err("画集不存在或已在回收站".to_string());
+    }
+
+    let changed = conn
+        .execute(
+            "INSERT OR IGNORE INTO queue_archives(queue_id, archive_id, added_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![queue_id, archive_id, crate::fsutil::now_ms()],
+        )
+        .map_err(|e| format!("加入待看目录失败: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// 手动把单本画集移出待看目录。目录里本来就没有它不算错误（幂等）。
+pub fn remove_from_queue(conn: &Connection, queue_id: i64, archive_id: i64) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM queue_archives WHERE queue_id = ?1 AND archive_id = ?2",
+        rusqlite::params![queue_id, archive_id],
+    )
+    .map_err(|e| format!("移出待看目录失败: {e}"))?;
+    Ok(())
+}
+
 /// 取待看目录里的成员，按加入顺序。
 pub fn queue_archives(
     conn: &Connection,

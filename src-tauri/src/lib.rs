@@ -1099,6 +1099,34 @@ async fn delete_queue(state: State<'_, AppState>, queue_id: i64) -> Result<(), S
 }
 
 #[tauri::command]
+async fn add_to_queue(
+    state: State<'_, AppState>,
+    queue_id: i64,
+    archive_id: i64,
+) -> Result<bool, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            queue::add_to_queue(&library.conn, queue_id, archive_id)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_from_queue(
+    state: State<'_, AppState>,
+    queue_id: i64,
+    archive_id: i64,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            queue::remove_from_queue(&library.conn, queue_id, archive_id)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 async fn list_queue_archives(
     state: State<'_, AppState>,
     queue_id: i64,
@@ -1329,6 +1357,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             list_queues,
             fill_queue,
             delete_queue,
+            add_to_queue,
+            remove_from_queue,
             list_queue_archives,
             set_tag_weight,
             get_release_state,

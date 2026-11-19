@@ -2402,3 +2402,61 @@ fn search_matches_tag_translated_names() {
     db::add_tag(&context.conn, city, "Landscape").unwrap();
     assert_eq!(search("风景摄影"), 1, "重挂标签后译名搜索应恢复");
 }
+
+#[test]
+fn queue_manual_add_and_remove() {
+    use crate::fsutil;
+    use crate::queue;
+
+    let fixture = Fixture::new();
+    write_zip(&fixture.source.join("A.cbz"), &["a.png"], 7u8);
+    let inputs = archive_files(&fixture.source);
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        inputs,
+        ImportOptions::default(),
+        |_| {},
+    );
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let archive_id = page.items[0].id;
+
+    context
+        .conn
+        .execute(
+            "INSERT INTO queues(name, created_at) VALUES ('手动目录', ?1)",
+            [fsutil::now_ms()],
+        )
+        .unwrap();
+    let queue_id = context.conn.last_insert_rowid();
+
+    // 正常加入 → 重复加入幂等返回 false
+    assert!(queue::add_to_queue(&context.conn, queue_id, archive_id).unwrap());
+    assert!(!queue::add_to_queue(&context.conn, queue_id, archive_id).unwrap());
+    assert_eq!(
+        queue::queue_archives(&context.conn, queue_id).unwrap(),
+        vec![archive_id]
+    );
+
+    // 目录不存在 / 画集不存在（用不存在的 id 冒充）都要报错
+    assert!(queue::add_to_queue(&context.conn, 9999, archive_id).is_err());
+    assert!(queue::add_to_queue(&context.conn, queue_id, 424242).is_err());
+
+    // 回收站里的画集不能加入
+    db::delete_archive(&context.conn, archive_id).unwrap();
+    assert!(queue::add_to_queue(&context.conn, queue_id, archive_id).is_err());
+
+    // 恢复后可以移出；重复移出幂等
+    db::restore_archive(&context.conn, archive_id).unwrap();
+    queue::remove_from_queue(&context.conn, queue_id, archive_id).unwrap();
+    assert!(queue::queue_archives(&context.conn, queue_id).unwrap().is_empty());
+    queue::remove_from_queue(&context.conn, queue_id, archive_id).unwrap();
+}
