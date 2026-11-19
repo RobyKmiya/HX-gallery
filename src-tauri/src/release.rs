@@ -160,9 +160,17 @@ pub fn record_published(app: &AppHandle, source_dir: &Path, version: &str) {
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
+    let mut command = std::process::Command::new("git");
+    command.args(args).current_dir(dir);
+    // 本程序是 GUI 子系统进程，不带 CREATE_NO_WINDOW 时每次拉起 git 都会
+    // 闪一个黑色控制台窗（「关窗自动发布」每 10 秒轮询一次，肉眼可见）。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("git 调用失败: {e}"))?;
     if !output.status.success() {
