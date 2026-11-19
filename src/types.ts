@@ -208,6 +208,16 @@ export interface ReleaseState {
   autoOnExit: boolean;
   relaunchAfter: boolean;
   status: ReleaseStatus;
+  /** 下次关窗是否会真的发布（有实质更新才发） */
+  readiness?: {
+    hasBaseline: boolean;
+    lastVersion: string;
+    lastHead: string;
+    currentHead: string;
+    dirty: boolean;
+    hasChanges: boolean;
+    reason: string;
+  };
 }
 
 export type SortDirection = "asc" | "desc";

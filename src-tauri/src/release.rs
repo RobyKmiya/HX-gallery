@@ -69,6 +69,19 @@ fn pending_file(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(release_dir(app)?.join("pending.json"))
 }
 
+fn published_file(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(release_dir(app)?.join("published.json"))
+}
+
+/// 上次成功发布时的源码基线。由 release.mjs 在发布成功后写入。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct PublishedState {
+    head: String,
+    version: String,
+    at: i64,
+}
+
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
     fs::read_to_string(path)
         .ok()
@@ -130,6 +143,152 @@ pub fn validate_source_dir(raw: &str) -> Result<PathBuf, String> {
 pub fn save_settings(app: &AppHandle, settings: &ReleaseSettings) -> Result<(), String> {
     let path = settings_file(app)?;
     write_json(&path, settings)
+}
+
+/// 发布完成后记录基线，供下次关窗判断是否值得再发一次。
+/// 由 Rust 侧在确认发布成功时调用（比 Node 侧写更可靠，路径统一在这里）。
+pub fn record_published(app: &AppHandle, source_dir: &Path, version: &str) {
+    let head = git_output(source_dir, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let state = PublishedState {
+        head: head.trim().to_string(),
+        version: version.to_string(),
+        at: crate::fsutil::now_ms(),
+    };
+    if let Ok(path) = published_file(app) {
+        let _ = write_json(&path, &state);
+    }
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("git 调用失败: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// 判断源码相对上次发布是否有「实质更新」。
+///
+/// 规则（管理员 2026-11-19 明确要求：关一次不等于更新一次）：
+/// - 从未成功发布过 → 视为有更新，允许首次发布（建立基线）；
+/// - 当前 HEAD 与上次发布记录的 HEAD 不同 → 有新提交 → 有更新；
+/// - HEAD 相同但工作区脏 → 有未提交的源码改动 → 有更新；
+/// - 其余 → 无实质更新，关窗应安静退出、不抬版本、不打包。
+///
+/// 保守原则：git 不可用 / 读不到基线时返回 true（宁可多发一次，不可漏发），
+/// 并且所有判断都只读，绝不修改仓库状态。
+pub fn has_source_changes(app: &AppHandle, settings: &ReleaseSettings) -> bool {
+    let Some(raw) = settings.source_dir.as_deref() else {
+        return false;
+    };
+    let Ok(source) = validate_source_dir(raw) else {
+        return false;
+    };
+
+    let baseline: PublishedState = published_file(app)
+        .map(|p| read_json(&p))
+        .unwrap_or_default();
+
+    let head = git_output(&source, &["rev-parse", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string());
+    let dirty = git_output(&source, &["status", "--porcelain"])
+        .ok()
+        .map(|s| !s.trim().is_empty());
+
+    decide_has_changes(&baseline.head, head.as_deref(), dirty)
+}
+
+/// 纯判断逻辑（可单测）。git 读不到时用 None 表示，按保守原则当成「有更新」。
+fn decide_has_changes(baseline_head: &str, head: Option<&str>, dirty: Option<bool>) -> bool {
+    // 从未发布过：允许这次发布（并建立基线）
+    if baseline_head.is_empty() {
+        return true;
+    }
+    // git 不可用 → 保守，允许发布
+    let Some(head) = head else { return true };
+    if head != baseline_head {
+        return true;
+    }
+    // HEAD 相同，看工作区；读不到也保守当成脏
+    dirty.unwrap_or(true)
+}
+
+/// 应用启动时调用：上次发布成功过，就把「当前 HEAD + 当时版本」记为基线。
+///
+/// 时机选在启动而非发布脚本末尾，是因为发布完成那一刻 exe 正在被替换、
+/// Node 侧拿到的 git 状态未必稳定；而用户下次打开画匣时，仓库 HEAD 正是刚发布的那次提交。
+/// 只补记一次（published.json 的 version 与 status 的 lastResult 对应版本不同才写）。
+pub fn settle_baseline_after_success(app: &AppHandle) {
+    let status = load_status(app);
+    if status.last_result != "success" || status.last_at <= 0 {
+        return;
+    }
+    let Some(raw) = load_settings(app).source_dir else {
+        return;
+    };
+    let Ok(source) = validate_source_dir(&raw) else {
+        return;
+    };
+    let current: PublishedState = published_file(app)
+        .map(|p| read_json(&p))
+        .unwrap_or_default();
+    // 已记录过这次发布（版本号一致）就不重复写，避免把用户后续的新提交误记为已发布
+    if current.version == read_pkg_version(&source) && !current.head.is_empty() {
+        return;
+    }
+    record_published(app, &source, &read_pkg_version(&source));
+}
+
+fn read_pkg_version(source: &Path) -> String {
+    fs::read_to_string(source.join("package.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// 供 UI 展示：把判断结果连同原因返回，让用户看得见「为什么不更新」。
+pub fn release_readiness(app: &AppHandle, settings: &ReleaseSettings) -> serde_json::Value {
+    let baseline: PublishedState = published_file(app)
+        .map(|p| read_json(&p))
+        .unwrap_or_default();
+    let head = settings.source_dir.as_deref()
+        .and_then(|raw| validate_source_dir(raw).ok())
+        .and_then(|src| git_output(&src, &["rev-parse", "HEAD"]).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let dirty = settings.source_dir.as_deref()
+        .and_then(|raw| validate_source_dir(raw).ok())
+        .and_then(|src| git_output(&src, &["status", "--porcelain"]).ok())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let changed = has_source_changes(app, settings);
+    serde_json::json!({
+        "hasBaseline": !baseline.head.is_empty(),
+        "lastVersion": baseline.version,
+        "lastHead": baseline.head,
+        "currentHead": head,
+        "dirty": dirty,
+        "hasChanges": changed,
+        "reason": if !settings.auto_on_exit {
+            "自动更新未开启"
+        } else if baseline.head.is_empty() {
+            "尚无发布基线，下次关闭将发布一次作为基线"
+        } else if !head.is_empty() && head != baseline.head {
+            "源码有新提交"
+        } else if dirty {
+            "源码有未提交改动"
+        } else if changed {
+            "检测到源码变化"
+        } else {
+            "自上次发布以来源码无变化，关窗不会更新"
+        },
+    })
 }
 
 /// rust 侧生成的 node 助手脚本：负责 UTF-8 日志追加、状态写入、以及**用中文路径
@@ -393,5 +552,38 @@ pub fn launch_detached(script: &Path) -> Result<(), String> {
     {
         let _ = script;
         Err("当前平台不支持退出后自动发布".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decide_has_changes;
+
+    #[test]
+    fn no_baseline_allows_first_release() {
+        // 从没发布过：第一次关窗应该允许发布并建立基线
+        assert!(decide_has_changes("", Some("abc123"), Some(false)));
+    }
+
+    #[test]
+    fn new_commit_means_update() {
+        assert!(decide_has_changes("oldhead", Some("newhead"), Some(false)));
+    }
+
+    #[test]
+    fn dirty_tree_means_update() {
+        assert!(decide_has_changes("samehead", Some("samehead"), Some(true)));
+    }
+
+    #[test]
+    fn clean_and_same_head_means_no_update() {
+        // 核心：关一次不等于更新一次——这正是管理员反馈的 bug
+        assert!(!decide_has_changes("samehead", Some("samehead"), Some(false)));
+    }
+
+    #[test]
+    fn git_unavailable_is_conservative() {
+        assert!(decide_has_changes("samehead", None, Some(false)));
+        assert!(decide_has_changes("samehead", Some("samehead"), None));
     }
 }

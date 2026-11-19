@@ -1189,6 +1189,7 @@ fn get_release_state(app: AppHandle) -> serde_json::Value {
         "autoOnExit": settings.auto_on_exit,
         "relaunchAfter": settings.relaunch_after,
         "status": status,
+        "readiness": release::release_readiness(&app, &settings),
     })
 }
 
@@ -1225,6 +1226,7 @@ fn save_release_settings(
         "autoOnExit": settings.auto_on_exit,
         "relaunchAfter": settings.relaunch_after,
         "status": status,
+        "readiness": release::release_readiness(&app, &settings),
     }))
 }
 
@@ -1299,6 +1301,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .plugin(tauri_plugin_opener::init())
         .register_uri_scheme_protocol("gallery", asset_protocol::serve)
         .setup(move |app| {
+            // 上次发布成功后补记基线：之后关窗不会再无脑抬版本
+            release::settle_baseline_after_success(app.handle());
             let state = AppState::new(app.handle());
             app.manage(state);
             // 守卫交给 Tauri 托管，活到进程结束；提前 drop 会立刻放开互斥体。
@@ -1374,7 +1378,12 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let app = window.app_handle();
                 let settings = release::load_settings(app);
-                if settings.auto_on_exit && settings.source_dir.is_some() {
+                // 只有源码相对上次发布真的有变化才发布。
+                // 否则「关一次 = 更新一次」，没实质内容也抬版本号（管理员 2026-11-19 反馈）。
+                if settings.auto_on_exit
+                    && settings.source_dir.is_some()
+                    && release::has_source_changes(app, &settings)
+                {
                     match release::schedule_of(app, &settings) {
                         Ok((script, _)) => {
                             if let Err(error) =
@@ -1387,6 +1396,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                         }
                         Err(error) => eprintln!("安排退出后发布失败: {error}"),
                     }
+                } else if settings.auto_on_exit {
+                    eprintln!("源码无实质更新，正常退出（不发布、不抬版本）");
                 }
             }
         })

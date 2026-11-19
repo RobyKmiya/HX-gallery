@@ -5839,6 +5839,30 @@ svg {
   font-weight: 600;
 }
 
+.release-readiness {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 10px 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.release-readiness strong {
+  font-size: 12.5px;
+}
+
+.release-readiness.ready {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.release-readiness.idle {
+  color: var(--text-muted, #6b7280);
+}
+
 .release-result {
   margin: 4px 0 0;
   font-size: 12.5px;

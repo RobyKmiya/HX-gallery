@@ -207,12 +207,22 @@ export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
                     }
                   />
                   <span>
-                    <strong>关闭画匣时自动更新</strong>
+                    <strong>源码有更新时，关闭画匣自动安装</strong>
                     <span className="queue-hint">
-                      关窗后脚本接手：等进程退出 → 构建 → 安装新版 → 按下面设置决定是否重开。
+                      只有源码相对上次发布有实质变化（新提交或未提交改动）才会构建安装；没变化就是普通关闭，不抬版本、不打包。
                     </span>
                   </span>
                 </label>
+
+                {state.autoOnExit && state.readiness && (
+                  <div
+                    className={`queue-hint release-readiness ${state.readiness.hasChanges ? "ready" : "idle"}`}
+                    title={state.readiness.reason}
+                  >
+                    <strong>{state.readiness.hasChanges ? "下次关闭将更新" : "下次关闭不会更新"}</strong>
+                    <span>{state.readiness.reason}</span>
+                  </div>
+                )}
 
                 <label className="release-toggle">
                   <input
