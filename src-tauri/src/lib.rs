@@ -1306,7 +1306,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         }
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .register_uri_scheme_protocol("gallery", asset_protocol::serve)
@@ -1387,51 +1387,53 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             // 放在窗口事件而不是 ExitRequested：后者在 app.exit() 时也会触发，
             // 容易和「面板里点更新」那条路径重复安排。
             //
-            // 性能注意（管理员 2026-11-19 反馈「关窗卡好一会，不能秒关」）：
-            // 判断「源码有没有实质变化」要跑两条 git（各起一个子进程），
-            // 再加上生成脚本、用 explorer 拉起隐藏启动器，全在主线程上做，
-            // 窗口就得等这些事干完才消失。所以这里**先把窗口藏掉**（用户看到的是秒关），
-            // 判断与排期全部丢到后台线程，干完再退出进程；
-            // 另配一个 6 秒看门狗，后台万一卡住也不会留下「没窗口的僵尸进程」占着单实例锁。
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // 性能纪律（管理员 2026-11-19 反馈「窗口停几秒才消失」）：
+            // 这段代码跑完，窗口才会真正消失。所以这里只允许做「读内存 + 写几个小文件」：
+            //   1. 先把窗口藏掉（后面无论多慢，用户都已经看到关掉了）；
+            //   2. 有没有更新读后台缓存（`release::cached_has_changes`），绝不现跑 git；
+            //   3. 拉起脚本走 wscript 直出，不再用 explorer（shell 激活会卡好几秒）。
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if window.label() != "main" {
                     return;
                 }
-                let close_started = std::time::Instant::now();
+                let started = std::time::Instant::now();
                 let app = window.app_handle().clone();
                 let settings = release::load_settings(&app);
-                release::log_close_timing(&app, "进入关闭处理", close_started.elapsed());
-                // 没开自动发布、或没登记源码目录：不需要任何收尾，正常关闭即可。
                 if !settings.auto_on_exit || settings.source_dir.is_none() {
                     return;
                 }
-                // 还有别的窗口（比如 D2 浏览器窗口）在开：先只关主窗，不退出进程，
+                // 还有别的窗口（比如 D2 浏览器窗口）在开：只关主窗，不退出进程，
                 // 避免把正在进行的事一起杀掉。
                 if app.webview_windows().len() > 1 {
                     return;
                 }
 
-                api.prevent_close();
                 let _ = window.hide();
-                release::log_close_timing(&app, "窗口已隐藏", close_started.elapsed());
+                release::log_close_timing(&app, "窗口已隐藏", started.elapsed());
 
-                let guard = app.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(6));
-                    let _ = guard.exit(0);
-                });
-
-                let worker = app.clone();
-                std::thread::spawn(move || {
-                    release::run_exit_release(&worker, &settings);
-                    release::log_close_timing(&worker, "发布判断结束，准备退出", close_started.elapsed());
-                    let _ = worker.exit(0);
-                });
+                match release::cached_has_changes() {
+                    Some(true) => release::schedule_release_now(&app, &settings),
+                    Some(false) => {}
+                    // 缓存还没算出来（刚启动就关）：退回现算，此时窗口已经藏了，卡也看不见。
+                    None => release::run_exit_release(&app, &settings),
+                }
+                release::log_close_timing(&app, "关闭处理完成", started.elapsed());
+            }
+            // 从编辑器切回来（大概刚提交完代码）：补算一次「有没有更新」缓存，
+            // 免得 10 秒轮询还没跑到、关窗时用到旧结果。
+            if let tauri::WindowEvent::Focused(true) = event {
+                if window.label() == "main" {
+                    release::refresh_changes_cache_in_background(window.app_handle().clone());
+                }
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|_app, _event| {});}
+        .expect("error while building tauri application");
+
+    // 后台每 10 秒算一次「源码有没有更新」，关窗时只读缓存，不再现跑 git。
+    release::spawn_changes_watcher(app.handle().clone());
+    app.run(|_app, _event| {});
+}
 
 #[cfg(test)]
 mod tests;

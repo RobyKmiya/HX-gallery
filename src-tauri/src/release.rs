@@ -224,6 +224,75 @@ pub fn log_close_timing(app: &AppHandle, stage: &str, elapsed: std::time::Durati
     }
 }
 
+/// 「源码有没有实质更新」的关窗缓存。
+///
+/// 关窗路径上不能现跑 git：一条 `rev-parse` + 一条 `status --porcelain`，再加上拉起脚本，
+/// 会让窗口多留几百毫秒到几秒（管理员 2026-11-19 反馈「窗口停几秒才消失」）。
+/// 改成后台线程定期算好，关窗只读一个原子变量。
+///
+/// 取值：0 = 还没算出来，1 = 无更新，2 = 有更新。
+static CHANGES_CACHE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
+/// 上一次补算的时间戳（毫秒），避免焦点事件密集时狂起线程。
+static LAST_REFRESH_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 关窗时读缓存；`None` 表示后台还没来得及算（极少数：刚启动就关）。
+pub fn cached_has_changes() -> Option<bool> {
+    use std::sync::atomic::Ordering;
+    match CHANGES_CACHE.load(Ordering::Relaxed) {
+        0 => None,
+        1 => Some(false),
+        _ => Some(true),
+    }
+}
+
+/// 立刻算一次并写进缓存（只该在后台线程调用：内部会起 git 子进程）。
+pub fn refresh_changes_cache(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    let settings = load_settings(app);
+    let value = if settings.auto_on_exit
+        && settings.source_dir.is_some()
+        && has_source_changes(app, &settings)
+    {
+        2
+    } else {
+        1
+    };
+    CHANGES_CACHE.store(value, Ordering::Relaxed);
+}
+
+/// 启动时挂上：每 10 秒刷新一次缓存，让关窗永远不用等 git。
+///
+/// 代价是关窗判断最多滞后 10 秒；从编辑器回来刚提交完代码时，主窗获得焦点还会补算一次。
+pub fn spawn_changes_watcher(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        refresh_changes_cache(&app);
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    });
+}
+
+/// 补算一次（3 秒内只算一次），供窗口获得焦点时调用。
+pub fn refresh_changes_cache_in_background(app: AppHandle) {
+    use std::sync::atomic::Ordering;
+    let now = crate::fsutil::now_ms();
+    let last = LAST_REFRESH_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 3_000 {
+        return;
+    }
+    LAST_REFRESH_MS.store(now, Ordering::Relaxed);
+    std::thread::spawn(move || refresh_changes_cache(&app));
+}
+
+/// 关窗时把发布脚本排好并拉起（调用方已用缓存判断过，这里不再碰 git）。
+pub fn schedule_release_now(app: &AppHandle, settings: &ReleaseSettings) {
+    match schedule_of(app, settings) {
+        Ok((script, _)) => match launch_detached(Path::new(&script)) {
+            Ok(()) => eprintln!("已安排退出后自动发布"),
+            Err(error) => eprintln!("安排退出后发布失败: {error}"),
+        },
+        Err(error) => eprintln!("安排退出后发布失败: {error}"),
+    }
+}
+
 /// 退出前的收尾：判断源码有没有实质更新，有就把发布脚本排好并拉起。
 ///
 /// 调用方保证**只能在后台线程调用**：这里会起 git 子进程、写脚本、用 explorer
@@ -571,17 +640,41 @@ pub fn schedule_of(app: &AppHandle, settings: &ReleaseSettings) -> Result<(Strin
     ))
 }
 
-/// 用 explorer.exe 拉起**隐藏启动器**（`release-on-exit.vbs`，由 `schedule_of`
-/// 生成），再由它以隐藏窗口跑真正的 `.cmd`。
+/// 拉起**隐藏启动器**（`release-on-exit.vbs`），再由它以隐藏窗口跑真正的 `.cmd`。
+///
+/// 两条路，按「别卡关窗」优先：
+/// 1. 直接 `wscript.exe` + `DETACHED_PROCESS | CREATE_NO_WINDOW`：不弹窗、
+///    与本进程脱钩、CreateProcess 基本立刻返回；
+/// 2. 兜底 `explorer.exe <vbs>`：父进程变成资源管理器，最稳，但 explorer 要做一次
+///    shell 激活，机器忙时能把调用方卡住好几秒——这正是「关窗停几秒才消失」的来源，
+///    所以只当兜底。
 ///
 /// 不能直接 `Command::new("cmd").spawn()`：那样脚本是本进程的子进程，
 /// 本进程退出时它可能被一起带走（进程组/作业对象），而这脚本的第一件事正是
-/// 等本进程退出。交给 explorer 启动，父进程变成资源管理器，与本进程彻底脱钩；
-/// 也不能让 explorer 直接拉 `.cmd`——控制台窗口会整个发布期间挂在桌面上。
+/// 等本进程退出。
 pub fn launch_detached(script: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
         let launcher = script.with_extension("vbs");
+        let base = CREATE_NO_WINDOW | DETACHED_PROCESS;
+        // 带 BREAKAWAY 更彻底；某些作业对象不允许 breakout 会直接失败，那就退回不带它。
+        for flags in [base | CREATE_BREAKAWAY_FROM_JOB, base] {
+            if std::process::Command::new("wscript.exe")
+                .arg(&launcher)
+                .creation_flags(flags)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
         std::process::Command::new("explorer.exe")
             .arg(&launcher)
             .spawn()
