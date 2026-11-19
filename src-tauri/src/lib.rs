@@ -1245,12 +1245,21 @@ fn schedule_release(app: AppHandle) -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn quit_for_release(app: AppHandle) -> Result<(), String> {
     let settings = release::load_settings(&app);
+    // 排期只是写几个小文件，同步做掉即可（出错还能回给前端）。
     let (script, _) = release::schedule_of(&app, &settings)?;
-    release::launch_detached(std::path::Path::new(&script))?;
 
-    // 给脚本一点时间启动，然后退出。脚本那边还会再等一次进程消失。
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    app.exit(0);
+    // 拉起脚本和退出放后台：explorer 启动 + 400ms 等待都别卡在窗口上，
+    // 先把主窗藏掉，用户看到的就是「点了就关」（与关窗同一条体验要求）。
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let _ = release::launch_detached(std::path::Path::new(&script));
+        // 给脚本一点时间启动，然后退出。脚本那边还会再等一次进程消失。
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = handle.exit(0);
+    });
     Ok(())
 }
 
@@ -1377,30 +1386,43 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             // 关闭窗口时，如果用户开着「退出后自动发布」，就在这里把脚本排好并拉起。
             // 放在窗口事件而不是 ExitRequested：后者在 app.exit() 时也会触发，
             // 容易和「面板里点更新」那条路径重复安排。
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                let app = window.app_handle();
-                let settings = release::load_settings(app);
-                // 只有源码相对上次发布真的有变化才发布。
-                // 否则「关一次 = 更新一次」，没实质内容也抬版本号（管理员 2026-11-19 反馈）。
-                if settings.auto_on_exit
-                    && settings.source_dir.is_some()
-                    && release::has_source_changes(app, &settings)
-                {
-                    match release::schedule_of(app, &settings) {
-                        Ok((script, _)) => {
-                            if let Err(error) =
-                                release::launch_detached(std::path::Path::new(&script))
-                            {
-                                eprintln!("安排退出后发布失败: {error}");
-                            } else {
-                                eprintln!("已安排退出后自动发布");
-                            }
-                        }
-                        Err(error) => eprintln!("安排退出后发布失败: {error}"),
-                    }
-                } else if settings.auto_on_exit {
-                    eprintln!("源码无实质更新，正常退出（不发布、不抬版本）");
+            //
+            // 性能注意（管理员 2026-11-19 反馈「关窗卡好一会，不能秒关」）：
+            // 判断「源码有没有实质变化」要跑两条 git（各起一个子进程），
+            // 再加上生成脚本、用 explorer 拉起隐藏启动器，全在主线程上做，
+            // 窗口就得等这些事干完才消失。所以这里**先把窗口藏掉**（用户看到的是秒关），
+            // 判断与排期全部丢到后台线程，干完再退出进程；
+            // 另配一个 6 秒看门狗，后台万一卡住也不会留下「没窗口的僵尸进程」占着单实例锁。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
                 }
+                let app = window.app_handle().clone();
+                let settings = release::load_settings(&app);
+                // 没开自动发布、或没登记源码目录：不需要任何收尾，正常关闭即可。
+                if !settings.auto_on_exit || settings.source_dir.is_none() {
+                    return;
+                }
+                // 还有别的窗口（比如 D2 浏览器窗口）在开：先只关主窗，不退出进程，
+                // 避免把正在进行的事一起杀掉。
+                if app.webview_windows().len() > 1 {
+                    return;
+                }
+
+                api.prevent_close();
+                let _ = window.hide();
+
+                let guard = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                    let _ = guard.exit(0);
+                });
+
+                let worker = app.clone();
+                std::thread::spawn(move || {
+                    release::run_exit_release(&worker, &settings);
+                    let _ = worker.exit(0);
+                });
             }
         })
         .build(tauri::generate_context!())

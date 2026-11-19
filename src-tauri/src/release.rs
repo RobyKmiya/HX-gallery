@@ -203,6 +203,25 @@ pub fn has_source_changes(app: &AppHandle, settings: &ReleaseSettings) -> bool {
     decide_has_changes(&baseline.head, head.as_deref(), dirty)
 }
 
+/// 退出前的收尾：判断源码有没有实质更新，有就把发布脚本排好并拉起。
+///
+/// 调用方保证**只能在后台线程调用**：这里会起 git 子进程、写脚本、用 explorer
+/// 拉起隐藏启动器，全在主线程上做会让窗口消失得慢半拍
+/// （管理员 2026-11-19 反馈「关窗卡好一会，不能秒关」）。
+pub fn run_exit_release(app: &AppHandle, settings: &ReleaseSettings) {
+    if !has_source_changes(app, settings) {
+        eprintln!("源码无实质更新，正常退出（不发布、不抬版本）");
+        return;
+    }
+    match schedule_of(app, settings) {
+        Ok((script, _)) => match launch_detached(Path::new(&script)) {
+            Ok(()) => eprintln!("已安排退出后自动发布"),
+            Err(error) => eprintln!("安排退出后发布失败: {error}"),
+        },
+        Err(error) => eprintln!("安排退出后发布失败: {error}"),
+    }
+}
+
 /// 纯判断逻辑（可单测）。git 读不到时用 None 表示，按保守原则当成「有更新」。
 fn decide_has_changes(baseline_head: &str, head: Option<&str>, dirty: Option<bool>) -> bool {
     // 从未发布过：允许这次发布（并建立基线）
