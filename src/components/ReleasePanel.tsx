@@ -68,7 +68,7 @@ export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
       await persist({
         sourceDir: selected,
         autoOnExit: state?.autoOnExit ?? false,
-        relaunchAfter: state?.relaunchAfter ?? true,
+        relaunchAfter: state?.relaunchAfter ?? false,
       });
       onNotify("源码目录已设置", "success");
     } catch (error) {
@@ -240,7 +240,7 @@ export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
                   <span>
                     <strong>更新完成后自动重新打开画匣</strong>
                     <span className="queue-hint">
-                      不勾的话，更新完就停在那儿，你自己再打开。
+                      默认不勾——更新完就彻底关闭，需要时你自己打开。只有勾选后才会在装好后自动重开。
                     </span>
                   </span>
                 </label>
