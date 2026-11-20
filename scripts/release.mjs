@@ -99,6 +99,11 @@ function writeProgress(extra = {}) {
   }
 }
 
+// 版本号提升到模块作用域：step() 里的进度上报要读它。
+// 原先 next 是 try 块里的 const，step() 在模块顶层访问不到，
+// 一跑到第一个 step 就 `next is not defined`（2026-11-20 实测）。
+let next;
+
 function step(title, expectedSec, fn) {
   if (!dryRun) {
     writeProgress({
@@ -199,7 +204,7 @@ function runNpm(script) {
 
 try {
 const current = readVersion();
-const next = explicitVersion ?? bump(current, bumpKind);
+next = explicitVersion ?? bump(current, bumpKind);
 
 if (explicitVersion && !/^\d+\.\d+\.\d+$/.test(explicitVersion)) {
   console.error(`版本号格式应为 x.y.z，收到：${explicitVersion}`);

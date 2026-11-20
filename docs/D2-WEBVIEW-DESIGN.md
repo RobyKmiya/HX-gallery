@@ -73,8 +73,14 @@ flowchart TB
 - 使用 `WebviewWindow` 打开独立浏览窗口，独立用户数据目录（profile），与画匣主 UI、真实库物理隔离。
 - 创建时注入初始化脚本（具体 API 以 Tauri v2 `WebviewWindowBuilder::initialization_script` 为准）。
 - 提供地址栏、前进/后退/刷新、缩放、开发者工具开关（仅 debug 构建）。
-- 导航白名单：仅允许首批 6 个站点及其图片 CDN 域名；其他域名弹窗询问或直接拦截。
+- 导航自由：**不设域名白名单**。站点地址灵活多变（镜像、临时域名、登录跳转域名），白名单只会把人挡在登录页外面（2026-11-20 管理员实测：连 exhentai 登录界面都进不去，见 §3.1 注）。安全性靠 IPC 白名单 + profile 隔离，不靠限制可访问 URL。
 - 所有站点内下载请求拦截后转 IPC，不由 WebView 直接写磁盘。
+
+> **§3.1 注（2026-11-20 修正）**：原设计「仅允许首批 6 个站点」作废。实测 exhentai 未登录会 302 到
+> `https://forums.e-hentai.org/remoteapi.php?ex=...` → `https://exhentai.org/?poni=no` 并渲染纯白页。
+> 登录链路本身就跨了 `exhentai.org` / `forums.e-hentai.org` / `e-hentai.org` 三个域，白名单必然把人锁在门外。
+> 现在的做法：浏览不限域名（`d2_open`），只有「抓取」受解析器覆盖范围限制（目前 exhentai / e-hentai），
+> 两件事解耦。空白页会在 10 秒后主动提示「先登录 e-hentai」。
 
 ### 3.2 脚本运行时与 GM 垫片
 注入脚本提供以下 API（对齐 Comic Looms 用法）：
