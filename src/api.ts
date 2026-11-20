@@ -44,6 +44,20 @@ export const api = {
   /** 取消当前抓取并关掉浏览窗口。 */
   d2Cancel: () => invoke<void>("d2_cancel"),
 
+  /**
+   * 打开 / 导航浏览窗口，**不抓取**。
+   *
+   * 没有域名白名单：站点地址灵活多变，硬编码只会把人挡在登录页外面。
+   * 能不能抓由解析器决定，和能不能浏览是两件事。
+   */
+  d2Open: (url: string) => invoke<void>("d2_open", { url }),
+
+  /** 浏览窗口：后退 / 前进 / 刷新 / 关闭。 */
+  d2Back: () => invoke<void>("d2_back"),
+  d2Forward: () => invoke<void>("d2_forward"),
+  d2Reload: () => invoke<void>("d2_reload"),
+  d2CloseWindow: () => invoke<void>("d2_close_window"),
+
   /** 导入前的暂存：展开路径、给出大小 / 页数 / 疑似重复，不做任何复制。 */
   stageImportPaths: (paths: string[]) =>
     invoke<StageReport>("stage_import_paths", { paths }),

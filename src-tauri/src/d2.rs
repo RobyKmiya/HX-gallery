@@ -350,6 +350,7 @@ fn fetch_flow(
     let mut last_error = String::new();
     let mut parsed_payload: Option<PagePayload> = None;
     let mut parse_kicked = false;
+    let mut blank_checked = false;
 
     loop {
         if CANCELLED.load(Ordering::SeqCst) {
@@ -374,6 +375,29 @@ fn fetch_flow(
         }
         if PAGE_READY.load(Ordering::SeqCst) {
             PARSE_STARTED.store(true, Ordering::SeqCst);
+        }
+
+        // 空白页诊断：exhentai 未登录会 302 到 `?poni=no` 然后显示纯白，
+        // 用户看到的就是「连登录界面都打不开」。与其干等 3 分钟，不如当场说清楚。
+        if !PAGE_READY.load(Ordering::SeqCst)
+            && !blank_checked
+            && started.elapsed() > Duration::from_secs(10)
+        {
+            blank_checked = true;
+            if let Ok(info) = eval_json(
+                &window,
+                "JSON.stringify({h:location.href,n:(document.body?document.body.innerText.trim().length:0)})",
+                Duration::from_secs(3),
+            ) {
+                log(app, &format!("页面状态：{info}"));
+                if info.contains("poni=no") || info.contains("\"n\":0") {
+                    status(
+                        app,
+                        "当前页面是空白。exhentai 未登录一定白屏：请先用上方「登录 e-hentai」，\
+                         登录成功后再回到 exhentai。",
+                    );
+                }
+            }
         }
 
         let json = match eval_json(
@@ -489,12 +513,19 @@ pub fn d2_start(
     url: String,
 ) -> Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|_| "网址格式不正确".to_string())?;
-    if parsed.scheme() != "https" {
-        return Err("D2 只接受 https 网址".to_string());
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("请填写 http / https 网址".to_string());
     }
+    // 这里限制的是「解析器能力」，不是浏览权限：任意站点都能用 d2_open 打开，
+    // 但只有 exhentai / e-hentai 的详情页解析器写好了。
     let host = parsed.host_str().unwrap_or("");
-    if !host.eq_ignore_ascii_case("exhentai.org") && !host.eq_ignore_ascii_case("e-hentai.org") {
-        return Err("M1 目前只支持 exhentai.org / e-hentai.org".to_string());
+    let supported = host.eq_ignore_ascii_case("exhentai.org")
+        || host.eq_ignore_ascii_case("e-hentai.org");
+    if !supported {
+        return Err(format!(
+            "抓取暂时只支持 exhentai / e-hentai（{host} 的解析器还没写）。\
+             浏览不受限制——点上面的「打开」可以进任意站点。"
+        ));
     }
 
     let (root, library_id) = {
@@ -550,6 +581,118 @@ pub fn d2_start(
 #[tauri::command]
 pub fn d2_cancel() -> Result<(), String> {
     CANCELLED.store(true, Ordering::SeqCst);
+    close_window();
+    Ok(())
+}
+
+/// 补全并校验用户输入的网址（允许省略 https://）。
+fn normalize_url(raw: &str) -> Result<tauri::Url, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("网址不能为空".to_string());
+    }
+    let candidate = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let parsed = tauri::Url::parse(&candidate).map_err(|_| "网址格式不正确".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("只接受 http / https 网址".to_string());
+    }
+    Ok(parsed)
+}
+
+/// 在已开的浏览窗口上执行一小段脚本。
+fn with_window<F>(f: F) -> Result<(), String>
+where
+    F: FnOnce(&WebviewWindow) -> Result<(), String>,
+{
+    let guard = WINDOW.lock().map_err(|_| "浏览窗口状态异常".to_string())?;
+    match guard.as_ref() {
+        Some(window) => f(window),
+        None => Err("浏览窗口还没打开".to_string()),
+    }
+}
+
+/// 打开 / 导航到一个网址用于**浏览**（不是抓取）。
+///
+/// 不设域名白名单：站点地址千变万化，硬编码只会把用户挡在登录页外面
+/// （2026-11-20 管理员反馈「连登录界面都打不开，白名单太笨重」）。
+/// 是否可抓取由解析器决定，与能否浏览解耦。
+#[tauri::command]
+pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
+    let parsed = normalize_url(&url)?;
+
+    // 窗口还在：直接导航，不重建（保留登录态与历史）
+    if let Ok(mut guard) = WINDOW.lock() {
+        if let Some(window) = guard.as_ref() {
+            match window.navigate(parsed.clone()) {
+                Ok(()) => {
+                    log(&app, &format!("导航到 {parsed}"));
+                    return Ok(());
+                }
+                Err(_) => *guard = None, // 窗口已被用户关掉，下面重建
+            }
+        }
+    }
+
+    let label = format!("d2-browser-{}", uuid::Uuid::new_v4());
+    let app_for_window = app.clone();
+    let target = parsed.to_string();
+    // 建窗会阻塞，必须离开调用线程，命令本身立刻返回。
+    std::thread::spawn(move || {
+        status(&app_for_window, "正在打开浏览窗口…");
+        match build_window(&app_for_window, parsed, label) {
+            Ok(window) => {
+                if let Ok(mut guard) = WINDOW.lock() {
+                    *guard = Some(window);
+                }
+                log(&app_for_window, &format!("窗口已创建：{target}"));
+                status(&app_for_window, "窗口已打开，可以直接浏览。进入作品页后回来点「开始抓取」。");
+            }
+            Err(error) => {
+                log(&app_for_window, &format!("建窗失败：{error}"));
+                let _ = app_for_window.emit("d2://error", error);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 后退。
+#[tauri::command]
+pub fn d2_back() -> Result<(), String> {
+    with_window(|window| {
+        window
+            .eval("history.back()")
+            .map_err(|error| format!("后退失败：{error}"))
+    })
+}
+
+/// 前进。
+#[tauri::command]
+pub fn d2_forward() -> Result<(), String> {
+    with_window(|window| {
+        window
+            .eval("history.forward()")
+            .map_err(|error| format!("前进失败：{error}"))
+    })
+}
+
+/// 刷新。
+#[tauri::command]
+pub fn d2_reload() -> Result<(), String> {
+    with_window(|window| {
+        window
+            .eval("location.reload()")
+            .map_err(|error| format!("刷新失败：{error}"))
+    })
+}
+
+/// 关掉浏览窗口（不影响主界面）。
+#[tauri::command]
+pub fn d2_close_window() -> Result<(), String> {
     close_window();
     Ok(())
 }
