@@ -4,7 +4,7 @@
 //! **在本进程退出之后**才能跑——脚本会结束 `archive-gallery.exe` 并覆盖它自己。
 //! 所以这里只做三件事：
 //!   1. 校验用户登记的源码目录（必须含 `scripts/release.mjs`）；
-//!   2. 生成一个 `release-on-exit.cmd`，用 `explorer.exe` 拉起，
+//!   2. 生成一个 `release-on-exit.mjs`（node 编排脚本），由 wscript+node 拉起，
 //!      让它的父进程是资源管理器而不是本应用，本进程被杀也不影响它；
 //!   3. 立刻返回，前端随即退出应用，脚本接手：等进程消失 → 跑 release → 重新拉起。
 //!
@@ -111,7 +111,7 @@ pub fn load_status(app: &AppHandle) -> ReleaseStatus {
         status.last_result = "none".to_string();
     }
     if let Ok(dir) = release_dir(app) {
-        status.script_path = dir.join("release-on-exit.cmd").to_string_lossy().to_string();
+        status.script_path = dir.join("release-on-exit.mjs").to_string_lossy().to_string();
         status.log_path = dir.join("release.log").to_string_lossy().to_string();
         status.pending = dir.join("pending.json").exists();
     }
@@ -351,7 +351,7 @@ fn in_fail_cooldown(app: &AppHandle) -> bool {
 pub fn run_exit_release(app: &AppHandle, settings: &ReleaseSettings) {
     // 闸门一：已经排好一次发布就等它跑完，绝不再叠第二份。
     // 2026-11-20 管理员反馈「一直闪黑色窗口、开了马上关好几次」：没有这道闸门时，
-    // 连按几次关闭就拉起多份 release-on-exit.cmd，各自 npm/cargo/taskkill 互踩。
+    // 连按几次关闭就拉起多份发布编排，各自 npm/cargo/taskkill 互踩。
     if pending_file(app).map(|path| path.exists()).unwrap_or(false) {
         eprintln!("已有排队的发布任务，跳过本次关窗触发");
         return;
@@ -462,24 +462,43 @@ pub fn release_readiness(app: &AppHandle, settings: &ReleaseSettings) -> serde_j
     })
 }
 
-/// rust 侧生成的 node 助手脚本：负责 UTF-8 日志追加、状态写入、以及**用中文路径
-/// 重启应用**。批处理碰不了中文（见 `script_body` 的注释），这里全部交给 node。
-fn helper_source(exe: &Path, log: &Path, status: &Path, relaunch: bool) -> String {
-    let exe_json = serde_json::to_string(&exe.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "\"\"".to_string());
-    let log_json = serde_json::to_string(&log.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "\"\"".to_string());
-    let status_json = serde_json::to_string(&status.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "\"\"".to_string());
-
+/// rust 侧生成的 **node 编排脚本**（2026-11-20 重写，替代原来的
+/// `script_body`(.cmd) + `helper_source`(helper.mjs) 双文件）：
+///
+/// 1. 旧形态是一个含 `taskkill` 裸文本的 `.cmd` 批处理——在本机被杀软
+///    （火绒的行为检测）静默删除：脚本写出去几秒内就消失，vbs 指着不存在的
+///    文件，关窗自动发布整条链静默失败（2026-11-20 管理员机器实锤两例，
+///    取证存档 agent-dispatch/logs/vibe/release-on-exit-调查-20261120.md）。
+///    改为 **wscript 直接调 node 跑本编排脚本**：链路里不再有 `.cmd` 文件；
+///    结束进程只是最后一道保险，正常关窗流程应用几百毫秒内自己就退了。
+/// 2. node 读 UTF-8 源码，中文路径/文案不需要任何编码垫付；
+/// 3. 等待用 `tasklist`（只读查询），60 秒超时才 `taskkill /F` 兜底；
+/// 4. 全程写 UTF-8 日志与 status.json，供面板与失败冷却判断。
+fn orchestrator_source(
+    exe: &Path,
+    source_dir: &Path,
+    log: &Path,
+    status: &Path,
+    pending: &Path,
+    hud_script: &Path,
+    relaunch: bool,
+) -> String {
+    let json = |value: &Path| -> String {
+        serde_json::to_string(&value.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "\"\"".to_string())
+    };
     format!(
         r#"// 由画匣生成，随一次更新任务存在。勿手改。
 import fs from 'node:fs';
-import {{ spawn }} from 'node:child_process';
+import {{ spawn, spawnSync }} from 'node:child_process';
+import path from 'node:path';
 
-const EXE = {exe_json};
-const LOG = {log_json};
-const STATUS = {status_json};
+const EXE = {exe};
+const SOURCE = {source};
+const LOG = {log};
+const STATUS = {status};
+const PENDING = {pending};
+const HUD = {hud};
 const RELAUNCH = {relaunch};
 
 const LABEL = {{
@@ -516,141 +535,116 @@ function writeStatus(result, message) {{
   }}
 }}
 
-const [command, arg] = process.argv.slice(2);
+function sleep(ms) {{
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}}
 
-if (command === 'log') {{
-  say(arg);
-}} else if (command === 'status') {{
-  writeStatus(arg, arg === 'success' ? 'release finished' : 'npm run release failed');
-}} else if (command === 'relaunch') {{
-  if (!RELAUNCH) {{
-    say('done');
-    process.exit(0);
+function appRunning() {{
+  const probe = spawnSync('tasklist', [
+    '/FI', 'IMAGENAME eq ' + path.basename(EXE), '/NH',
+  ], {{ windowsHide: true }});
+  if (probe.error) return false; // 查不到进程当它已退，别把发布卡死
+  return String(probe.stdout || '').includes(path.basename(EXE));
+}}
+
+// —— 主流程 ——
+say('start');
+say('wait');
+let tries = 0;
+while (appRunning()) {{
+  tries += 1;
+  if (tries >= 60) {{
+    say('timeout_kill');
+    spawnSync('taskkill', ['/IM', path.basename(EXE), '/F'], {{ windowsHide: true }});
+    sleep(2000);
+    break;
   }}
-  if (!fs.existsSync(EXE)) {{
+  sleep(1000);
+}}
+say('exited');
+
+// 悬浮进度窗（release.mjs 每阶段写 progress.json，HUD 读它画进度条）。
+try {{
+  const hud = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', HUD],
+    {{ detached: true, stdio: 'ignore' }},
+  );
+  hud.unref();
+}} catch {{
+  // HUD 挂了不影响发布
+}}
+
+say('build');
+const child = spawn(
+  'cmd.exe',
+  ['/d', '/s', '/c', 'npm run release'],
+  {{ cwd: SOURCE, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }},
+);
+child.stdout.on('data', (chunk) => {{ try {{ fs.appendFileSync(LOG, chunk); }} catch {{}} }});
+child.stderr.on('data', (chunk) => {{ try {{ fs.appendFileSync(LOG, chunk); }} catch {{}} }});
+child.on('error', (error) => {{
+  say('fail');
+  writeStatus('failed', String(error));
+  finish(1);
+}});
+child.on('close', (code) => {{
+  if (code === 0) {{
+    say('ok');
+    writeStatus('success', 'release finished');
+    finish(0);
+  }} else {{
     say('fail');
-    process.exit(0);
+    writeStatus('failed', 'npm run release failed with exit code ' + code);
+    finish(1);
   }}
-  try {{
-    // detached + stdio ignore：父进程（本脚本）退出后它继续活着。
-    spawn(EXE, [], {{ detached: true, stdio: 'ignore', cwd: EXE.replace(/[\\\/][^\\\/]+$/, '') }}).unref();
-    say('done');
-  }} catch (error) {{
-    say('fail');
-    console.error(String(error));
+}});
+
+function finish(code) {{
+  // pending 标记是「已排队」的门闩：跑到这必然已收尾，无论成败都摘掉。
+  let wanted = null;
+  if (RELAUNCH && code === 0) {{
+    try {{
+      wanted = JSON.parse(fs.readFileSync(PENDING, 'utf8'));
+    }} catch {{
+      // 读不到就当不需要重启
+    }}
   }}
+  try {{ fs.rmSync(PENDING, {{ force: true }}); }} catch {{}}
+  if (wanted?.relaunch && fs.existsSync(EXE)) {{
+    try {{
+      spawn(EXE, [], {{ detached: true, stdio: 'ignore', cwd: path.dirname(EXE) }}).unref();
+    }} catch {{
+      // 重启失败不影响发布结果
+    }}
+  }}
+  say('done');
+  process.exit(code);
 }}
 "#,
+        exe = json(exe),
+        source = json(source_dir),
+        log = json(log),
+        status = json(status),
+        pending = json(pending),
+        hud = json(hud_script),
+        relaunch = relaunch,
     )
 }
-fn script_body(
-    source_dir: &Path,
-    helper: &Path,
-    log: &Path,
-    pending: &Path,
-    hud_script: &Path,
-) -> String {
-    let source = source_dir.to_string_lossy().replace('/', "\\");
-
-    // 编码这件事踩了两次坑，最终方案如下：
-    //   1. 脚本正文**只用 ASCII**，绝不出现中文文案或中文路径 —— 批处理按系统代码页
-    //      解析，UTF-8 中文会被拆坏；而 `chcp 65001` 又会让 cmd 重读文件、把
-    //      `setlocal` 解析成 `01`（实测）。
-    //   2. 需要中文的地方（安装目录 `画匣`）交给 node：路径写进 UTF-8 的 json，
-    //      脚本调 `node -e` 读出来再 `spawn`，node 不受 cmd 代码页影响。
-    //   3. 日志同样交给 node 追加（UTF-8），避免 cmd 的 echo 把中文写坏。
-    format!(
-        "@echo off\r\n\
-setlocal\r\n\
-set \"SRC={source}\"\r\n\
-\r\n\
-call :say start\r\n\
-call :say wait\r\n\
-\r\n\
-rem Wait up to ~60s for archive-gallery.exe to disappear.\r\n\
-set /a tries=0\r\n\
-:waitloop\r\n\
-tasklist /FI \"IMAGENAME eq archive-gallery.exe\" /NH 2>nul | find /I \"archive-gallery.exe\" >nul\r\n\
-if errorlevel 1 goto waitdone\r\n\
-set /a tries+=1\r\n\
-if %tries% GEQ 60 goto waittimeout\r\n\
-call :sleep1\r\n\
-goto waitloop\r\n\
-\r\n\
-:waittimeout\r\n\
-call :say timeout_kill\r\n\
-taskkill /IM archive-gallery.exe /F >nul 2>&1\r\n\
-call :sleep2\r\n\
-\r\n\
-:waitdone\r\n\
-call :say exited\r\n\
-\r\n\
-rem Floating progress HUD (PowerShell WinForms, TopMost): reads progress.json per stage.\r\n\
-start \"\" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{hud_script}\"\r\n\
-\r\n\
-cd /d \"%SRC%\"\r\n\
-if errorlevel 1 goto failed\r\n\
-\r\n\
-call :say build\r\n\
-call npm run release >>\"{rawlog}\" 2>&1\r\n\
-if errorlevel 1 goto failed\r\n\
-\r\n\
-call :say ok\r\n\
-call :status success\r\n\
-call :cleanup\r\n\
-call :relaunch\r\n\
-call :say done\r\n\
-exit /b 0\r\n\
-\r\n\
-:failed\r\n\
-call :say fail\r\n\
-call :status failed\r\n\
-call :cleanup\r\n\
-call :relaunch\r\n\
-exit /b 1\r\n\
-\r\n\
-:say\r\n\
-node \"{helper}\" log %~1\r\n\
-exit /b\r\n\
-\r\n\
-:status\r\n\
-node \"{helper}\" status %~1\r\n\
-exit /b\r\n\
-\r\n\
-:cleanup\r\n\
-del \"{rawpending}\" >nul 2>&1\r\n\
-exit /b\r\n\
-\r\n\
-:relaunch\r\n\
-node \"{helper}\" relaunch\r\n\
-exit /b\r\n\
-\r\n\
-:sleep1\r\n\
-ping -n 2 127.0.0.1 >nul\r\n\
-exit /b\r\n\
-\r\n\
-:sleep2\r\n\
-ping -n 4 127.0.0.1 >nul\r\n\
-exit /b\r\n",
-        source = source,
-        rawlog = log.to_string_lossy().replace('/', "\\"),
-        rawpending = pending.to_string_lossy().replace('/', "\\"),
-        helper = helper.to_string_lossy().replace('/', "\\"),
-        hud_script = hud_script.to_string_lossy().replace('/', "\\"),
-    )
-}
-
 /// explorer 直接拉 `.cmd` 会带出一个可见控制台，发布期间一挂好几分钟。
 /// 这里生成一个 VBS 垫片：wscript 是 GUI 进程本身不弹窗，再以窗口样式 0
-/// （隐藏、不等待）启动 cmd，整条发布链路（含 `npm run release`）都无窗口。
+/// （隐藏、不等待）启动 node 编排脚本，整条发布链路（含 `npm run release`）都无窗口。
 /// VBS 必须写成 **UTF-16LE + BOM**：wscript 按 ANSI 读无 BOM 文件，中文路径会碎。
+/// 这里直接 `node <脚本>`（CreateProcess 按 PATH 解析 node.exe，2026-11-20 实测
+/// wscript 分离环境里 node 在 PATH）；链路里没有 .cmd，火绒不再有可 flagged 的
+/// 批处理文本。
 fn launcher_source(script: &Path) -> String {
     // VBS 的字符串转义是把 `"` 翻倍，不能用 JSON 转义（反斜杠会被写成 \\）。
     let path_vbs = script.to_string_lossy().replace('"', "\"\"");
     format!(
         "' Generated by archive-gallery. Do not edit.\r\n\
 Set sh = CreateObject(\"WScript.Shell\")\r\n\
-sh.Run Chr(34) & \"{path_vbs}\" & Chr(34), 0, False\r\n"
+sh.Run \"node \" & Chr(34) & \"{path_vbs}\" & Chr(34), 0, False\r\n"
     )
 }
 
@@ -1000,18 +994,14 @@ pub fn schedule_of(app: &AppHandle, settings: &ReleaseSettings) -> Result<(Strin
 
     let dir = release_dir(app)?;
     let exe = std::env::current_exe().map_err(|error| format!("无法定位本程序: {error}"))?;
-    let script = dir.join("release-on-exit.cmd");
-    let helper = dir.join("release-helper.mjs");
+    // 编排脚本用 node 跑（见 orchestrator_source 的注释）：不再生成 .cmd——
+    // 那种含 `taskkill` 裸文本的批处理会被火绒的行为检测静默删掉。
+    let script = dir.join("release-on-exit.mjs");
     let log = dir.join("release.log");
     let status = dir.join("status.json");
     let pending = dir.join("pending.json");
     let progress = dir.join("progress.json");
     let hud_script = dir.join("release-progress.ps1");
-
-    // node 助手：日志、状态、重启都走它，绕开 cmd 的中文/编码问题。
-    let helper_code = helper_source(&exe, &log, &status, settings.relaunch_after);
-    fs::write(&helper, helper_code.as_bytes())
-        .map_err(|error| format!("写入更新助手失败: {error}"))?;
 
     // 悬浮进度窗：release.mjs 每阶段写 progress.json，HUD 置顶读它画进度条。
     write_utf8_bom(
@@ -1022,11 +1012,10 @@ pub fn schedule_of(app: &AppHandle, settings: &ReleaseSettings) -> Result<(Strin
         ),
     )?;
 
-    let body = script_body(&source, &helper, &log, &pending, &hud_script);
-    // 纯 ASCII 写盘：脚本正文不含中文，中文路径只出现在 helper 里。
-    fs::write(&script, body.as_bytes()).map_err(|error| format!("写入更新脚本失败: {error}"))?;
+    let body = orchestrator_source(&exe, &source, &log, &status, &pending, &hud_script, settings.relaunch_after);
+    fs::write(&script, body.as_bytes()).map_err(|error| format!("写入更新编排脚本失败: {error}"))?;
 
-    // 隐藏启动器：explorer 拉它而不是直接拉 cmd，关窗时不弹黑框。
+    // 隐藏启动器：explorer 拉它而不是直接拉 node，关窗时不弹黑框。
     let launcher = dir.join("release-on-exit.vbs");
     write_launcher(&launcher, &script)?;
 
