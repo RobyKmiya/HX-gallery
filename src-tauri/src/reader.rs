@@ -20,10 +20,12 @@ use crate::pagecache::{ByteCache, Cached};
 /// HTTP 缓存（max-age=3600）避免反复解压。
 const MAX_PAGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// 页面字节缓存预算。动图常见 15–30MB，256MB 够「当前页 + 前后各若干邻页 + 挂载池」
-/// 完整共存；翻页来回 ≤±5 页内全部命中，不再触发「邻页挤掉当前页 → 404 → 自愈」的抖动。
-/// （32GB 内存的机器上这点很轻；超预算单页仍不缓存，按需直读。）
-const PAGE_CACHE_BUDGET: usize = 256 * 1024 * 1024;
+/// 页面字节缓存预算。管理员要求「整包随机翻到任何一页都流畅、已显示的页不再
+/// 卸载」：预算按整包常驻设计——46 页 × 20MB 动图 ≈ 920MB，2GB 可让典型整包
+/// 一次性全部驻留，随机跳页（拖进度条/到底/输页码）全部内存命中；超过预算才按
+/// LRU 淘汰（特大包只保住最近浏览的页，已显示的页在前端常驻池里另行保留）。
+/// （32GB 内存的机器上 2GB 无压力；超预算单页仍不缓存，按需直读。）
+const PAGE_CACHE_BUDGET: usize = 2 * 1024 * 1024 * 1024;
 const THUMB_CACHE_BUDGET: usize = 24 * 1024 * 1024;
 /// 记住多少个「正在读」的压缩包路径，供自定义协议解析。
 const MAX_REMEMBERED_ARCHIVES: usize = 32;
@@ -176,8 +178,8 @@ pub fn file_version(path: &Path) -> String {
 /// 解码 / TIFF 转码都在调用方（阻塞线程）完成，协议取图时只是内存读取，
 /// 因此 webview 的 UI 线程不会因为解码大图而卡顿。
 ///
-/// `pin` 表示这一页正显示在屏幕上：缓存会为它保留位置，不让预取的邻页
-/// 把它挤掉（动图单页二三十兆时，预取 3 页就能把当前页顶出 96MB 预算）。
+/// `pin` 表示这一页正显示在屏幕上：缓存会为它保留位置。预算已按整包（2GB）
+/// 设计，典型包内不会互相挤掉；只有特大包超预算时才可能触发 LRU 淘汰。
 pub fn read_page(path: &Path, page_index: i64, pin: bool) -> Result<ReaderPage, String> {
     let payload = page_payload(path, page_index, pin)?;
     Ok(ReaderPage {

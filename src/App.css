@@ -4389,6 +4389,7 @@ svg {
 }
 
 .reader-progress {
+  position: relative;
   height: 2px;
   background: rgba(255, 255, 255, 0.06);
 }
@@ -4398,6 +4399,28 @@ svg {
   height: 100%;
   background: linear-gradient(90deg, var(--accent-deep), var(--accent-strong));
   transition: width 0.18s ease;
+}
+
+/* 可拖拽跳页：视觉上还是同一条细进度线，但热区上下各扩 6px，
+   悬停/拖动时进度线加亮。高度不变，避免布局抖动。 */
+.reader-progress.is-seekable {
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+
+.reader-progress.is-seekable::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -6px;
+  bottom: -6px;
+}
+
+.reader-progress.is-seekable:hover span,
+.reader-progress.is-seekable:active span {
+  filter: brightness(1.35);
 }
 
 .reader-stage {

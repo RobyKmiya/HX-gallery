@@ -21,7 +21,9 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
+  FirstPageIcon,
   GridIcon,
+  LastPageIcon,
   PauseIcon,
   PlayIcon,
   StarIcon,
@@ -49,29 +51,21 @@ interface ReaderProps {
 
 type ZoomMode = "fit" | "width" | "actual";
 
-const CACHE_LIMIT = 14;
-const PREFETCH_AHEAD = 4;
-const PREFETCH_BEHIND = 1;
+/** 页元数据缓存上限。条目只有页号/文件名/版本号，没有字节——放开到整包都装得下，
+ *  配合「已显示的页不再卸载」（管理员要求随机翻页流畅）：不再 trim 已经看过的页。 */
+const CACHE_LIMIT = 4096;
 /**
- * 大页（动图）照样预取。
- *
- * 之前 12MB 以上一概不预取：单页 15–30MB 的动图包等于完全失去预取，
- * 每次翻页都走「解压 → 协议拷贝 → 首帧解码」全冷路径，观感就是「一直在加载」。
- * 现在后端缓存预算已到 256MB（见 reader.rs），预取走**串行** switching（一次一页），
- * 每页仍受总量预算约束，不会把当前页挤出去（当前页有 pin）。
- */
-const PREFETCH_MAX_PAGE_BYTES = 48 * 1024 * 1024;
-/** 一次预取最多提前准备多少字节（约 5 张大动图）。 */
-const PREFETCH_BUDGET_BYTES = 96 * 1024 * 1024;
-/**
- * 常驻挂载池：当前页前 / 后各留 N 张 <img> 一直挂在 stage 里（隐藏）。
+ * 常驻挂载池：当前页前 / 后各留 N 张 <img> 优先准备（隐藏挂载）。
  * 翻页时目标页已经在 DOM 里、字节已经就位——翻页只是显隐切换：不 remount、
  * 不重新走协议拷贝十几 MB、不闪黑。邻页的加载成本在翻到之前就付清了。
+ * 已进池的页**常驻不卸载**（管理员明确要求），滑出窗口只是不再优先准备。
  */
 const POOL_AHEAD = 3;
 const POOL_BEHIND = 1;
-/** 池内单页本次打开最多自动重试次数；仍失败且是当前页才进错误态。 */
-const POOL_PAGE_RETRIES = 3;
+/** 加载失败后的静默重试退避：第 n 次失败等 min(500ms·2^(n-1), 8s) 再试，
+ *  一直重试到显示为止——绝不亮「加载失败」错误卡（管理员明确要求）。 */
+const RETRY_BACKOFF_BASE_MS = 500;
+const RETRY_BACKOFF_MAX_MS = 8000;
 /** 预解码等待上限；超时说明这张图太大，交给 <img> 自己解码。 */
 const PAGE_DECODE_TIMEOUT = 6000;
 const ZOOM_MIN = 0.5;
@@ -230,10 +224,11 @@ export default function Reader({
   const [dragging, setDragging] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   /**
-   * 取图 URL 的版本号。只有重试时递增：换掉 URL 才能摆脱 webview 里
-   * 已经记成「加载失败」的那张图（协议层缓存未命中时会返回 404）。
+   * 取图 URL 的全局版本号。重试已改由单页 token（poolTokens）负责——它只翻动
+   * 出错那一页的 URL，不会把整池 <img> 的解码缓存全作废；这个全局值保持 0，
+   * 留作将来「整包强制刷新」的逃生口。
    */
-  const [assetToken, setAssetToken] = useState(0);
+  const assetToken = 0;
   const [openToken, setOpenToken] = useState(0);
   const [spread, setSpread] = useState(() => {
     try {
@@ -269,8 +264,10 @@ export default function Reader({
   const [pool, setPool] = useState<Record<number, ReaderPage>>({});
   /** 池内单页重试 token（拼进 URL 的 t= 参数；递增一次 = 强制 webview 重新请求）。 */
   const [poolTokens, setPoolTokens] = useState<Record<number, number>>({});
-  /** 池内单页本次打开已失败的次数（超过 POOL_PAGE_RETRIES 不再自动重试）。 */
-  const poolRetryRef = useRef<Map<number, number>>(new Map());
+/** 池内单页已失败次数（只用于重试退避计时；成功一次就清零，失败不设上限）。 */
+const poolRetryRef = useRef<Map<number, number>>(new Map());
+/** 压缩包纪元：换本时 +1，用来让散落在外的重试定时器感知「这本已经不在了」。 */
+const archiveEpochRef = useRef(0);
   const requestSeqRef = useRef(0);
   const infoRef = useRef<ReaderInfo | null>(null);
   const pageRef = useRef(1);
@@ -382,6 +379,8 @@ export default function Reader({
 
   useEffect(() => {
     let cancelled = false;
+    // 换本：所有跨本存活的定时器/重试都作废（池、重试计数、token 一并清空）。
+    archiveEpochRef.current += 1;
     setInfo(null);
     setPageData(null);
     setError(null);
@@ -462,28 +461,44 @@ export default function Reader({
 
     setLoading(true);
     setError(null);
-    Promise.all([
-      fetchPageData(page, true),
-      secondIndex !== null
-        ? fetchPageData(secondIndex, true)
-        : Promise.resolve(null),
-    ])
-      .then(async ([first, second]) => {
-        await Promise.all([
-          preparePage(first),
-          second ? preparePage(second) : Promise.resolve(),
-        ]);
-        if (seq !== requestSeqRef.current) return;
-        resetStageScroll();
-        setPageData(first);
-        setSecondData(second);
-        setLoading(false);
-      })
-      .catch((pageError) => {
-        if (seq !== requestSeqRef.current) return;
-        setError(String(pageError));
-        setLoading(false);
-      });
+    // 取当前页（含双页第二页）。失败**静默退避重试**直到成功：不亮错误卡、
+    // 不停 loading——管理员要求「加载失败就一直加载直到显示」。
+    // 整个加载体放在 runLoad 里，重试 = 退避后递归整段重跑；seq 过期
+    // （用户已翻页/换本）立即作废本次重试链。
+    let attempt = 0;
+    let retryTimer = 0;
+    const runLoad = () => {
+      Promise.all([
+        fetchPageData(page, true),
+        secondIndex !== null
+          ? fetchPageData(secondIndex, true)
+          : Promise.resolve(null),
+      ])
+        .then(async ([first, second]) => {
+          await Promise.all([
+            preparePage(first),
+            second ? preparePage(second) : Promise.resolve(),
+          ]);
+          if (seq !== requestSeqRef.current) return;
+          resetStageScroll();
+          setPageData(first);
+          setSecondData(second);
+          setError(null);
+          setLoading(false);
+        })
+        .catch(() => {
+          if (seq !== requestSeqRef.current) return;
+          attempt += 1;
+          const delay = Math.min(
+            RETRY_BACKOFF_BASE_MS * 2 ** Math.min(attempt - 1, 4),
+            RETRY_BACKOFF_MAX_MS,
+          );
+          retryTimer = window.setTimeout(runLoad, delay);
+        });
+    };
+    runLoad();
+
+    return () => window.clearTimeout(retryTimer);
   }, [info, page, spread, card.id, reloadToken, fetchPageData, preparePage]);
 
   useEffect(() => {
@@ -495,8 +510,9 @@ export default function Reader({
   }, [spread]);
 
   // —— 常驻挂载池管理 ——
-  // 确保 [当前页前 1 / 后 3] 的页全部 fetch + prepare 完并挂进池里；
-  // 滑出范围的页退池卸载（释放 webview 内存）。
+  // 优先确保 [当前页前 1 / 后 3] 的页 fetch + prepare 完并挂进池里；
+  // 已进池的页**常驻不卸载**（管理员要求：显示好了就保存好状态，不要翻回去
+  // 又重新加载），只有换本时整池清空。滑出窗口只是不再被优先准备。
   useEffect(() => {
     if (!info || info.pageCount === 0) return;
 
@@ -522,30 +538,43 @@ export default function Reader({
           if (cancelled) return;
           setPool((prev) => (prev[idx] ? prev : { ...prev, [idx]: data }));
         } catch {
-          // 单页进池失败不拖累其他页；真的翻过去时页面级错误处理兜底。
+          // 单页进池失败不拖累其他页；该页的错误重试兜底会继续尝试。
         }
       }
     })();
-
-    setPool((prev) => {
-      const next: Record<number, ReaderPage> = {};
-      let changed = false;
-      for (const [key, value] of Object.entries(prev)) {
-        const idx = Number(key);
-        if (targets.includes(idx)) next[idx] = value;
-        else {
-          changed = true;
-          // 退池的页还清失败计数：下次再进入范围时当作全新的一页重试。
-          poolRetryRef.current.delete(idx);
-        }
-      }
-      return changed ? next : prev;
-    });
 
     return () => {
       cancelled = true;
     };
   }, [info, page, spread, card.id, reloadToken, fetchPageData, preparePage]);
+
+  // —— 全包后台预热 ——
+  // 从头到尾串行把整本每一页 fetch + prepare 进池（一次一页，不与当前页抢）。
+  // 几秒后整本就是热的：随机跳到任何一页（拖进度条 / 输页码 / 到底）都直接出图，
+  // 管理员要求「整个压缩包随机翻到任何地方都流畅阅读」。
+  // 特大包里后端字节缓存按预算淘汰最早的页，但已显示的页在前端池里始终保留。
+  useEffect(() => {
+    if (!info || info.pageCount === 0) return;
+    const epoch = archiveEpochRef.current;
+    let cancelled = false;
+    void (async () => {
+      for (let i = 0; i < info.pageCount; i += 1) {
+        if (cancelled) return;
+        try {
+          const data = cacheRef.current.get(i) ?? (await fetchPageData(i));
+          if (cancelled || archiveEpochRef.current !== epoch) return;
+          await preparePage(data);
+          if (cancelled || archiveEpochRef.current !== epoch) return;
+          setPool((prev) => (prev[i] ? prev : { ...prev, [i]: data }));
+        } catch {
+          // 单页预热失败不中断；该页被翻到时由静默重试兜底。
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [info, card.id, reloadToken, fetchPageData, preparePage]);
 
   useEffect(() => {
     try {
@@ -650,50 +679,6 @@ export default function Reader({
     onSwitchArchive,
     onNotify,
   ]);
-
-  useEffect(() => {
-    if (!info || info.pageCount === 0) return;
-
-    const step = spread ? 2 : 1;
-    const indexes: number[] = [];
-    for (let i = 1; i <= PREFETCH_AHEAD; i += 1) {
-      const forward = page + i * step;
-      if (forward < info.pageCount) indexes.push(forward);
-    }
-    for (let i = 1; i <= PREFETCH_BEHIND; i += 1) {
-      const backward = page - i * step;
-      if (backward >= 0) indexes.push(backward);
-    }
-
-    let cancelled = false;
-    const run = async () => {
-      let spent = 0;
-      for (const index of indexes) {
-        if (cancelled) return;
-        try {
-          const data =
-            cacheRef.current.get(index) ?? (await fetchPageData(index));
-          if (cancelled) return;
-
-          // 大页（动图）不预取：一是几十兆一份，预取 4 页就超过后端 96MB
-          // 缓存预算，会反过来把正在看的那页挤出去；二是渲染进程解码多张
-          // 动图本身就可能失败。留到用户真的翻过去时再加载。
-          if (data.bytes > PREFETCH_MAX_PAGE_BYTES) continue;
-          if (spent + data.bytes > PREFETCH_BUDGET_BYTES) return;
-          spent += data.bytes;
-
-          await preparePage(data);
-        } catch {
-          // Prefetch failures must never disturb the frame on screen.
-        }
-      }
-    };
-    void run();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [info, page, spread, fetchPageData, preparePage]);
 
   useEffect(() => {
     if (!info) return;
@@ -1026,58 +1011,37 @@ export default function Reader({
     setPageInput(String(Math.min(Math.max(parsed, 1), count)));
   }, [info, pageInput, page, goTo, pausePlayback]);
 
-  const retry = () => {
-    if (!info) {
-      setOpenToken((value) => value + 1);
-      return;
-    }
-    // 只作废当前这一页（双页时连带第二页），别把已经预热好的邻页一起清掉：
-    // 清整张表会让重试变成「把几十兆重新解压一遍」。
-    for (const index of [page, page + 1]) {
-      cacheRef.current.delete(index);
-      inflightRef.current.delete(index);
-      decodedRef.current.delete(index);
-    }
-    // URL 里带 token，换 token 后旧的解码结果全部作废。
-    setAssetToken((value) => value + 1);
-    setReloadToken((value) => value + 1);
-  };
-
   /**
-   * 图片加载失败时的自愈。
+   * 图片加载失败时的静默自愈。
    *
-   * 协议层只在后端缓存未命中时返回 404。池内页：bump 单页 token 强制 webview
-   * 重新请求，并把该页重新 fetch/prepare 进后端缓存（可能已被淘汰）；本次打开
-   * 每页最多 POOL_PAGE_RETRIES 次。失败的是**当前可见页**且额度用尽才亮错误态；
-   * 池内邻页的失败完全静默——绝不允许邻页出问题把正在看的页拖成报错。
+   * 协议层只在后端缓存未命中时返回 404（字节缓存预算已按整包加大，正常情况
+   * 不该出现）。无论失败的是当前可见页还是池内邻页：一律 bump 单页 token 强制
+   * webview 重新请求，并把该页重新 fetch/prepare 进后端缓存，按退避节奏
+   * **一直重试到显示为止**——绝不亮「加载失败」错误卡、绝不退池
+   * （管理员明确要求）。退避只为了避免对真坏页热循环烧 CPU。
    */
   const handleImageError = (index: number) => {
     const failed = poolRetryRef.current.get(index) ?? 0;
-    const isVisible =
-      pageData?.index === index || (spread && visibleSecond?.index === index);
-    if (failed >= POOL_PAGE_RETRIES) {
-      if (isVisible) {
-        setLoading(false);
-        setError("页面图片加载失败，请重试");
-      } else {
-        // 池内页放弃挂载：退池（失败计数随之清零，转回来时当全新一页重试）。
-        setPool((prev) => {
-          if (!(index in prev)) return prev;
-          const next = { ...prev };
-          delete next[index];
-          return next;
-        });
-        poolRetryRef.current.delete(index);
-      }
-      return;
-    }
     poolRetryRef.current.set(index, failed + 1);
     decodedRef.current.delete(index);
-    setPoolTokens((prev) => ({ ...prev, [index]: (prev[index] ?? 0) + 1 }));
-    // 404 的根因多半是后端缓存被淘汰：重新拉进缓存再重挂。
-    void fetchPageData(index, isVisible)
-      .then((data) => preparePage(data))
-      .catch(() => {});
+    const isVisible =
+      pageData?.index === index || (spread && visibleSecond?.index === index);
+    const epoch = archiveEpochRef.current;
+    const fetchPageDataRef = fetchPageData;
+    const preparePageRef = preparePage;
+    const delay = Math.min(
+      RETRY_BACKOFF_BASE_MS * 2 ** Math.min(failed, 4),
+      RETRY_BACKOFF_MAX_MS,
+    );
+    window.setTimeout(() => {
+      // 换本之后这本的定时器全部作废（epoch 不匹配）。
+      if (archiveEpochRef.current !== epoch) return;
+      setPoolTokens((prev) => ({ ...prev, [index]: (prev[index] ?? 0) + 1 }));
+      // 404 的根因多半是后端缓存被淘汰：重新拉进缓存再重挂。
+      void fetchPageDataRef(index, isVisible)
+        .then((data) => preparePageRef(data))
+        .catch(() => {});
+    }, delay);
   };
 
   const handleImageLoad = useCallback(
@@ -1087,9 +1051,27 @@ export default function Reader({
         ...previous,
         [index]: { width: naturalWidth, height: naturalHeight },
       }));
+      // 成功即清零退避计数：之后若再失败，退避从头算。
+      poolRetryRef.current.delete(index);
     },
     [],
   );
+
+  // —— 顶部进度条：点击 / 拖动直接跳到对应位置 ——
+  // 视觉上还是那条细进度线，但热区上下各扩 6px；按住拖动可连续扫页，
+  // 松手落在最终位置。任何跳转都先暂停播放模式（与其他手动操作一致）。
+  const seekRef = useRef(false);
+  const seekTo = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!info || info.pageCount === 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const fraction = Math.min(
+      Math.max((event.clientX - rect.left) / rect.width, 0),
+      0.999,
+    );
+    pausePlayback();
+    goTo(Math.floor(fraction * info.pageCount));
+  };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     const stage = stageRef.current;
@@ -1129,8 +1111,7 @@ export default function Reader({
     setDragging(false);
   };
 
-  const pageCount = info?.pageCount ?? 0;
-  const lastVisible =
+  const pageCount = info?.pageCount ?? 0;  const lastVisible =
     spread && page + 1 < pageCount ? page + 1 : page;
   const visibleSecond =
     pageData && secondData && secondData.index === pageData.index + 1
@@ -1319,7 +1300,28 @@ export default function Reader({
         </aside>
       )}
 
-      <div className="reader-progress" aria-hidden="true">
+      <div
+        className="reader-progress is-seekable"
+        role="slider"
+        aria-label="阅读进度（点击或拖动直接跳页）"
+        aria-valuemin={1}
+        aria-valuemax={Math.max(pageCount, 1)}
+        aria-valuenow={Math.min(lastVisible + 1, Math.max(pageCount, 1))}
+        onPointerDown={(event) => {
+          seekRef.current = true;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          seekTo(event);
+        }}
+        onPointerMove={(event) => {
+          if (seekRef.current) seekTo(event);
+        }}
+        onPointerUp={(event) => {
+          seekRef.current = false;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+        }}
+      >
         <span style={{ width: `${progress}%` }} />
       </div>
 
@@ -1455,17 +1457,24 @@ export default function Reader({
             </div>
           )}
 
+          {/* error 只在「打开压缩包就失败」时出现（fatal）；阅读中的页面加载
+              失败走静默重试，永不亮错误卡（管理员明确要求）。 */}
           {error && (
             <div className="reader-state is-error">
               <AlertIcon width={22} height={22} />
               <p>{error}</p>
-              <button
-                type="button"
-                className="btn btn-ghost btn-compact"
-                onClick={retry}
-              >
-                重试
-              </button>
+              {!info && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-compact"
+                  onClick={() => {
+                    setOpenToken((value) => value + 1);
+                    setReloadToken((value) => value + 1);
+                  }}
+                >
+                  重试
+                </button>
+              )}
             </div>
           )}
 
@@ -1491,6 +1500,19 @@ export default function Reader({
               上一本
             </button>
           )}
+          <button
+            type="button"
+            className="btn btn-ghost btn-compact"
+            disabled={pageCount === 0 || page <= 0}
+            onClick={() => {
+              pausePlayback();
+              goTo(0);
+            }}
+            title="到顶 (Home)"
+          >
+            <FirstPageIcon width={14} height={14} />
+            到顶
+          </button>
           <button
             type="button"
             className="btn btn-ghost btn-compact"
@@ -1534,6 +1556,19 @@ export default function Reader({
           >
             下一页
             <ChevronRightIcon width={14} height={14} />
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-compact"
+            disabled={!canNext}
+            onClick={() => {
+              pausePlayback();
+              goTo(pageCount - 1);
+            }}
+            title="到底 (End)"
+          >
+            到底
+            <LastPageIcon width={14} height={14} />
           </button>
           {onSwitchArchive && (
             <button

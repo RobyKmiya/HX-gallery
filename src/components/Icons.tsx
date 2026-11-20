@@ -97,6 +97,24 @@ export function ChevronRightIcon(props: IconProps) {
   );
 }
 
+export function FirstPageIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M7 5v14" />
+      <path d="m17 6-6 6 6 6" />
+    </svg>
+  );
+}
+
+export function LastPageIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M17 5v14" />
+      <path d="m7 6 6 6-6 6" />
+    </svg>
+  );
+}
+
 export function PlayIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
