@@ -428,6 +428,18 @@ fn eval_json(window: &WebviewWindow, expression: &str, wait: Duration) -> Result
     Ok(serde_json::from_str::<String>(&raw).unwrap_or(raw))
 }
 
+/// 浏览窗口是否真的活着（页面还能执行脚本并把结果送回来）。
+///
+/// 「卡退」的尸体有两种形态：被关掉的（句柄已死，任何调用都报错）和渲染
+/// 进程冻住的（外壳还在，navigate 等调用全部「成功」但页面永远不动）。
+/// 后一种光看返回值看不出来，必须发脚本探针并等回调真的回来。
+fn window_is_alive(window: &WebviewWindow) -> bool {
+    matches!(
+        eval_json(window, "1", Duration::from_secs(5)),
+        Ok(value) if value.trim() == "1"
+    )
+}
+
 fn build_window(
     app: &AppHandle,
     url: tauri::Url,
@@ -441,9 +453,27 @@ fn build_window(
     if with_toolbar {
         builder = builder.initialization_script(D2_TOOLBAR_SCRIPT);
     }
-    builder
+    let window = builder
         .build()
-        .map_err(|error| format!("打开浏览窗口失败：{error}"))
+        .map_err(|error| format!("打开浏览窗口失败：{error}"))?;
+    // 用户点 × / 窗口崩掉 → 立刻清全局句柄。没有这一步，「卡退后被关掉」的
+    // 窗口会在 WINDOW 里留一具尸体，d2_open / fetch_flow 的复用分支撞上它，
+    // 就是「浏览器卡退之后再也打不开」。
+    let label_for_close = window.label().to_string();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Ok(mut guard) = WINDOW.lock() {
+                let same = guard
+                    .as_ref()
+                    .map(|w| w.label() == label_for_close)
+                    .unwrap_or(false);
+                if same {
+                    *guard = None;
+                }
+            }
+        }
+    });
+    Ok(window)
 }
 
 /// 建窗放到独立线程并加超时：WebView2 初始化卡住时也不至于永远没有下文。
@@ -457,7 +487,13 @@ fn open_window(
     let app_for_window = app.clone();
     std::thread::spawn(move || {
         let result = build_window(&app_for_window, url, label, with_toolbar);
-        let _ = tx.send(result);
+        // 调用方已经超时放弃（WebView2 初始化卡住）：迟到的窗口直接销毁，
+        // 不给用户留一扇几十秒后才突然出现的幽灵窗。
+        if tx.send(result.clone()).is_err() {
+            if let Ok(window) = result {
+                let _ = window.destroy();
+            }
+        }
     });
     match rx.recv_timeout(WINDOW_TIMEOUT) {
         Ok(result) => result,
@@ -617,7 +653,7 @@ fn fetch_flow(
     let label = format!("d2-browser-{}", uuid::Uuid::new_v4());
     // 复用已经打开的浏览窗口：用户正在看的作品页直接抓，不再弹第二个窗口。
     let window = match existing_window() {
-        Some(window) => {
+        Some(window) if window_is_alive(&window) => {
             let same = window
                 .url()
                 .map(|current| current.as_str() == parsed.as_str())
@@ -627,7 +663,16 @@ fn fetch_flow(
             }
             window
         }
-        None => {
+        maybe_stale => {
+            // 尸体窗口（被关掉 / 卡退冻住）先销毁再重建，绝不复用：
+            // 旧逻辑撞上冻住的窗口会在这里干等整个抓取超时。
+            if let Some(stale) = maybe_stale {
+                log(app, "已有浏览窗口无响应，销毁后重新打开");
+                let _ = stale.destroy();
+            }
+            if let Ok(mut guard) = WINDOW.lock() {
+                *guard = None;
+            }
             status(app, "正在打开浏览窗口…");
             let window = open_window(app, parsed.clone(), label, true)?;
             if let Ok(mut guard) = WINDOW.lock() {
@@ -878,15 +923,29 @@ where
 pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
     let parsed = normalize_url(&url)?;
 
-    // 窗口还在：直接导航，不重建（保留登录态与历史）
+    // 窗口还在且**响应正常**：直接导航，不重建（保留登录态与历史）。
+    // 「卡退」会留下两种尸体：被关掉的（调用即报错）和渲染进程冻住的
+    // （调用全部「成功」但页面永远不动——2026-11-21 实测：日志连发八条
+    // 「导航到」而页面纹丝不动）。存活判定必须用回调探针，不能看返回值。
+    let mut stale = false;
     if let Ok(mut guard) = WINDOW.lock() {
         if let Some(window) = guard.as_ref() {
-            match window.navigate(parsed.clone()) {
-                Ok(()) => {
-                    log(&app, &format!("导航到 {parsed}"));
-                    return Ok(());
+            if window_is_alive(window) {
+                match window.navigate(parsed.clone()) {
+                    Ok(()) => {
+                        log(&app, &format!("导航到 {parsed}"));
+                        return Ok(());
+                    }
+                    Err(_) => stale = true,
                 }
-                Err(_) => *guard = None, // 窗口已被用户关掉，下面重建
+            } else {
+                stale = true;
+            }
+        }
+        if stale {
+            if let Some(window) = guard.take() {
+                log(&app, "上次浏览窗口已无响应，先销毁再重建");
+                let _ = window.destroy();
             }
         }
     }
