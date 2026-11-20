@@ -510,6 +510,7 @@ const LABEL = {{
   ok: '更新完成',
   fail: '更新失败，详见日志',
   done: '流程结束',
+  skipped: '已有一条发布链在运行，本次不重复发布',
 }};
 
 function say(key) {{
@@ -546,6 +547,46 @@ function appRunning() {{
   if (probe.error) return false; // 查不到进程当它已退，别把发布卡死
   return String(probe.stdout || '').includes(path.basename(EXE));
 }}
+
+// —— 单飞锁 ——
+// 连关两窗会拉起两条发布链：两条 release 同时跑 cargo 抢 target 锁，
+// 发布看起来像卡死（2026-11-21 凌晨 1.0.36/37 连环失败的根因之一）。
+// 有活链时本次直接退出，pending 一并清掉，下次关窗再发。
+const LOCK = path.join(path.dirname(LOG), 'release.lock');
+try {{
+  let alive = false;
+  let prevPid = 0;
+  if (fs.existsSync(LOCK)) {{
+    prevPid = Number(fs.readFileSync(LOCK, 'utf8').trim());
+    if (Number.isFinite(prevPid) && prevPid > 0 && prevPid !== process.pid) {{
+      try {{
+        process.kill(prevPid, 0);
+        alive = true;
+      }} catch (e) {{
+        alive = Boolean(e && e.code === 'EPERM');
+      }}
+    }}
+  }}
+  const fresh = alive && Date.now() - fs.statSync(LOCK).mtimeMs < 2 * 60 * 60 * 1000;
+  if (fresh) {{
+    writeStatus('skipped', '已有一条发布链在运行（pid ' + prevPid + '），本次关窗不重复发布');
+    say('skipped');
+    try {{ fs.rmSync(PENDING, {{ force: true }}); }} catch {{ }}
+    process.exit(0);
+  }}
+  fs.writeFileSync(LOCK, String(process.pid), 'utf8');
+}} catch {{
+  // 锁不可用就照旧跑：宁可偶尔双跑，也不能因为锁失败把发布堵死
+}}
+process.on('exit', () => {{
+  try {{
+    if (fs.readFileSync(LOCK, 'utf8').trim() === String(process.pid)) {{
+      fs.rmSync(LOCK, {{ force: true }});
+    }}
+  }} catch {{
+    // 忽略
+  }}
+}});
 
 // —— 主流程 ——
 say('start');

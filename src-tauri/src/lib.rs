@@ -1313,6 +1313,32 @@ async fn query_archives(
 pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说明已有实例在跑，
     // 这时去唤醒它并直接退出，避免第二个进程占住 WebView2 用户数据目录、
     // 也避免关不干净导致 exe 被锁、装完新版还是旧界面。
+    // 闪退黑匣子：release 是 panic=abort，任何 Rust panic 都会让进程秒死，
+    // WER 不留记录、stderr 在 GUI 子系统下无处可去——2026-11-21 的画廊闪退
+    // 就是这样完全无证据。默认钩子之外再落一份到崩溃日志，下次闪退直接看这里。
+    let crash_log = std::env::var("APPDATA").ok().map(|root| {
+        std::path::Path::new(&root)
+            .join("com.archivegallery.desktop")
+            .join("crash.log")
+    });
+    std::panic::set_hook(Box::new(move |info| {
+        let message = format!(
+            "[{:?}] PANIC on thread '{}': {info}\n",
+            std::time::SystemTime::now(),
+            std::thread::current().name().unwrap_or("<unnamed>"),
+        );
+        eprint!("{message}");
+        if let Some(path) = &crash_log {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = std::io::Write::write_all(&mut file, message.as_bytes());
+            }
+        }
+    }));
+
     let guard = match instance::acquire() {
         Some(guard) => guard,
         None => {
