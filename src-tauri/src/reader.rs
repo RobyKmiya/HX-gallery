@@ -20,9 +20,10 @@ use crate::pagecache::{ByteCache, Cached};
 /// HTTP 缓存（max-age=3600）避免反复解压。
 const MAX_PAGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// 页面字节缓存预算。动图常见 20–30MB，128MB 够「当前页 + 一两页邻页」共存；
-/// 超过预算的单页不缓存，走直读路径。
-const PAGE_CACHE_BUDGET: usize = 128 * 1024 * 1024;
+/// 页面字节缓存预算。动图常见 15–30MB，256MB 够「当前页 + 前后各若干邻页 + 挂载池」
+/// 完整共存；翻页来回 ≤±5 页内全部命中，不再触发「邻页挤掉当前页 → 404 → 自愈」的抖动。
+/// （32GB 内存的机器上这点很轻；超预算单页仍不缓存，按需直读。）
+const PAGE_CACHE_BUDGET: usize = 256 * 1024 * 1024;
 const THUMB_CACHE_BUDGET: usize = 24 * 1024 * 1024;
 /// 记住多少个「正在读」的压缩包路径，供自定义协议解析。
 const MAX_REMEMBERED_ARCHIVES: usize = 32;

@@ -4435,6 +4435,26 @@ svg {
   -webkit-user-drag: none;
 }
 
+/*
+ * 挂载池：绝对定位脱流 + 不可见 + 不接事件的隐藏 <img>。
+ * 作用是让 Chromium 提前完成邻页动图的取回与解码（尤其 20MB×300 帧的
+ * 动画 webp），翻页时零等待直接出图。绝对定位脱流是关键——否则一张
+ * 池图就会把 spread 的 flex 布局挤变形。
+ */
+.reader-pool-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  visibility: hidden;
+  pointer-events: none;
+  box-shadow: none;
+  border-radius: 0;
+  z-index: -1;
+}
+
 .reader-stage.is-fit img {
   width: auto;
   height: auto;

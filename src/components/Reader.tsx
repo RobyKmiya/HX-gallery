@@ -53,15 +53,25 @@ const CACHE_LIMIT = 14;
 const PREFETCH_AHEAD = 4;
 const PREFETCH_BEHIND = 1;
 /**
- * 超过这个体积的页不预取。
+ * 大页（动图）照样预取。
  *
- * 动图（animated webp/gif）单页能到二三十兆：预取 4 页就是上百兆，既超过
- * 后端 96MB 的字节缓存预算（会把正在看的那页挤出去），也会让渲染进程同时
- * 解码多张动图。这类页改成翻到时再加载。
+ * 之前 12MB 以上一概不预取：单页 15–30MB 的动图包等于完全失去预取，
+ * 每次翻页都走「解压 → 协议拷贝 → 首帧解码」全冷路径，观感就是「一直在加载」。
+ * 现在后端缓存预算已到 256MB（见 reader.rs），预取走**串行** switching（一次一页），
+ * 每页仍受总量预算约束，不会把当前页挤出去（当前页有 pin）。
  */
-const PREFETCH_MAX_PAGE_BYTES = 12 * 1024 * 1024;
-/** 一次预取最多提前准备多少字节。 */
-const PREFETCH_BUDGET_BYTES = 48 * 1024 * 1024;
+const PREFETCH_MAX_PAGE_BYTES = 48 * 1024 * 1024;
+/** 一次预取最多提前准备多少字节（约 5 张大动图）。 */
+const PREFETCH_BUDGET_BYTES = 96 * 1024 * 1024;
+/**
+ * 常驻挂载池：当前页前 / 后各留 N 张 <img> 一直挂在 stage 里（隐藏）。
+ * 翻页时目标页已经在 DOM 里、字节已经就位——翻页只是显隐切换：不 remount、
+ * 不重新走协议拷贝十几 MB、不闪黑。邻页的加载成本在翻到之前就付清了。
+ */
+const POOL_AHEAD = 3;
+const POOL_BEHIND = 1;
+/** 池内单页本次打开最多自动重试次数；仍失败且是当前页才进错误态。 */
+const POOL_PAGE_RETRIES = 3;
 /** 预解码等待上限；超时说明这张图太大，交给 <img> 自己解码。 */
 const PAGE_DECODE_TIMEOUT = 6000;
 const ZOOM_MIN = 0.5;
@@ -255,8 +265,12 @@ export default function Reader({
   const thumbCacheRef = useRef<Map<number, string>>(new Map());
   const inflightRef = useRef<Map<number, Promise<ReaderPage>>>(new Map());
   const decodedRef = useRef<Map<number, Promise<void>>>(new Map());
-  /** 每页每次打开只自动自愈一次，避免 404 → 重试 → 404 的死循环。 */
-  const recoveredRef = useRef<Set<number>>(new Set());
+  /** 常驻挂载池：index → 已 fetch+prepare 的页。范围内的页保持挂载（隐藏），翻页零重载。 */
+  const [pool, setPool] = useState<Record<number, ReaderPage>>({});
+  /** 池内单页重试 token（拼进 URL 的 t= 参数；递增一次 = 强制 webview 重新请求）。 */
+  const [poolTokens, setPoolTokens] = useState<Record<number, number>>({});
+  /** 池内单页本次打开已失败的次数（超过 POOL_PAGE_RETRIES 不再自动重试）。 */
+  const poolRetryRef = useRef<Map<number, number>>(new Map());
   const requestSeqRef = useRef(0);
   const infoRef = useRef<ReaderInfo | null>(null);
   const pageRef = useRef(1);
@@ -385,6 +399,9 @@ export default function Reader({
     inflightRef.current.clear();
     decodedRef.current.clear();
     metaInflightRef.current.clear();
+    setPool({});
+    setPoolTokens({});
+    poolRetryRef.current.clear();
 
     api
       .openReader(card.id)
@@ -477,6 +494,59 @@ export default function Reader({
     }
   }, [spread]);
 
+  // —— 常驻挂载池管理 ——
+  // 确保 [当前页前 1 / 后 3] 的页全部 fetch + prepare 完并挂进池里；
+  // 滑出范围的页退池卸载（释放 webview 内存）。
+  useEffect(() => {
+    if (!info || info.pageCount === 0) return;
+
+    const step = spread ? 2 : 1;
+    const targets: number[] = [];
+    for (let i = 0; i <= POOL_AHEAD; i += 1) {
+      const idx = page + i * step;
+      if (idx >= 0 && idx < info.pageCount) targets.push(idx);
+    }
+    for (let i = 1; i <= POOL_BEHIND; i += 1) {
+      const idx = page - i * step;
+      if (idx >= 0 && idx < info.pageCount && !targets.includes(idx)) targets.push(idx);
+    }
+
+    let cancelled = false;
+    void (async () => {
+      for (const idx of targets) {
+        if (cancelled) return;
+        try {
+          const data = cacheRef.current.get(idx) ?? (await fetchPageData(idx));
+          if (cancelled) return;
+          await preparePage(data);
+          if (cancelled) return;
+          setPool((prev) => (prev[idx] ? prev : { ...prev, [idx]: data }));
+        } catch {
+          // 单页进池失败不拖累其他页；真的翻过去时页面级错误处理兜底。
+        }
+      }
+    })();
+
+    setPool((prev) => {
+      const next: Record<number, ReaderPage> = {};
+      let changed = false;
+      for (const [key, value] of Object.entries(prev)) {
+        const idx = Number(key);
+        if (targets.includes(idx)) next[idx] = value;
+        else {
+          changed = true;
+          // 退池的页还清失败计数：下次再进入范围时当作全新的一页重试。
+          poolRetryRef.current.delete(idx);
+        }
+      }
+      return changed ? next : prev;
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [info, page, spread, card.id, reloadToken, fetchPageData, preparePage]);
+
   useEffect(() => {
     try {
       window.localStorage.setItem(PLAYBACK_STORAGE_KEY, playback ? "1" : "0");
@@ -531,8 +601,12 @@ export default function Reader({
   // —— 动图播放 ——
   // 动图页直接把原图（gif / 动画 webp）交给 webview，由 Chromium 内核原生播放：
   // 帧时序、合成、透明都由内核处理，不重编码、不逐帧搬运，所以既流畅也不闪黑。
+  // token = 全局重试 token + 单页重试 token：单页自愈只 bump 自己的 token，
+  // 邻页重挂不会把所有 <img> 的 URL 全换一遍（换了就会整池重新解码）。
+  const pageToken = (index: number) =>
+    assetToken + (poolTokens[index] ?? 0);
   const mainSrc = pageData
-    ? readerPageUrl(card.id, pageData.index, assetToken, pageData.version)
+    ? readerPageUrl(card.id, pageData.index, pageToken(pageData.index), pageData.version)
     : null;
 
   // 播放模式节拍：动图按真实总时长播一遍再翻页，静态页停 2 秒；
@@ -576,11 +650,6 @@ export default function Reader({
     onSwitchArchive,
     onNotify,
   ]);
-
-  // 换页后重新给「自愈」机会：上一次失败的页再回来时可以再试一次。
-  useEffect(() => {
-    recoveredRef.current.clear();
-  }, [page, card.id]);
 
   useEffect(() => {
     if (!info || info.pageCount === 0) return;
@@ -975,22 +1044,40 @@ export default function Reader({
   };
 
   /**
-   * 图片加载失败时先自愈一次。
+   * 图片加载失败时的自愈。
    *
-   * 协议层只在后端缓存未命中时返回 404（例如页面被 LRU 淘汰），这时重挂一次
-   * <img>（换 URL 版本号）通常就能拿到图：后端缓存是热的，命令层不必重跑。
-   * 同一次打开里每页只自愈一次，再失败就走错误态，交给用户点「重试」。
+   * 协议层只在后端缓存未命中时返回 404。池内页：bump 单页 token 强制 webview
+   * 重新请求，并把该页重新 fetch/prepare 进后端缓存（可能已被淘汰）；本次打开
+   * 每页最多 POOL_PAGE_RETRIES 次。失败的是**当前可见页**且额度用尽才亮错误态；
+   * 池内邻页的失败完全静默——绝不允许邻页出问题把正在看的页拖成报错。
    */
   const handleImageError = (index: number) => {
-    if (recoveredRef.current.has(index)) {
-      setLoading(false);
-      setError("页面图片加载失败，请重试");
+    const failed = poolRetryRef.current.get(index) ?? 0;
+    const isVisible =
+      pageData?.index === index || (spread && visibleSecond?.index === index);
+    if (failed >= POOL_PAGE_RETRIES) {
+      if (isVisible) {
+        setLoading(false);
+        setError("页面图片加载失败，请重试");
+      } else {
+        // 池内页放弃挂载：退池（失败计数随之清零，转回来时当全新一页重试）。
+        setPool((prev) => {
+          if (!(index in prev)) return prev;
+          const next = { ...prev };
+          delete next[index];
+          return next;
+        });
+        poolRetryRef.current.delete(index);
+      }
       return;
     }
-    recoveredRef.current.add(index);
-    // 只换 <img> 的 key 与 URL 版本，不动后端缓存、不重新走命令。
+    poolRetryRef.current.set(index, failed + 1);
     decodedRef.current.delete(index);
-    setAssetToken((value) => value + 1);
+    setPoolTokens((prev) => ({ ...prev, [index]: (prev[index] ?? 0) + 1 }));
+    // 404 的根因多半是后端缓存被淘汰：重新拉进缓存再重挂。
+    void fetchPageData(index, isVisible)
+      .then((data) => preparePage(data))
+      .catch(() => {});
   };
 
   const handleImageLoad = useCallback(
@@ -1289,7 +1376,7 @@ export default function Reader({
             (spread ? (
               <div className="reader-spread">
                 <img
-                  key={`${pageData.index}-${assetToken}`}
+                  key={`${pageData.index}-${pageToken(pageData.index)}`}
                   src={mainSrc}
                   alt={pageData.name}
                   style={imageStyleFor(pageData)}
@@ -1300,11 +1387,11 @@ export default function Reader({
                 />
                 {visibleSecond && (
                   <img
-                    key={`${visibleSecond.index}-${assetToken}`}
+                    key={`${visibleSecond.index}-${pageToken(visibleSecond.index)}`}
                     src={readerPageUrl(
                       card.id,
                       visibleSecond.index,
-                      assetToken,
+                      pageToken(visibleSecond.index),
                       visibleSecond.version,
                     )}
                     alt={visibleSecond.name}
@@ -1320,7 +1407,7 @@ export default function Reader({
               </div>
             ) : (
               <img
-                key={`${pageData.index}-${assetToken}`}
+                key={`${pageData.index}-${pageToken(pageData.index)}`}
                 src={mainSrc}
                 alt={pageData.name}
                 style={imageStyleFor(pageData)}
@@ -1330,6 +1417,34 @@ export default function Reader({
                 onError={() => handleImageError(pageData.index)}
               />
             ))}
+
+          {/* 挂载池：隐藏渲染邻页（尤其动图页），让 Chromium 提前缓存
+              解码结果——翻页时浏览器内是热数据，0ms 出图。
+              她/它们不可见、不拦截事件，失败由池渲染的错误兜底静默处理。 */}
+          {info && info.pageCount > 0 &&
+            Object.entries(pool)
+              .filter(([idx]) => {
+                const i = Number(idx);
+                return i !== pageData?.index && i !== visibleSecond?.index;
+              })
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([idx, poolPage]) => (
+                <img
+                  key={`pool-${idx}-${pageToken(Number(idx))}`}
+                  className="reader-pool-img"
+                  src={readerPageUrl(
+                    card.id,
+                    poolPage.index,
+                    pageToken(poolPage.index),
+                    poolPage.version,
+                  )}
+                  alt=""
+                  decoding="async"
+                  draggable={false}
+                  onLoad={(event) => handleImageLoad(poolPage.index, event)}
+                  onError={() => handleImageError(poolPage.index)}
+                />
+              ))}
 
           {!pageData && loading && (
             <div className="reader-state">
