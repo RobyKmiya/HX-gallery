@@ -153,6 +153,7 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "clap",
+ "gif",
  "image",
  "image-webp",
  "natord",

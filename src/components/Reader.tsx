@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
-import { api, animFrameUrl, readerPageUrl } from "../api";
+import { api, readerPageUrl } from "../api";
 import type {
   AnimMeta,
   ArchiveCardData,
@@ -74,9 +74,6 @@ const STATIC_PAGE_DWELL_MS = 2000;
 /** 播放模式下动图页的停留上下限：太短看不清，太长（几分钟的长动图）会卡住模式。 */
 const PLAYBACK_MIN_PAGE_MS = 400;
 const PLAYBACK_MAX_PAGE_MS = 30000;
-/** 统一帧播放器的单帧时长上下限：坏时长（0 或几十秒）不能把帧刷爆或长时间停住。 */
-const FRAME_MIN_MS = 20;
-const FRAME_MAX_MS = 4000;
 
 function isAnimName(name: string): boolean {
   const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
@@ -250,14 +247,8 @@ export default function Reader({
   });
   /** 播放是否正在进行（模式开着也可以用空格暂停）。 */
   const [playing, setPlaying] = useState(false);
-  /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。 */
+  /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
-  /** 统一帧播放器：当前显示的帧号（换页从 0 重来）。 */
-  const [animFrame, setAnimFrame] = useState(0);
-  /** 帧播放是否被用户暂停（拖帧 / 点暂停）；恢复后继续。 */
-  const [framePaused, setFramePaused] = useState(false);
-  /** 每页已解码就绪的帧数（顺序解码会话的进度）。 */
-  const [framesReady, setFramesReady] = useState<Record<number, number>>({});
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const cacheRef = useRef<Map<number, ReaderPage>>(new Map());
@@ -276,14 +267,6 @@ export default function Reader({
   const playbackRef = useRef(playback);
   playbackRef.current = playback;
   const metaInflightRef = useRef<Set<number>>(new Set());
-  /** 帧解码会话循环的去重状态：同一页只跑一条循环，target 只增不减。 */
-  const framesLoopRef = useRef<{ page: number; target: number; running: boolean }>({
-    page: -1,
-    target: 0,
-    running: false,
-  });
-  /** 拖帧条前的暂停状态：松手后按原样恢复，别把用户的暂停/播放意图改掉。 */
-  const scrubPrevPausedRef = useRef(false);
   const panRef = useRef<{
     pointerId: number;
     startX: number;
@@ -325,13 +308,10 @@ export default function Reader({
       if (existing) return existing;
 
       const promise = new Promise<void>((resolve) => {
-        // 动图交给统一帧播放器：原图（动画 webp/gif）不再进 webview 解码。
-        // 大动画在 Chromium 里解码经常失败或长时间不出图，正是「加载错误」
-        // 与「进入后还在卡加载」的来源；帧的解码/播放由后端 + 播放器接管。
-        if (isAnimName(data.name)) {
-          resolve();
-          return;
-        }
+        // 动图（gif / 动画 webp）不在 JS 侧逐帧解码：原始字节交给 webview，
+        // 由 Chromium 内核原生播放。但这里仍要先把原始字节拉进 webview 缓存，
+        // 否则翻到该页时 <img> 是空的，大动图下载期间会闪一下背景（黑屏）。
+        // 缓存预热后 <img> 一挂上就能起播，翻页过程里旧页一直可见，不会闪。
         let settled = false;
         let timer = 0;
         // 预解码只是为了「翻到这一页时立刻有图」。静态页解码很快，超时只是保险。
@@ -379,54 +359,6 @@ export default function Reader({
     [card.id, assetToken],
   );
 
-  /**
-   * 顺序解码会话循环：把帧推进到目标帧。
-   * 动画 gif/webp 无法随机访问帧（只能顺序解），单帧请求是 O(N)——
-   * 拖条每格解一遍会把 CPU 打满。这里整页只跑一条循环：后端会话复用
-   * 解码器增量推进（每帧只解一次，整体 O(target)），3 秒预算到就返回
-   * 进度，ready 没到目标就自动续跑。
-   */
-  const ensureFramesTo = useCallback(
-    (index: number, target: number) => {
-      const loop = framesLoopRef.current;
-      if (loop.page !== index) {
-        loop.page = index;
-        loop.target = 0;
-      }
-      if (target <= loop.target) return;
-      loop.target = target;
-      if (loop.running) return;
-      loop.running = true;
-
-      const step = async () => {
-        const current = framesLoopRef.current;
-        try {
-          const progress = await api.prepareAnimFrames(
-            card.id,
-            current.page,
-            current.target,
-          );
-          setFramesReady((previous) => ({
-            ...previous,
-            [current.page]: Math.max(progress.ready, previous[current.page] ?? 0),
-          }));
-          if (
-            framesLoopRef.current.page === current.page &&
-            framesLoopRef.current.target > progress.ready
-          ) {
-            void step();
-            return;
-          }
-        } catch {
-          // 解码失败静默：帧条仍可拖，未就绪时显示最近的一帧。
-        }
-        framesLoopRef.current.running = false;
-      };
-      void step();
-    },
-    [card.id],
-  );
-
   const resetStageScroll = () => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -446,8 +378,6 @@ export default function Reader({
     setBookmarksOpen(false);
     setThumbsOpen(false);
     setAnimMetas({});
-    setFramesReady({});
-    framesLoopRef.current = { page: -1, target: 0, running: false };
     // 换本（含播放模式跨本连播）保留当前播放状态；模式开着且没被暂停就继续播。
     setPlaying(playingRef.current);
     cacheRef.current.clear();
@@ -557,8 +487,11 @@ export default function Reader({
     setPlaying(playback);
   }, [playback]);
 
-  // 当前页是动图时拉取帧元数据（帧数 / 总时长），拖条与播放模式都要用。
+  // 当前页是动图、且开着播放模式时，才去取元数据（帧数 / 总时长）。
+  // 元数据只影响播放模式的停留时长；正常阅读时不需要，所以不取——动图多时
+  // 「扫一遍帧头」也是开销，能省则省。显示本身完全不依赖它。
   useEffect(() => {
+    if (!playback) return;
     if (!pageData || !isAnimName(pageData.name)) return;
     const index = pageData.index;
     if (animMetas[index] || metaInflightRef.current.has(index)) return;
@@ -570,18 +503,10 @@ export default function Reader({
       .then((meta) => {
         if (cancelled) return;
         setAnimMetas((previous) => ({ ...previous, [index]: meta }));
-        // 动图页天然尺寸用元数据里的原始尺寸：帧可能被后端降采样过，别用帧的尺寸。
-        if (meta.animated && meta.width > 0) {
-          setNaturals((previous) => ({
-            ...previous,
-            [index]: { width: meta.width, height: meta.height },
-          }));
-        }
       })
-      .catch((error) => {
-        // 拿不到元数据就当作静态页记下来：不出拖条，播放按停留时长走，
-        // 否则这一页会永远等不到时长、播放模式卡死在当前页。
-        // 失败原因必须浮出来：静默吞掉会让「动图没被识别」无从排查。
+      .catch(() => {
+        // 拿不到元数据就按静态页记下来（播放按 2 秒停留走），否则播放模式会
+        // 一直等不到时长而卡在当前页。
         if (!cancelled) {
           setAnimMetas((previous) => ({
             ...previous,
@@ -589,12 +514,10 @@ export default function Reader({
               animated: false,
               frames: 0,
               totalDurationMs: 0,
-              frameDurationsMs: [],
               width: 0,
               height: 0,
             },
           }));
-          onNotify(`动画信息读取失败，本页按静态页处理：${String(error)}`, "error");
         }
       })
       .finally(() => {
@@ -603,75 +526,14 @@ export default function Reader({
     return () => {
       cancelled = true;
     };
-  }, [pageData, card.id, animMetas, onNotify]);
+  }, [playback, pageData, card.id, animMetas]);
 
-  // —— 统一帧播放器（动图）——
-  // 动图页不再让 webview 直接解原图，改由后端把整段帧解成 PNG/JPEG，前端按
-  // 真实帧时长自绘播放。这样既能规避大动画在 Chromium 里的解码失败，也让
-  // 「擦洗 / 暂停 / 逐帧」真正可控。
-  const currentMeta = pageData ? animMetas[pageData.index] : undefined;
-  const isAnimated = !!currentMeta?.animated && currentMeta.frames > 1;
-  const readyFrames = pageData ? framesReady[pageData.index] ?? 0 : 0;
-  /** 只显示已解出的帧里最接近目标的那一帧，避免 <img> 请求到还没解出的帧。 */
-  const displayFrame = isAnimated
-    ? Math.min(animFrame, Math.max(readyFrames - 1, 0))
-    : 0;
-  const frameSrc =
-    pageData && isAnimated && readyFrames > 0
-      ? animFrameUrl(
-          card.id,
-          pageData.index,
-          displayFrame,
-          assetToken,
-          pageData.version,
-        )
-      : null;
-  /** 主画面的 URL：动图用帧，其余用原图。动图未就绪时为 null（走加载态）。 */
+  // —— 动图播放 ——
+  // 动图页直接把原图（gif / 动画 webp）交给 webview，由 Chromium 内核原生播放：
+  // 帧时序、合成、透明都由内核处理，不重编码、不逐帧搬运，所以既流畅也不闪黑。
   const mainSrc = pageData
-    ? isAnimated
-      ? frameSrc
-      : readerPageUrl(card.id, pageData.index, assetToken, pageData.version)
+    ? readerPageUrl(card.id, pageData.index, assetToken, pageData.version)
     : null;
-
-  // 换页：帧播放从头开始，并清掉上一页的暂停状态。
-  useEffect(() => {
-    setAnimFrame(0);
-    setFramePaused(false);
-  }, [pageData?.index]);
-
-  // 动图页一成当前页就把整段帧解出来（顺序会话，3 秒一档自动续跑），
-  // 「进入后还在卡加载」的窗口因此很短，帧条 / 播放也立刻可控。
-  useEffect(() => {
-    if (!pageData || !isAnimated || !currentMeta) return;
-    ensureFramesTo(pageData.index, currentMeta.frames - 1);
-  }, [pageData, isAnimated, currentMeta, ensureFramesTo]);
-
-  // 帧节拍：按逐帧真实时长推进。普通阅读时循环播放；播放模式下只播一遍，
-  // 播完停在最后一帧，交给翻页节拍换页。
-  useEffect(() => {
-    if (!pageData || !isAnimated || !currentMeta || framePaused) return;
-    const frames = currentMeta.frames;
-    if (readyFrames <= animFrame) return; // 当前帧还没解出来：等 ready 变化重跑
-    const current = Math.min(animFrame, frames - 1);
-    const raw = currentMeta.frameDurationsMs[current] ?? 100;
-    const delay = Math.min(Math.max(raw, FRAME_MIN_MS), FRAME_MAX_MS);
-    const isLast = current >= frames - 1;
-    const looping = !(playback && playing);
-    if (isLast && !looping) return; // 播放模式：停在最后一帧
-    const timer = window.setTimeout(() => {
-      setAnimFrame(isLast ? 0 : current + 1);
-    }, delay);
-    return () => window.clearTimeout(timer);
-  }, [
-    pageData,
-    isAnimated,
-    currentMeta,
-    framePaused,
-    readyFrames,
-    animFrame,
-    playback,
-    playing,
-  ]);
 
   // 播放模式节拍：动图按真实总时长播一遍再翻页，静态页停 2 秒；
   // 翻到本尾自动换下一本，没有下一本就结束播放。
@@ -679,11 +541,9 @@ export default function Reader({
     if (!playing || !info || info.pageCount === 0 || !pageData) return;
     const looksAnim = isAnimName(pageData.name);
     const meta = animMetas[pageData.index];
-    // 动图页等元数据到位、且至少解出第一帧再计时：否则长动图会被当成
-    // 静态页 2 秒翻走，或翻页时动画还没开始播。
-    if (looksAnim && (!meta || (meta.animated && meta.frames > 1 && (framesReady[pageData.index] ?? 0) === 0))) {
-      return;
-    }
+    // 动图页等元数据到位再计时：否则长动图会被当成静态页 2 秒翻走。
+    // 元数据拿不到时上面的 catch 已把它记成静态页，不会永久等待。
+    if (looksAnim && !meta) return;
 
     const duration =
       meta?.animated && meta.totalDurationMs > 0
@@ -710,7 +570,6 @@ export default function Reader({
     info,
     pageData,
     animMetas,
-    framesReady,
     page,
     spread,
     hasNextArchive,
@@ -811,30 +670,6 @@ export default function Reader({
   const togglePlayback = useCallback(() => {
     setPlayback((value) => !value);
   }, []);
-
-  /** 拖帧条：跳到该帧；拖动期间暂停自动播放，松手按原状态恢复。 */
-  const beginScrub = () => {
-    scrubPrevPausedRef.current = framePaused;
-    setFramePaused(true);
-  };
-
-  const scrubToFrame = (value: number) => {
-    if (!pageData) return;
-    setAnimFrame(value);
-    ensureFramesTo(pageData.index, value);
-  };
-
-  const endScrub = () => {
-    setFramePaused(scrubPrevPausedRef.current);
-  };
-
-  /** 逐帧前进 / 后退并暂停自动播放，方便定格看细节。 */
-  const stepFrame = (delta: number) => {
-    if (!pageData || !currentMeta) return;
-    const frames = currentMeta.frames;
-    setFramePaused(true);
-    setAnimFrame((value) => Math.min(Math.max(value + delta, 0), frames - 1));
-  };
 
   const toggleSpread = useCallback(() => {
     setSpread((value) => !value);
@@ -1454,19 +1289,14 @@ export default function Reader({
             (spread ? (
               <div className="reader-spread">
                 <img
-                  key={`${pageData.index}-${isAnimated ? `f${displayFrame}` : assetToken}`}
+                  key={`${pageData.index}-${assetToken}`}
                   src={mainSrc}
                   alt={pageData.name}
                   style={imageStyleFor(pageData)}
-                  decoding="sync"
+                  decoding={isAnimName(pageData.name) ? "async" : "sync"}
                   draggable={false}
                   onLoad={(event) => handleImageLoad(pageData.index, event)}
-                  onError={() => {
-                    // 动图帧未就绪时 404 属正常（会话还在解码），不要触发
-                    // 页面级自愈/错误态——那会把整页切到「加载失败」。
-                    if (isAnimated) return;
-                    handleImageError(pageData.index);
-                  }}
+                  onError={() => handleImageError(pageData.index)}
                 />
                 {visibleSecond && (
                   <img
@@ -1479,42 +1309,27 @@ export default function Reader({
                     )}
                     alt={visibleSecond.name}
                     style={imageStyleFor(visibleSecond)}
-                    decoding="sync"
+                    decoding={isAnimName(visibleSecond.name) ? "async" : "sync"}
                     draggable={false}
                     onLoad={(event) =>
                       handleImageLoad(visibleSecond.index, event)
                     }
-                    onError={() => {
-                      // 双页里第二页若是动图，原图仍由 webview 解，可能解码失败；
-                      // 这里不让它把整页拖进「加载失败」态。
-                      if (isAnimName(visibleSecond.name)) return;
-                      handleImageError(visibleSecond.index);
-                    }}
+                    onError={() => handleImageError(visibleSecond.index)}
                   />
                 )}
               </div>
             ) : (
               <img
-                key={`${pageData.index}-${isAnimated ? `f${displayFrame}` : assetToken}`}
+                key={`${pageData.index}-${assetToken}`}
                 src={mainSrc}
                 alt={pageData.name}
                 style={imageStyleFor(pageData)}
-                decoding="sync"
+                decoding={isAnimName(pageData.name) ? "async" : "sync"}
                 draggable={false}
                 onLoad={(event) => handleImageLoad(pageData.index, event)}
-                onError={() => {
-                  if (isAnimated) return;
-                  handleImageError(pageData.index);
-                }}
+                onError={() => handleImageError(pageData.index)}
               />
             ))}
-
-          {pageData && !mainSrc && !error && (
-            <div className="reader-state">
-              <span className="spinner" />
-              <p>正在解码动画帧…</p>
-            </div>
-          )}
 
           {!pageData && loading && (
             <div className="reader-state">
@@ -1618,62 +1433,6 @@ export default function Reader({
             </button>
           )}
         </div>
-
-        {isAnimated && currentMeta && (
-          <div className="reader-frame-scrub">
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => setFramePaused((value) => !value)}
-              aria-label={framePaused ? "继续播放动画" : "暂停动画"}
-              title={framePaused ? "继续播放动画" : "暂停动画"}
-            >
-              {framePaused ? (
-                <PlayIcon width={12} height={12} />
-              ) : (
-                <PauseIcon width={12} height={12} />
-              )}
-            </button>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => stepFrame(-1)}
-              disabled={displayFrame <= 0}
-              aria-label="上一帧"
-              title="上一帧"
-            >
-              <ChevronLeftIcon width={12} height={12} />
-            </button>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => stepFrame(1)}
-              disabled={displayFrame >= currentMeta.frames - 1}
-              aria-label="下一帧"
-              title="下一帧"
-            >
-              <ChevronRightIcon width={12} height={12} />
-            </button>
-            <span className="reader-frame-label">
-              帧 {displayFrame + 1} / {currentMeta.frames}
-              {readyFrames < currentMeta.frames
-                ? ` · 解码中 ${readyFrames}/${currentMeta.frames}`
-                : ""}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={currentMeta.frames - 1}
-              step={1}
-              value={displayFrame}
-              onPointerDown={beginScrub}
-              onChange={(event) => scrubToFrame(Number(event.target.value))}
-              onPointerUp={endScrub}
-              onBlur={endScrub}
-              aria-label="动画帧擦洗"
-            />
-          </div>
-        )}
 
         <div className="reader-zoom">
           <button

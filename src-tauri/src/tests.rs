@@ -2537,9 +2537,7 @@ fn sevenz_container_lists_and_reads_entries() {
 }
 
 #[test]
-fn gif_anim_meta_and_frame_roundtrip() {
-    use std::io::Cursor;
-
+fn gif_anim_meta_reads_frame_count_and_duration() {
     use image::codecs::gif::GifEncoder;
     use image::{Delay, Frame, RgbaImage};
     use zip::write::SimpleFileOptions;
@@ -2573,38 +2571,17 @@ fn gif_anim_meta_and_frame_roundtrip() {
         zip.finish().unwrap();
     }
 
+    // 元数据只扫块头：帧数 / 总时长 / 原始尺寸都要对
     let meta = crate::anim::anim_meta(&path, 0).unwrap();
     assert!(meta.animated);
     assert_eq!(meta.frames, 2);
     assert_eq!(meta.total_duration_ms, 300);
     assert_eq!((meta.width, meta.height), (4, 4));
 
-    // 两帧都能解码成 PNG；第 3 帧必须越界
-    for frame_index in 0..2u32 {
-        let cached = crate::anim::prepare_frame(&path, 0, frame_index).unwrap();
-        // 帧底是透明的（只有一颗像素），走 PNG 保住 alpha，不能用有损 JPEG 压平。
-        assert_eq!(cached.mime, "image/png");
-        assert!(cached.bytes.len() > 0);
-        let decoded = image::ImageReader::new(Cursor::new(cached.bytes.as_slice()))
-            .with_guessed_format()
-            .unwrap()
-            .decode()
-            .unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (4, 4));
-    }
-    assert!(crate::anim::prepare_frame(&path, 0, 2).is_err());
-
-    // 帧缓存命中：第二次 prepare 不再解码也能拿到同样的字节
-    let cached = crate::anim::prepare_frame(&path, 0, 0).unwrap();
-    assert_eq!(cached.mime, "image/png");
-
-    // 顺序解码会话：推进到帧 1 → 缓存里有 0/1 两帧；越界目标停在结尾
-    let progress = crate::anim::prepare_anim_frames(&path, 0, 1).unwrap();
-    assert_eq!(progress.ready, 2);
-    assert!(crate::anim::cached_frame(&path, 0, 0).is_some());
-    assert!(crate::anim::cached_frame(&path, 0, 1).is_some());
-    let progress = crate::anim::prepare_anim_frames(&path, 0, 9).unwrap();
-    assert_eq!(progress.ready, 2, "两帧动画的目标 9 应停在结尾 ready=2");
+    // 第二次走 meta 缓存，结果必须一致
+    let cached = crate::anim::anim_meta(&path, 0).unwrap();
+    assert_eq!(cached.frames, 2);
+    assert_eq!(cached.total_duration_ms, 300);
 
     // 静态页：meta 必须报 animated=false
     let static_zip = fixture.source.join("static-in-zip.zip");
@@ -2631,26 +2608,13 @@ fn real_pack_anim_meta_diagnostics() {
         return;
     }
 
-    let started = std::time::Instant::now();
-    match crate::anim::anim_meta(path, 0) {
-        Ok(meta) => eprintln!("[diag] page0({:?}) meta={meta:?}", started.elapsed()),
-        Err(error) => eprintln!("[diag] page0 ERROR: {error}"),
-    }
-
-    let started = std::time::Instant::now();
-    match crate::anim::anim_meta(path, 1) {
-        Ok(meta) => eprintln!("[diag] page1 meta={meta:?} (耗时 {:?})", started.elapsed()),
-        Err(error) => eprintln!("[diag] page1 ERROR: {error}"),
-    }
-
-    let started = std::time::Instant::now();
-    match crate::anim::prepare_frame(path, 1, 0) {
-        Ok(cached) => eprintln!(
-            "[diag] frame0 PNG {}B (耗时 {:?})",
-            cached.bytes.len(),
-            started.elapsed()
-        ),
-        Err(error) => eprintln!("[diag] frame0 ERROR: {error}"),
+    // 只测「进页要多快」：meta 必须只扫块头，不整段解码。
+    for index in 0..2 {
+        let started = std::time::Instant::now();
+        match crate::anim::anim_meta(path, index) {
+            Ok(meta) => eprintln!("[diag] page{index} meta={meta:?} (耗时 {:?})", started.elapsed()),
+            Err(error) => eprintln!("[diag] page{index} ERROR: {error}"),
+        }
     }
 
     let ttako = std::path::Path::new(r"F:\Hthings\BENZI\TTAKO 26.09 GIF [AI Generated].zip");
@@ -2663,26 +2627,6 @@ fn real_pack_anim_meta_diagnostics() {
             ),
             Err(error) => eprintln!("[diag] ttako page0 ERROR: {error}"),
         }
-    }
-
-    let started = std::time::Instant::now();
-    match crate::anim::prepare_anim_frames(path, 1, 11) {
-        Ok(progress) => eprintln!(
-            "[diag] session ready={} (耗时 {:?})",
-            progress.ready,
-            started.elapsed()
-        ),
-        Err(error) => eprintln!("[diag] session ERROR: {error}"),
-    }
-
-    let started = std::time::Instant::now();
-    match crate::anim::prepare_frame(path, 1, 5) {
-        Ok(cached) => eprintln!(
-            "[diag] frame5 PNG {}B (耗时 {:?})",
-            cached.bytes.len(),
-            started.elapsed()
-        ),
-        Err(error) => eprintln!("[diag] frame5 ERROR: {error}"),
     }
 }
 

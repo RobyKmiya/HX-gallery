@@ -5885,33 +5885,6 @@ svg {
   color: var(--text-soft);
 }
 
-/* 帧擦洗条：只在动图页出现，嵌在阅读器页脚中间 */
-.reader-frame-scrub {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  flex: 1 1 auto;
-  padding: 0 6px;
-}
-
-.reader-frame-label {
-  flex: none;
-  font-size: 11px;
-  color: var(--faint);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.reader-frame-scrub input[type="range"] {
-  flex: 1 1 auto;
-  min-width: 120px;
-  max-width: 380px;
-  height: 4px;
-  accent-color: var(--accent, #7c93ff);
-  cursor: pointer;
-}
-
 /* 播放模式按钮激活态 */
 .reader-zoom-presets button.is-active {
   color: var(--text);

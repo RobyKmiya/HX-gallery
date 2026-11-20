@@ -83,10 +83,8 @@ export interface ReaderPage {
 export interface AnimMeta {
   animated: boolean;
   frames: number;
-  /** 所有帧时长之和（毫秒），播放模式据此决定「播完翻页」的时刻。 */
+  /** 播一遍的总时长（毫秒），播放模式据此决定「播完翻页」的时刻。 */
   totalDurationMs: number;
-  /** 逐帧时长（毫秒），长度与 frames 一致；统一帧播放器据此推进。 */
-  frameDurationsMs: number[];
   width: number;
   height: number;
 }

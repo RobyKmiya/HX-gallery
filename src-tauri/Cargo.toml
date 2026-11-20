@@ -32,6 +32,8 @@ unrar-ng = "0.7"
 image = "0.25.10"
 # image 已经传递依赖 image-webp；直接声明以便使用其动画解码 API（帧数/时长/逐帧）
 image-webp = "0.2.4"
+# 读取 gif 帧延迟/帧数时只用块头信息（next_frame_info），不逐帧解像素，避免进页卡顿
+gif = "0.14"
 base64 = "0.23"
 walkdir = "2.5.0"
 natord = "1.0.9"

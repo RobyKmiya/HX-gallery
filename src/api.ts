@@ -189,14 +189,9 @@ export const api = {
   readReaderPage: (archiveId: number, index: number, current = false) =>
     invoke<ReaderPage>("read_reader_page", { archiveId, index, current }),
 
+  /** 动画元数据（帧数 / 总时长 / 原始尺寸）。动图由 webview 原生播放，播放模式据此决定停留时长。 */
   readAnimMeta: (archiveId: number, index: number) =>
     invoke<AnimMeta>("read_anim_meta", { archiveId, index }),
-  /** 预热某页第 frame 帧为 PNG；帧字节随后经 animFrameUrl 的 gallery:// URL 取用。 */
-  prepareAnimFrame: (archiveId: number, index: number, frame: number) =>
-    invoke<void>("prepare_anim_frame", { archiveId, index, frame }),
-  /** 顺序解码会话：把帧推进到 upto（含），3 秒预算到即返回进度，前端循环续跑。 */
-  prepareAnimFrames: (archiveId: number, index: number, upto: number) =>
-    invoke<{ ready: number }>("prepare_anim_frames", { archiveId, index, upto }),
 
   readReaderThumbnail: (archiveId: number, index: number, maxEdge?: number) =>
     invoke<ReaderThumb>("read_reader_thumbnail", {
@@ -293,22 +288,4 @@ export function readerPageUrl(
   if (token) params.set("t", String(token));
   const query = params.toString();
   return `${GALLERY_ORIGIN}/page/${archiveId}/${index}${query ? `?${query}` : ""}`;
-}
-
-/**
- * 动图单帧 PNG 的 URL（配合 api.prepareAnimFrame 预热使用；
- * 帧尚未预热时协议层返回 404）。
- */
-export function animFrameUrl(
-  archiveId: number,
-  index: number,
-  frame: number,
-  token = 0,
-  version?: string,
-): string {
-  const params = new URLSearchParams();
-  if (version) params.set("v", version);
-  if (token) params.set("t", String(token));
-  const query = params.toString();
-  return `${GALLERY_ORIGIN}/frame/${archiveId}/${index}/${frame}${query ? `?${query}` : ""}`;
 }

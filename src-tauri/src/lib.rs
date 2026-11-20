@@ -1041,7 +1041,7 @@ async fn read_reader_page(
     .map_err(|error| format!("读取页面异常结束: {error}"))?
 }
 
-/// 预热某页的动画元数据（帧数/总时长），供帧拖条与播放模式使用。
+/// 预热某页的动画元数据（帧数/总时长），供播放模式决定动图页停留多久。
 #[tauri::command]
 async fn read_anim_meta(
     state: State<'_, AppState>,
@@ -1056,43 +1056,6 @@ async fn read_anim_meta(
     })
     .await
     .map_err(|error| format!("读取动画信息异常结束: {error}"))?
-}
-
-/// 预热某页动画帧到 `upto`（含）：复用顺序解码会话增量推进，3 秒预算到即
-/// 返回进度；前端拿 ready 循环续跑直到覆盖目标。帧字节由 `gallery://` 协议取用。
-#[tauri::command]
-async fn prepare_anim_frames(
-    state: State<'_, AppState>,
-    archive_id: i64,
-    index: i64,
-    upto: u32,
-) -> Result<anim::FrameProgress, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = archive_file_path(&state, archive_id)?;
-        reader::remember_archive(archive_id, &path);
-        anim::prepare_anim_frames(&path, index, upto)
-    })
-    .await
-    .map_err(|error| format!("读取动画帧异常结束: {error}"))?
-}
-
-/// 预热某页的第 `frame` 帧为 PNG 并放进帧缓存；帧字节由 `gallery://` 协议取用。
-#[tauri::command]
-async fn prepare_anim_frame(
-    state: State<'_, AppState>,
-    archive_id: i64,
-    index: i64,
-    frame: u32,
-) -> Result<(), String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = archive_file_path(&state, archive_id)?;
-        reader::remember_archive(archive_id, &path);
-        anim::prepare_frame(&path, index, frame).map(|_| ())
-    })
-    .await
-    .map_err(|error| format!("读取动画帧异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -1429,8 +1392,6 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             open_reader,
             read_reader_page,
             read_anim_meta,
-            prepare_anim_frame,
-            prepare_anim_frames,
             read_reader_thumbnail,
             set_reading_progress,
             add_reader_bookmark,
