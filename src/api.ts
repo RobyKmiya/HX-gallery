@@ -58,6 +58,9 @@ export const api = {
   d2Reload: () => invoke<void>("d2_reload"),
   d2CloseWindow: () => invoke<void>("d2_close_window"),
 
+  /** 读当前浏览窗口地址，供「抓取当前页」一键使用（没开窗口返回空串）。 */
+  d2CurrentUrl: () => invoke<string>("d2_current_url"),
+
   /** 导入前的暂存：展开路径、给出大小 / 页数 / 疑似重复，不做任何复制。 */
   stageImportPaths: (paths: string[]) =>
     invoke<StageReport>("stage_import_paths", { paths }),

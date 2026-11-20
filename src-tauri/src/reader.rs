@@ -279,6 +279,18 @@ pub fn read_thumbnail(
     })
 }
 
+/// 取页面原始字节，优先复用页面缓存。
+///
+/// 动图（动画 webp/gif）一页二三十兆，解码前要先整段读出来；`read_page` 预热时
+/// 已经把这份字节放进页面缓存，这里直接复用，避免同一页在压缩包里被解压两遍。
+pub(crate) fn page_bytes_for_decode(
+    path: &Path,
+    page_index: i64,
+) -> Result<(String, Vec<u8>), String> {
+    let payload = page_payload(path, page_index, false)?;
+    Ok((payload.name.clone(), payload.bytes.as_ref().clone()))
+}
+
 pub(crate) fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, Vec<u8>), String> {
     if page_index < 0 {
         return Err("页码不能为负数".to_string());

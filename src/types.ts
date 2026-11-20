@@ -85,6 +85,8 @@ export interface AnimMeta {
   frames: number;
   /** 所有帧时长之和（毫秒），播放模式据此决定「播完翻页」的时刻。 */
   totalDurationMs: number;
+  /** 逐帧时长（毫秒），长度与 frames 一致；统一帧播放器据此推进。 */
+  frameDurationsMs: number[];
   width: number;
   height: number;
 }
@@ -333,6 +335,10 @@ export interface D2FetchReport {
   pageUrl: string;
   imageUrl: string;
   cbzPath: string;
+  /** 成功下载并写入 CBZ 的张数。 */
+  pages: number;
+  /** 失败（跳过）的张数。 */
+  failed: number;
   importReport: ImportReport;
 }
 

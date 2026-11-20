@@ -2582,7 +2582,8 @@ fn gif_anim_meta_and_frame_roundtrip() {
     // 两帧都能解码成 PNG；第 3 帧必须越界
     for frame_index in 0..2u32 {
         let cached = crate::anim::prepare_frame(&path, 0, frame_index).unwrap();
-        assert_eq!(cached.mime, "image/jpeg");
+        // 帧底是透明的（只有一颗像素），走 PNG 保住 alpha，不能用有损 JPEG 压平。
+        assert_eq!(cached.mime, "image/png");
         assert!(cached.bytes.len() > 0);
         let decoded = image::ImageReader::new(Cursor::new(cached.bytes.as_slice()))
             .with_guessed_format()
@@ -2595,7 +2596,7 @@ fn gif_anim_meta_and_frame_roundtrip() {
 
     // 帧缓存命中：第二次 prepare 不再解码也能拿到同样的字节
     let cached = crate::anim::prepare_frame(&path, 0, 0).unwrap();
-    assert_eq!(cached.mime, "image/jpeg");
+    assert_eq!(cached.mime, "image/png");
 
     // 顺序解码会话：推进到帧 1 → 缓存里有 0/1 两帧；越界目标停在结尾
     let progress = crate::anim::prepare_anim_frames(&path, 0, 1).unwrap();

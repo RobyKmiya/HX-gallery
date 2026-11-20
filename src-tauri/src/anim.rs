@@ -19,12 +19,14 @@ use image::{AnimationDecoder, DynamicImage, Frame, ImageDecoder};
 use crate::pagecache::{ByteCache, Cached};
 use crate::reader;
 
-/// 帧字节缓存预算。预览帧已降采样（最长边 1280），单帧 PNG 约 0.3–1MB。
-const FRAME_CACHE_BUDGET: usize = 160 * 1024 * 1024;
+/// 帧字节缓存预算。帧现在就是「画面本体」（由前端统一帧播放器渲染），
+/// 不再只是拖条预览，所以预算放宽到 256MB，能装下更多真彩帧。
+const FRAME_CACHE_BUDGET: usize = 256 * 1024 * 1024;
 /// meta 缓存条数上限（条目很小，超了整体清空）。
 const META_CACHE_LIMIT: usize = 256;
-/// 拖条预览帧的最长边。拖条只是选帧预览，松手回原生动画看全分辨率。
-const FRAME_PREVIEW_MAX_EDGE: u32 = 1280;
+/// 帧的最长边。播放器直接渲染帧，所以这个值要够大才不糊；2560 已覆盖绝大
+/// 多数画集与 AI 动图（普遍 ≤ 2048），超过的仍降采样以守住内存。
+const FRAME_PREVIEW_MAX_EDGE: u32 = 2560;
 /// 顺序解码会话的常驻数量上限（按 (路径, 页) 寻址，最旧淘汰）。
 const SESSION_LIMIT: usize = 4;
 /// 每次会话命令的解码预算：到时即返回进度，前端循环续跑，避免单次占用过久。
@@ -57,11 +59,14 @@ struct FrameSession {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AnimMeta {
     pub animated: bool,
     pub frames: u32,
     /// 所有帧时长之和（毫秒）。播放模式用它决定「播完翻页」的时刻。
     pub total_duration_ms: u64,
+    /// 逐帧时长（毫秒），统一帧播放器按它推进；长度与 frames 一致。
+    pub frame_durations_ms: Vec<u64>,
     pub width: u32,
     pub height: u32,
 }
@@ -72,6 +77,7 @@ impl AnimMeta {
             animated: false,
             frames: 0,
             total_duration_ms: 0,
+            frame_durations_ms: Vec::new(),
             width,
             height,
         }
@@ -110,7 +116,7 @@ pub(crate) fn anim_meta(path: &Path, page_index: i64) -> Result<AnimMeta, String
         return Ok(hit.clone());
     }
 
-    let (name, bytes) = reader::read_page_bytes(path, page_index)?;
+    let (name, bytes) = reader::page_bytes_for_decode(path, page_index)?;
     let meta = match extension_of(&name).as_str() {
         "gif" => gif_meta(&bytes)?,
         "webp" => webp_meta(&bytes)?,
@@ -137,13 +143,13 @@ pub(crate) fn prepare_frame(path: &Path, page_index: i64, frame_index: u32) -> R
         return Ok(hit);
     }
 
-    let (name, bytes) = reader::read_page_bytes(path, page_index)?;
-    let jpeg = match extension_of(&name).as_str() {
-        "gif" => gif_frame_png(&bytes, frame_index)?,
-        "webp" => webp_frame_png(&bytes, frame_index)?,
+    let (name, bytes) = reader::page_bytes_for_decode(path, page_index)?;
+    let (frame_bytes, mime) = match extension_of(&name).as_str() {
+        "gif" => gif_frame_bytes(&bytes, frame_index)?,
+        "webp" => webp_frame_bytes(&bytes, frame_index)?,
         _ => return Err("该页不是动图格式".to_string()),
     };
-    let cached = Cached::new(format!("{name}#f{frame_index}"), "image/jpeg", jpeg);
+    let cached = Cached::new(format!("{name}#f{frame_index}"), mime, frame_bytes);
 
     if let Ok(mut cache) = frame_cache().lock() {
         cache.insert(key.clone(), cached.clone());
@@ -183,7 +189,7 @@ pub(crate) fn prepare_anim_frames(
         match session_decode_next(&mut session) {
             Ok(image) => {
                 let preview = downscale_preview(image);
-                let jpeg = jpeg_bytes(&preview)?;
+                let (frame_bytes, mime) = encode_frame(&preview)?;
                 let key = reader::cache_key(
                     "frame",
                     path,
@@ -191,7 +197,7 @@ pub(crate) fn prepare_anim_frames(
                     &session.cursor.to_string(),
                 )?;
                 if let Ok(mut cache) = frame_cache().lock() {
-                    cache.insert(key, Cached::new("frame".to_string(), "image/jpeg", jpeg));
+                    cache.insert(key, Cached::new("frame".to_string(), mime, frame_bytes));
                 }
                 session.cursor += 1;
             }
@@ -212,7 +218,7 @@ pub(crate) fn prepare_anim_frames(
 }
 
 fn create_session(path: &Path, page_index: i64, stamp: (i64, u64)) -> Result<FrameSession, String> {
-    let (name, bytes) = reader::read_page_bytes(path, page_index)?;
+    let (name, bytes) = reader::page_bytes_for_decode(path, page_index)?;
     match extension_of(&name).as_str() {
         "gif" => {
             let decoder =
@@ -271,7 +277,8 @@ fn session_decode_next(session: &mut FrameSession) -> Result<DynamicImage, Strin
     }
 }
 
-/// 预览降采样：拖条只是选帧，松手回原生动画看全分辨率。
+/// 帧降采样：帧就是播放器渲染的画面本体，只在超过 `FRAME_PREVIEW_MAX_EDGE`
+/// 时才缩一档，既保住清晰度（2560 覆盖绝大多数画集与 AI 动图）又守住内存。
 fn downscale_preview(image: DynamicImage) -> DynamicImage {
     let (width, height) = (image.width(), image.height());
     let longest = width.max(height);
@@ -294,15 +301,37 @@ fn extension_of(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// 预览帧编码：JPEG q80。体积是 PNG-Fast 的约十分之一（160MB 缓存能装下
-/// 数百帧而不是几十帧），编码也更快；拖条预览对有损不敏感，松手回原生动画。
-fn jpeg_bytes(image: &DynamicImage) -> Result<Vec<u8>, String> {
-    let mut encoded = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 80);
-    encoder
-        .encode_image(&image.to_rgb8())
-        .map_err(|error| format!("帧编码失败: {error}"))?;
-    Ok(encoded)
+/// 帧编码。帧现在是播放器直接渲染的画面本体，所以保真优先：
+/// - 帧带真实透明像素（部分动图 webp / gif 会抠图）走 PNG，避免 JPEG 把
+///   透明压成黑底，也避免播放时背景色跳变；
+/// - 其余（绝大多数 AI 动图是不透明整帧）走 JPEG q92：在这个画质档位与
+///   显示尺寸下肉眼无损，体积却只有 PNG 的十分之一，能一次装下整段动画。
+fn encode_frame(image: &DynamicImage) -> Result<(Vec<u8>, &'static str), String> {
+    if has_transparency(image) {
+        let mut encoded = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
+            .map_err(|error| format!("帧编码失败: {error}"))?;
+        Ok((encoded, "image/png"))
+    } else {
+        let mut encoded = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 92);
+        encoder
+            .encode_image(&image.to_rgb8())
+            .map_err(|error| format!("帧编码失败: {error}"))?;
+        Ok((encoded, "image/jpeg"))
+    }
+}
+
+/// 帧里是否真的出现了非完全不透明的像素。只看「有没有 alpha 通道」不够——
+/// gif 解码出来的一律是 RGBA，但绝大多数帧其实全不透明，误判会让这些帧白白
+/// 用上体积十倍于 JPEG 的 PNG。
+fn has_transparency(image: &DynamicImage) -> bool {
+    match image {
+        DynamicImage::ImageRgba8(buffer) => buffer.pixels().any(|pixel| pixel.0[3] < 255),
+        DynamicImage::ImageLumaA8(buffer) => buffer.pixels().any(|pixel| pixel.0[1] < 255),
+        _ => false,
+    }
 }
 
 fn gif_meta(bytes: &[u8]) -> Result<AnimMeta, String> {
@@ -313,12 +342,19 @@ fn gif_meta(bytes: &[u8]) -> Result<AnimMeta, String> {
 
     let mut count = 0u32;
     let mut total = 0u64;
+    let mut durations = Vec::new();
     while let Some(frame) = frames.next() {
         let frame = frame.map_err(|error| format!("GIF 帧读取失败: {error}"))?;
         // Delay 的单位是「毫秒分子/毫秒分母」；gif 解码器固定分母 1，
-        // 分母异常（0）时按 100ms 兜底，避免拖条统计被坏数据拖爆。
+        // 分母异常（0）时按 100ms 兜底，避免统计被坏数据拖爆。
         let (numer, denom) = frame.delay().numer_denom_ms();
-        total += if denom == 0 { 100 } else { u64::from(numer) / u64::from(denom) };
+        let millis = if denom == 0 {
+            100
+        } else {
+            u64::from(numer) / u64::from(denom)
+        };
+        total += millis;
+        durations.push(millis);
         count += 1;
     }
 
@@ -326,6 +362,7 @@ fn gif_meta(bytes: &[u8]) -> Result<AnimMeta, String> {
         animated: count > 1,
         frames: count,
         total_duration_ms: total,
+        frame_durations_ms: durations,
         width,
         height,
     })
@@ -340,16 +377,30 @@ fn webp_meta(bytes: &[u8]) -> Result<AnimMeta, String> {
     }
 
     let frames = decoder.num_frames();
+    let total = decoder.loop_duration();
+    // image-webp 只在逐帧读取时给单帧时长，meta 阶段不做整段解码（AI 动图动辄
+    // 上百帧，整段解码会让「进画集」卡上好几秒）。AI 动图的帧时长基本均匀，
+    // 按一轮总时长均分即可；真正播放时按这份时值推进，观感与原始一致。
+    let per_frame = if frames > 0 && total > 0 {
+        (total / u64::from(frames)).max(1)
+    } else {
+        100
+    };
     Ok(AnimMeta {
         animated: frames > 1,
         frames,
-        total_duration_ms: decoder.loop_duration(),
+        total_duration_ms: if total > 0 {
+            total
+        } else {
+            per_frame * u64::from(frames)
+        },
+        frame_durations_ms: vec![per_frame; frames as usize],
         width,
         height,
     })
 }
 
-fn gif_frame_png(bytes: &[u8], frame_index: u32) -> Result<Vec<u8>, String> {
+fn gif_frame_bytes(bytes: &[u8], frame_index: u32) -> Result<(Vec<u8>, &'static str), String> {
     let decoder =
         GifDecoder::new(Cursor::new(bytes)).map_err(|error| format!("GIF 解码失败: {error}"))?;
     let frames = decoder.into_frames();
@@ -363,10 +414,10 @@ fn gif_frame_png(bytes: &[u8], frame_index: u32) -> Result<Vec<u8>, String> {
         }
     }
     let frame = found.ok_or_else(|| "帧序号超出范围".to_string())?;
-    jpeg_bytes(&DynamicImage::ImageRgba8(frame.into_buffer()))
+    encode_frame(&DynamicImage::ImageRgba8(frame.into_buffer()))
 }
 
-fn webp_frame_png(bytes: &[u8], frame_index: u32) -> Result<Vec<u8>, String> {
+fn webp_frame_bytes(bytes: &[u8], frame_index: u32) -> Result<(Vec<u8>, &'static str), String> {
     let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes))
         .map_err(|error| format!("webp 解码失败: {error}"))?;
     let (width, height) = decoder.dimensions();
@@ -390,7 +441,7 @@ fn webp_frame_png(bytes: &[u8], frame_index: u32) -> Result<Vec<u8>, String> {
     let Some(rgba) = found else {
         return Err("帧序号超出范围".to_string());
     };
-    jpeg_bytes(&DynamicImage::ImageRgba8(
+    encode_frame(&DynamicImage::ImageRgba8(
         image::RgbaImage::from_raw(width, height, rgba)
             .ok_or_else(|| "帧缓冲尺寸不匹配".to_string())?,
     ))

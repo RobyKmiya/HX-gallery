@@ -127,6 +127,21 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
     onNotify("已取消本次抓取", "info");
   }
 
+  /** 把浏览窗口当前地址一键填进作品页输入框，省去来回复制粘贴。 */
+  async function grabCurrent() {
+    try {
+      const current = await api.d2CurrentUrl();
+      if (!current) {
+        onNotify("浏览窗口还没打开，先点上面的「打开」", "info");
+        return;
+      }
+      setUrl(current);
+      onNotify("已填入当前页地址", "success");
+    } catch (err) {
+      onNotify(String(err), "error");
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div
@@ -226,6 +241,14 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
                   color: "var(--text)",
                 }}
               />
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <button type="button" className="btn btn-quiet btn-compact" onClick={() => void grabCurrent()}>
+                  抓取当前页
+                </button>
+                <span className="queue-hint" style={{ alignSelf: "center" }}>
+                  直接取浏览窗口当前地址，不用再复制一遍
+                </span>
+              </div>
             </div>
           </section>
 
@@ -258,6 +281,9 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
               <div className="release-row-text">
                 <strong>本次结果</strong>
                 <p className="queue-hint">标题：{report.title}</p>
+                <p className="queue-hint">
+                  抓取 {report.pages} 张 / 跳过 {report.failed} 张
+                </p>
                 <p className="queue-hint">入库：{report.importReport.message}</p>
                 <p className="queue-hint">
                   新增 {report.importReport.imported} / 跳过 {report.importReport.skipped} / 失败{" "}
