@@ -2630,6 +2630,95 @@ fn real_pack_anim_meta_diagnostics() {
     }
 }
 
+/// 真实动图包的「取一页要多久」诊断：区分压缩方式 / 解压耗时 / 缓存命中耗时。
+///
+/// 用途：动图阅读「加载速度堪忧」时先看清瓶颈在「解压」「传输」还是「渲染」。
+/// 跑法：`cargo test --lib real_pack_page_read_diagnostics -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn real_pack_page_read_diagnostics() {
+    use std::time::Instant;
+
+    let packs = [
+        r"F:\Hthings\BENZI\[HajiMi] Amiya [Animated WEBP] [AI Generated].zip",
+        r"F:\Hthings\BENZI\TTAKO 26.09 GIF [AI Generated].zip",
+    ];
+
+    for pack in packs {
+        let path = std::path::Path::new(pack);
+        if !path.exists() {
+            eprintln!("[diag] 真实包不存在，跳过: {pack}");
+            continue;
+        }
+
+        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        eprintln!(
+            "\n[diag] ===== {pack}\n[diag] 包体 {:.1} MB",
+            size as f64 / 1048576.0
+        );
+
+        // 每个条目的压缩方式与压缩前后大小：判断「解压」到底贵不贵。
+        if let Ok(file) = std::fs::File::open(path)
+            && let Ok(mut zip) = zip::ZipArchive::new(file)
+        {
+            let (mut compressed, mut unpacked) = (0u64, 0u64);
+            let count = zip.len();
+            for index in 0..count {
+                let Ok(entry) = zip.by_index(index) else {
+                    continue;
+                };
+                compressed += entry.compressed_size();
+                unpacked += entry.size();
+                if index < 2 || entry.size() > 4 * 1024 * 1024 {
+                    eprintln!(
+                        "[diag]  entry {index:>4} method={:?} comp={:.1}MB raw={:.1}MB  {}",
+                        entry.compression(),
+                        entry.compressed_size() as f64 / 1048576.0,
+                        entry.size() as f64 / 1048576.0,
+                        entry.name()
+                    );
+                }
+            }
+            eprintln!(
+                "[diag] 共 {count} 条目；压缩合计 {:.1} MB / 原始合计 {:.1} MB",
+                compressed as f64 / 1048576.0,
+                unpacked as f64 / 1048576.0
+            );
+        }
+
+        for index in 0..3 {
+            let started = Instant::now();
+            match crate::reader::read_page(path, index, false) {
+                Ok(page) => eprintln!(
+                    "[diag] read_page({index}) 冷 {:.2} MB \"{}\" 耗时 {:?}",
+                    page.bytes as f64 / 1048576.0,
+                    page.name,
+                    started.elapsed()
+                ),
+                Err(error) => eprintln!("[diag] read_page({index}) ERROR: {error}"),
+            }
+
+            let started = Instant::now();
+            let _ = crate::reader::read_page(path, index, false);
+            eprintln!("[diag] read_page({index}) 热(后端缓存) 耗时 {:?}", started.elapsed());
+        }
+
+        // 协议层每次请求都要把整页字节 clone 一份（UI 线程上）。
+        if let Ok(page) = crate::reader::read_page(path, 0, false) {
+            if let Some(hit) = crate::reader::cached_page(path, 0) {
+                let started = Instant::now();
+                let body = hit.bytes.as_ref().clone();
+                eprintln!(
+                    "[diag] 协议层 clone {} 字节 耗时 {:?}",
+                    body.len(),
+                    started.elapsed()
+                );
+            }
+            let _ = page;
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn generate_progress_hud_preview() {
