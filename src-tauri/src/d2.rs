@@ -233,7 +233,7 @@ fn emit_done(app: &AppHandle, done: D2Done) {
     let _ = app.emit("d2://done", done);
 }
 
-fn sanitize_file_name(input: &str) -> String {
+pub fn sanitize_file_name(input: &str) -> String {
     let cleaned: String = input
         .chars()
         .map(|c| {
