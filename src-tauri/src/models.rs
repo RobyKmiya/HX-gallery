@@ -328,7 +328,7 @@ pub struct ScanReport {
     pub message: String,
 }
 
-/// 待看目录。以日期命名，最多同时存在 3 个（见 `db::MAX_QUEUES`）。
+/// 待看目录。数量不设上限，成员按 added_at 排序（队列顺序）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Queue {

@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 
 /// 单个待看目录默认放几本。
-use crate::db::{DEFAULT_QUEUE_SIZE, MAX_QUEUES};
+use crate::db::DEFAULT_QUEUE_SIZE;
 
 /// 一个候选画集：id、标题、read_count、标签权重和。
 #[derive(Clone)]
@@ -254,7 +254,7 @@ fn sampling_weight(candidate: &Candidate) -> f64 {
 /// 生成（或续满）一个待看目录。
 ///
 /// - 已有同名目录时在其上追加，不再重复挑已收录的画集；
-/// - 目录数量超过 `MAX_QUEUES` 时，淘汰创建时间最早的（连带清空其成员）。
+/// - 目录数量不设上限（管理员要求「可造任意队列」），想留多少个留多少个。
 pub fn fill_queue(
     conn: &mut Connection,
     name: &str,
@@ -264,7 +264,7 @@ pub fn fill_queue(
     let size = options
         .size
         .unwrap_or(DEFAULT_QUEUE_SIZE)
-        .clamp(1, 50) as usize;
+        .clamp(1, 200) as usize;
     let include_read = options.include_read.unwrap_or(false);
 
     let name = name.trim();
@@ -316,20 +316,6 @@ pub fn fill_queue(
     {
         Some(id) => id,
         None => {
-            let count: i64 = transaction
-                .query_row("SELECT COUNT(*) FROM queues", [], |row| row.get(0))
-                .map_err(|e| format!("统计待看目录失败: {e}"))?;
-            if count >= MAX_QUEUES {
-                // 淘汰最旧的一个，连同成员（外键 CASCADE）。
-                transaction
-                    .execute(
-                        "DELETE FROM queues WHERE id = (
-                            SELECT id FROM queues ORDER BY created_at ASC, id ASC LIMIT 1
-                         )",
-                        [],
-                    )
-                    .map_err(|e| format!("淘汰最旧待看目录失败: {e}"))?;
-            }
             transaction
                 .execute(
                     "INSERT INTO queues(name, created_at) VALUES (?1, ?2)",
@@ -341,12 +327,14 @@ pub fn fill_queue(
     };
 
     let mut titles = Vec::new();
-    for candidate in &picked {
+    // added_at 就是队列顺序（成员按它 ASC 排）：随机挑的也按挑选顺序落时间戳，
+    // 保证同批成员之间顺序稳定、且都在 now 之前（不挡后面真实插入的排到队尾）。
+    for (index, candidate) in picked.iter().enumerate() {
         transaction
             .execute(
                 "INSERT OR IGNORE INTO queue_archives(queue_id, archive_id, added_at)
                  VALUES (?1, ?2, ?3)",
-                rusqlite::params![queue_id, candidate.id, now],
+                rusqlite::params![queue_id, candidate.id, now + index as i64],
             )
             .map_err(|e| format!("加入待看目录失败: {e}"))?;
         titles.push(candidate.title.clone());
@@ -418,6 +406,37 @@ pub fn delete_queue(conn: &Connection, queue_id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// 新建一个**空**待看目录（管理员要求：可造任意队列——先建壳，再用多选挑入）。
+/// 名字规则与 fill_queue 一致：非空、≤32 字符；重名直接报错。
+pub fn create_queue(conn: &mut Connection, name: &str) -> Result<crate::models::Queue, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("待看目录名称不能为空".to_string());
+    }
+    if name.chars().count() > 32 {
+        return Err("待看目录名称最多 32 个字符".to_string());
+    }
+
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM queues WHERE name = ?1 COLLATE NOCASE",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询待看目录失败: {e}"))?;
+    if exists > 0 {
+        return Err(format!("已有叫「{name}」的待看目录"));
+    }
+
+    let now = fsutil::now_ms();
+    conn.execute(
+        "INSERT INTO queues(name, created_at) VALUES (?1, ?2)",
+        rusqlite::params![name, now],
+    )
+    .map_err(|e| format!("创建待看目录失败: {e}"))?;
+    queue_by_name(conn, name)?.ok_or_else(|| "待看目录创建后读取失败".to_string())
+}
+
 /// 手动把单本画集加入待看目录。
 ///
 /// 返回是否真的新增（重复加入不算错误，返回 false）。目录与画集都必须
@@ -463,6 +482,119 @@ pub fn remove_from_queue(conn: &Connection, queue_id: i64, archive_id: i64) -> R
     )
     .map_err(|e| format!("移出待看目录失败: {e}"))?;
     Ok(())
+}
+
+/// 批量把画集**按给定顺序**追加进待看目录（管理员要求：自选任意数量）。
+///
+/// 返回真正新增的本数；已在目录里的跳过（保持它原有的位置不动）。
+/// added_at 用 `now - N - 1 + i`：既保证同批之间严格按传入顺序，又全部落在
+/// now 之前——之后任何真实时间的插入都自然排到队尾。
+pub fn add_many_to_queue(
+    conn: &mut Connection,
+    queue_id: i64,
+    archive_ids: &[i64],
+) -> Result<i64, String> {
+    if archive_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let queue_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM queues WHERE id = ?1",
+            [queue_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询待看目录失败: {e}"))?;
+    if queue_exists == 0 {
+        return Err("待看目录不存在".to_string());
+    }
+
+    let now = fsutil::now_ms();
+    let base = now - archive_ids.len() as i64 - 1;
+    let mut transaction = db::begin_write(conn)?;
+    let mut added = 0i64;
+    for (index, archive_id) in archive_ids.iter().enumerate() {
+        let archive_exists: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM archives WHERE id = ?1 AND deleted_at IS NULL",
+                [archive_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("查询画集失败: {e}"))?;
+        if archive_exists == 0 {
+            continue;
+        }
+        let changed = transaction
+            .execute(
+                "INSERT OR IGNORE INTO queue_archives(queue_id, archive_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![queue_id, archive_id, base + index as i64],
+            )
+            .map_err(|e| format!("加入待看目录失败: {e}"))?;
+        added += changed as i64;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("提交待看目录失败: {e}"))?;
+    Ok(added)
+}
+
+/// 在待看目录里把一本往前/往后挪一格（direction：-1 上移，1 下移）。
+///
+/// 队列顺序 = added_at ASC，所以重排就是与相邻成员交换时间戳，零迁移。
+/// 已经在头/尾时是幂等 no-op。
+pub fn move_queue_archive(
+    conn: &mut Connection,
+    queue_id: i64,
+    archive_id: i64,
+    direction: i64,
+) -> Result<(), String> {
+    let members: Vec<(i64, i64)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT archive_id, added_at FROM queue_archives
+                 WHERE queue_id = ?1
+                 ORDER BY added_at ASC, archive_id ASC",
+            )
+            .map_err(|e| format!("读取目录成员失败: {e}"))?;
+        let rows = statement
+            .query_map([queue_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("读取目录成员失败: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取目录成员失败: {e}"))?
+    };
+
+    let index = members
+        .iter()
+        .position(|(id, _)| *id == archive_id)
+        .ok_or("该画集不在此待看目录里")?;
+    let target = index as i64 + direction;
+    if target < 0 || target as usize >= members.len() {
+        return Ok(());
+    }
+    let (neighbor_id, neighbor_at) = members[target as usize];
+    let mine_at = members[index].1;
+
+    let transaction = db::begin_write(conn)?;
+    transaction
+        .execute(
+            "UPDATE queue_archives SET added_at = ?1
+             WHERE queue_id = ?2 AND archive_id = ?3",
+            rusqlite::params![neighbor_at, queue_id, archive_id],
+        )
+        .map_err(|e| format!("调整顺序失败: {e}"))?;
+    transaction
+        .execute(
+            "UPDATE queue_archives SET added_at = ?1
+             WHERE queue_id = ?2 AND archive_id = ?3",
+            rusqlite::params![mine_at, queue_id, neighbor_id],
+        )
+        .map_err(|e| format!("调整顺序失败: {e}"))?;
+    transaction
+        .commit()
+        .map_err(|e| format!("提交顺序调整失败: {e}"))
 }
 
 /// 取待看目录里的成员，按加入顺序。

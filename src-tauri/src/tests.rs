@@ -2171,9 +2171,9 @@ fn queue_prefers_less_read_archives() {
     );
 }
 
-/// 待看目录最多 3 个，超出的淘汰最旧的。
+/// 待看目录数量不设上限（管理员要求「可造任意队列」），新建不再淘汰旧的。
 #[test]
-fn queues_are_capped_at_three() {
+fn queues_have_no_cap() {
     let fixture = Fixture::new();
     let zip = fixture.source.join("A.cbz");
     write_zip(&zip, &["a.png"], 5);
@@ -2203,8 +2203,118 @@ fn queues_are_capped_at_three() {
     }
 
     let queues = crate::queue::list_queues(&context.conn).unwrap();
-    assert_eq!(queues.len(), 3, "待看目录最多保留 3 个：{queues:?}");
+    assert_eq!(queues.len(), 5, "5 个目录全部保留：{queues:?}");
     assert_eq!(queues[0].name, "目录-4", "最新建的在最前");
+}
+
+/// 批量入队：按传入顺序落位、任意数量、重复加入跳过（管理员要求：自选任意数量）。
+#[test]
+fn add_many_to_queue_keeps_order_and_skips_duplicates() {
+    let fixture = Fixture::new();
+    let mut zips = Vec::new();
+    for index in 0..4 {
+        let path = fixture.source.join(format!("包-{index}.cbz"));
+        write_zip(&path, &["a.png"], 40 + index as u8);
+        zips.push(path);
+    }
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        zips,
+        ImportOptions::default(),
+        |_| {},
+    );
+    assert_eq!(report.imported, 4, "errors: {:?}", report.errors);
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let id_of = |title: &str| {
+        page.items
+            .iter()
+            .find(|item| item.title == title)
+            .unwrap()
+            .id
+    };
+    let ids = vec![
+        id_of("包-3"),
+        id_of("包-0"),
+        id_of("包-2"),
+        id_of("包-1"),
+    ];
+
+    let queue = crate::queue::create_queue(&mut context.conn, "自选队列").unwrap();
+    let added = crate::queue::add_many_to_queue(&mut context.conn, queue.id, &ids).unwrap();
+    assert_eq!(added, 4, "4 本全部入队");
+    let members = crate::queue::queue_archives(&context.conn, queue.id).unwrap();
+    assert_eq!(members, ids, "队列成员按传入顺序排列");
+
+    // 重复加入：全部跳过（保持原位置），不计新增。
+    let again = crate::queue::add_many_to_queue(&mut context.conn, queue.id, &ids).unwrap();
+    assert_eq!(again, 0, "重复加入不算新增");
+    let members_again = crate::queue::queue_archives(&context.conn, queue.id).unwrap();
+    assert_eq!(members_again, ids, "顺序不变");
+}
+
+/// 队列内上下移动：交换相邻成员的顺序，头/尾越界是幂等 no-op。
+#[test]
+fn move_queue_archive_swaps_neighbors() {
+    let fixture = Fixture::new();
+    let mut zips = Vec::new();
+    for index in 0..3 {
+        let path = fixture.source.join(format!("本-{index}.cbz"));
+        write_zip(&path, &["a.png"], 50 + index as u8);
+        zips.push(path);
+    }
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        zips,
+        ImportOptions::default(),
+        |_| {},
+    );
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let id_of = |title: &str| {
+        page.items
+            .iter()
+            .find(|item| item.title == title)
+            .unwrap()
+            .id
+    };
+    let ids = vec![id_of("本-0"), id_of("本-1"), id_of("本-2")];
+    let queue = crate::queue::create_queue(&mut context.conn, "顺序队列").unwrap();
+    crate::queue::add_many_to_queue(&mut context.conn, queue.id, &ids).unwrap();
+
+    // 把队尾那本上移一格 → [本-0, 本-2, 本-1]
+    crate::queue::move_queue_archive(&mut context.conn, queue.id, ids[2], -1).unwrap();
+    let members = crate::queue::queue_archives(&context.conn, queue.id).unwrap();
+    assert_eq!(members, vec![ids[0], ids[2], ids[1]]);
+
+    // 队头再上移：幂等，顺序不变
+    crate::queue::move_queue_archive(&mut context.conn, queue.id, ids[0], -1).unwrap();
+    let members = crate::queue::queue_archives(&context.conn, queue.id).unwrap();
+    assert_eq!(members, vec![ids[0], ids[2], ids[1]]);
+
+    // ids[2] 下移一次 → 回到 [0,1,2]；再下移一次在队尾，幂等
+    crate::queue::move_queue_archive(&mut context.conn, queue.id, ids[2], 1).unwrap();
+    let members = crate::queue::queue_archives(&context.conn, queue.id).unwrap();
+    assert_eq!(members, vec![ids[0], ids[1], ids[2]]);
+    crate::queue::move_queue_archive(&mut context.conn, queue.id, ids[2], 1).unwrap();
+    let members = crate::queue::queue_archives(&context.conn, queue.id).unwrap();
+    assert_eq!(members, vec![ids[0], ids[1], ids[2]]);
 }
 
 /// 待看目录进度：读完的本计入 finished。

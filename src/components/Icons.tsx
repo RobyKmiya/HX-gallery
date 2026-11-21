@@ -97,6 +97,22 @@ export function ChevronRightIcon(props: IconProps) {
   );
 }
 
+export function ChevronUpIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="m18 15-6-6-6 6" />
+    </svg>
+  );
+}
+
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
 export function FirstPageIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

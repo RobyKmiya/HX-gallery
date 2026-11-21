@@ -227,6 +227,17 @@ export const api = {
   removeFromQueue: (queueId: number, archiveId: number) =>
     invoke<void>("remove_from_queue", { queueId, archiveId }),
 
+  /** 新建一个空的待看目录（先建壳，再用多选挑入）。 */
+  createQueue: (name: string) => invoke<Queue>("create_queue", { name }),
+
+  /** 批量按传入顺序把画集追加进待看目录；返回真正新增的本数。 */
+  addManyToQueue: (queueId: number, archiveIds: number[]) =>
+    invoke<number>("add_many_to_queue", { queueId, archiveIds }),
+
+  /** 队列内把一本往前/往后挪一格（direction：-1 上移，1 下移）。 */
+  moveQueueArchive: (queueId: number, archiveId: number, direction: -1 | 1) =>
+    invoke<void>("move_queue_archive", { queueId, archiveId, direction }),
+
   /** 标签权重：0 表示不想看到带此标签的画集；默认 100。 */
   setTagWeight: (tagId: number, weight: number) =>
     invoke<Tag>("set_tag_weight", { tagId, weight }),

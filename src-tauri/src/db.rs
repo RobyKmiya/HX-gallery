@@ -17,9 +17,6 @@ use crate::translate;
 
 pub(crate) const SCHEMA_VERSION: i64 = 9;
 
-/// 同时最多保留多少个待看目录。超出的在新建时按创建时间淘汰最旧的。
-pub const MAX_QUEUES: i64 = 3;
-
 /// 待看目录默认放几本。
 pub const DEFAULT_QUEUE_SIZE: i64 = 10;
 

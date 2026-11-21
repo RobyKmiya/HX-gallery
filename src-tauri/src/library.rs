@@ -797,6 +797,19 @@ pub fn query_archives(
         ""
     };
 
+    // 队列视图按队列顺序（queue_archives.added_at ASC）排——「造队列」的顺序
+    // 就是阅读顺序，用户的其它排序键在队列视图里让位。所有行都是队列成员
+    // （WHERE 已用 EXISTS 过滤），子查询不会返回 NULL。
+    let queue_order = query
+        .queue_id
+        .map(|qid| {
+            format!(
+                "(SELECT qa.added_at FROM queue_archives qa \
+                  WHERE qa.queue_id = {qid} AND qa.archive_id = a.id) ASC, "
+            )
+        })
+        .unwrap_or_default();
+
     let sql = format!(
         "SELECT a.id,
                 COALESCE(NULLIF(a.title, ''), a.file_name),
@@ -819,7 +832,7 @@ pub fn query_archives(
          FROM archives a
          {tag_join}{collection_join}
          WHERE {filter}
-         ORDER BY {group_order}{null_order}{sort} {direction}, a.id DESC
+         ORDER BY {queue_order}{group_order}{null_order}{sort} {direction}, a.id DESC
          LIMIT ? OFFSET ?"
     );
 

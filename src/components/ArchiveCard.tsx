@@ -6,6 +6,8 @@ import {
   AlertIcon,
   BookIcon,
   CheckIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
   HeartIcon,
   LogoIcon,
   StarIcon,
@@ -20,6 +22,10 @@ interface ArchiveCardProps {
   onQuickEdit?: (card: ArchiveCardData) => void;
   onRead?: (card: ArchiveCardData) => void;
   eager?: boolean;
+  /** 队列视图：把这本在待看队列里往前/往后挪一格（不传＝不显示按钮）。 */
+  onQueueMove?: (direction: -1 | 1) => void;
+  /** 队列两端禁用对应方向的按钮。 */
+  queueEdges?: { upDisabled: boolean; downDisabled: boolean };
 }
 
 /**
@@ -39,6 +45,8 @@ function ArchiveCard({
   onQuickEdit,
   onRead,
   eager = false,
+  onQueueMove,
+  queueEdges,
 }: ArchiveCardProps) {
   const [imageFailed, setImageFailed] = useState(false);
 
@@ -142,6 +150,39 @@ function ArchiveCard({
             <AlertIcon width={20} height={20} />
             文件缺失
           </div>
+        )}
+
+        {!selectionMode && onQueueMove && (
+          <span className="archive-queue-controls">
+            <button
+              type="button"
+              className="archive-quick is-queue"
+              title="在队列里前移一格"
+              aria-label={`把 ${card.title} 在队列里前移`}
+              disabled={queueEdges?.upDisabled}
+              onClick={(event) => {
+                event.stopPropagation();
+                onQueueMove(-1);
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              <ChevronUpIcon width={13} height={13} />
+            </button>
+            <button
+              type="button"
+              className="archive-quick is-queue"
+              title="在队列里后移一格"
+              aria-label={`把 ${card.title} 在队列里后移`}
+              disabled={queueEdges?.downDisabled}
+              onClick={(event) => {
+                event.stopPropagation();
+                onQueueMove(1);
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              <ChevronDownIcon width={13} height={13} />
+            </button>
+          </span>
         )}
 
         {!selectionMode && <div className="archive-hover-hint">查看详情</div>}

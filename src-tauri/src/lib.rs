@@ -1158,6 +1158,48 @@ async fn list_queue_archives(
 }
 
 #[tauri::command]
+async fn create_queue(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Queue, String> {
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            queue::create_queue(&mut library.conn, &name)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn add_many_to_queue(
+    state: State<'_, AppState>,
+    queue_id: i64,
+    archive_ids: Vec<i64>,
+) -> Result<i64, String> {
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            queue::add_many_to_queue(&mut library.conn, queue_id, &archive_ids)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn move_queue_archive(
+    state: State<'_, AppState>,
+    queue_id: i64,
+    archive_id: i64,
+    direction: i64,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library_mut(state, |library| {
+            queue::move_queue_archive(&mut library.conn, queue_id, archive_id, direction)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 async fn set_tag_weight(
     state: State<'_, AppState>,
     tag_id: i64,
@@ -1428,6 +1470,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             add_to_queue,
             remove_from_queue,
             list_queue_archives,
+            create_queue,
+            add_many_to_queue,
+            move_queue_archive,
             set_tag_weight,
             get_release_state,
             save_release_settings,

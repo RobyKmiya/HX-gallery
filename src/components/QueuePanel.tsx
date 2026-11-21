@@ -17,8 +17,8 @@ const DEFAULT_SIZE = 10;
 /**
  * 待看目录面板。
  *
- * 目录以日期命名（生成时默认给当天日期），最多同时存在 3 个；
- * 生成时按标签权重加权随机挑，权重 0 的标签会把画集整本排除。
+ * 目录数量不设上限；「生成」按标签权重加权随机挑，「新建空目录」建壳后
+ * 回画廊多选批量挑入（按选择顺序排队）。权重 0 的标签会把画集整本排除。
  */
 export default function QueuePanel({
   tags,
@@ -35,6 +35,8 @@ export default function QueuePanel({
   const [includeRead, setIncludeRead] = useState(false);
   const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
   const [tagQuery, setTagQuery] = useState("");
+  const [queueNameDraft, setQueueNameDraft] = useState("");
+  const [createBusy, setCreateBusy] = useState(false);
   const [lastReport, setLastReport] = useState<QueueFillReport | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
 
@@ -130,6 +132,28 @@ export default function QueuePanel({
     }
   }
 
+  /** 新建一个空目录：回画廊多选画集，按选择顺序排队。 */
+  async function createEmpty() {
+    const name = queueNameDraft.trim();
+    if (!name) {
+      onNotify("先给目录起个名字", "error");
+      return;
+    }
+    if (createBusy) return;
+    setCreateBusy(true);
+    try {
+      const queue = await api.createQueue(name);
+      setQueueNameDraft("");
+      onNotify(`已创建「${queue.name}」，回画廊多选后点「加入待看」挑入`, "success");
+      await load();
+      onChanged();
+    } catch (error) {
+      onNotify(`创建失败：${String(error)}`, "error");
+    } finally {
+      setCreateBusy(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div
@@ -172,7 +196,7 @@ export default function QueuePanel({
                 <strong>随机挑 {size} 本</strong>
                 <p className="queue-hint">
                   以「{todayName}」为名生成；同名目录会在此基础上追加。
-                  最多保留 3 个，超出时淘汰最旧的。
+                  目录数量不限，长期保存。
                 </p>
               </div>
               <button
@@ -184,6 +208,46 @@ export default function QueuePanel({
                 <PlusIcon width={15} height={15} />
                 {busy ? "挑选中…" : "生成"}
               </button>
+            </div>
+
+            <div className="queue-generate-row">
+              <div>
+                <strong>新建空目录</strong>
+                <p className="queue-hint">
+                  建好后回画廊开「多选」，勾选任意数量的画集，按选择顺序排队。
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  value={queueNameDraft}
+                  onChange={(event) => setQueueNameDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void createEmpty();
+                    }
+                  }}
+                  placeholder="目录名字…"
+                  aria-label="新目录名字"
+                  style={{
+                    width: 150,
+                    padding: "7px 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-strong)",
+                    background: "var(--panel-raised)",
+                    color: "var(--text)",
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => void createEmpty()}
+                  disabled={createBusy}
+                >
+                  <PlusIcon width={14} height={14} />
+                  {createBusy ? "创建中…" : "新建"}
+                </button>
+              </div>
             </div>
 
             <button
@@ -201,12 +265,12 @@ export default function QueuePanel({
                   <input
                     type="number"
                     min={1}
-                    max={50}
+                    max={200}
                     value={size}
                     onChange={(event) =>
                       setSize(
                         Math.min(
-                          50,
+                          200,
                           Math.max(1, Number(event.target.value) || DEFAULT_SIZE),
                         ),
                       )
@@ -311,9 +375,7 @@ export default function QueuePanel({
           <section className="queue-list">
             <div className="queue-list-head">
               <strong>现有目录</strong>
-              <span className="queue-hint">
-                {queues.length} / 3
-              </span>
+              <span className="queue-hint">{queues.length} 个</span>
             </div>
 
             {loading && <p className="queue-hint">读取中…</p>}

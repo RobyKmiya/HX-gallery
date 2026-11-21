@@ -368,6 +368,8 @@ export default function LibraryView({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [batchCollectionId, setBatchCollectionId] = useState<number | "">("");
+  const [batchQueueId, setBatchQueueId] = useState<number | "">("");
+  const [queues, setQueues] = useState<Queue[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchDeleteConfirm, setBatchDeleteConfirm] = useState(false);
 
@@ -1231,8 +1233,22 @@ export default function LibraryView({
     setSelectionMode(false);
     setSelectedIds([]);
     setBatchCollectionId("");
+    setBatchQueueId("");
     setBatchDeleteConfirm(false);
   }, []);
+
+  // 多选模式一开就把待看目录拉过来：批量「加入待看」的下拉要用。
+  const refreshQueues = useCallback(async () => {
+    try {
+      setQueues(await api.listQueues());
+    } catch {
+      // 拉不到就保持空列表：下拉为空时按钮会提示先建目录
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectionMode) void refreshQueues();
+  }, [selectionMode, refreshQueues]);
 
   const refreshAfterTrashChange = useCallback(async () => {
     await onLibraryChanged();
@@ -1317,6 +1333,56 @@ export default function LibraryView({
     notify,
     selectedIds,
   ]);
+
+  /** 多选的画集按选择顺序追加进待看目录（任意数量；重复的本自动跳过）。 */
+  const addSelectedToQueue = useCallback(async () => {
+    if (batchBusy || selectedIds.length === 0) return;
+    const queueId = Number(batchQueueId);
+    if (!queueId) {
+      notify("请先选择待看目录（没有就先去「待看目录」面板新建）", "error");
+      return;
+    }
+
+    setBatchBusy(true);
+    try {
+      const added = await api.addManyToQueue(queueId, selectedIds);
+      const target = queues.find((queue) => queue.id === queueId);
+      await refreshQueues();
+      notify(
+        added > 0
+          ? `已把 ${added} 个画集加入「${target?.name ?? "待看目录"}」`
+          : "选中的画集都已经在目录里了",
+        added > 0 ? "success" : "info",
+      );
+      exitSelection();
+    } catch (error) {
+      notify(`批量加入待看失败：${String(error)}`, "error");
+    } finally {
+      setBatchBusy(false);
+    }
+  }, [
+    batchBusy,
+    batchQueueId,
+    exitSelection,
+    notify,
+    queues,
+    refreshQueues,
+    selectedIds,
+  ]);
+
+  /** 队列视图里把一本往前/往后挪一格；挪完刷新当前页（顺序即视图顺序）。 */
+  const moveQueueCard = useCallback(
+    async (archiveId: number, direction: -1 | 1) => {
+      if (!activeQueue) return;
+      try {
+        await api.moveQueueArchive(activeQueue.id, archiveId, direction);
+        await loadPage(1, true, true);
+      } catch (error) {
+        notify(`调整顺序失败：${String(error)}`, "error");
+      }
+    },
+    [activeQueue, loadPage, notify],
+  );
 
   const startRenameCollection = useCallback((collection: Collection) => {
     setRenamingCollectionId(collection.id);
@@ -1493,6 +1559,15 @@ export default function LibraryView({
     }
     return groups;
   }, [groupBy, items]);
+
+  // 队列视图里给卡片挂 ↑↓：首尾两端对应方向禁用（分组时取扁平序）。
+  const queueEdgeIds = useMemo(() => {
+    if (!activeQueue) return null;
+    const ids = groupedItems.flatMap((group) =>
+      group.items.map((card) => card.id),
+    );
+    return { first: ids[0], last: ids[ids.length - 1] };
+  }, [activeQueue, groupedItems]);
 
   const overlayOpen =
     selected !== null ||
@@ -2736,6 +2811,19 @@ export default function LibraryView({
                         onQuickEdit={setQuickEditCard}
                         onRead={setReaderCard}
                         eager={viewMode === "pages"}
+                        onQueueMove={
+                          activeQueue && !selectionMode
+                            ? (direction) => void moveQueueCard(card.id, direction)
+                            : undefined
+                        }
+                        queueEdges={
+                          queueEdgeIds
+                            ? {
+                                upDisabled: card.id === queueEdgeIds.first,
+                                downDisabled: card.id === queueEdgeIds.last,
+                              }
+                            : undefined
+                        }
                       />
                     ))}
                   </Fragment>
@@ -2837,6 +2925,34 @@ export default function LibraryView({
                   >
                     <HeartIcon width={14} height={14} />
                     {batchBusy ? "加入中…" : "加入收藏夹"}
+                  </button>
+                  <select
+                    value={batchQueueId}
+                    aria-label="选择待看目录"
+                    onChange={(event) =>
+                      setBatchQueueId(
+                        event.target.value ? Number(event.target.value) : "",
+                      )
+                    }
+                  >
+                    <option value="">选择待看目录…</option>
+                    {queues.map((queue) => (
+                      <option key={queue.id} value={queue.id}>
+                        {queue.name}（{queue.count}）
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-compact"
+                    disabled={
+                      selectedIds.length === 0 || !batchQueueId || batchBusy
+                    }
+                    onClick={() => void addSelectedToQueue()}
+                    title="按选择顺序追加进待看目录，数量不限"
+                  >
+                    <PlusIcon width={14} height={14} />
+                    {batchBusy ? "加入中…" : "加入待看"}
                   </button>
                   <button
                     type="button"
