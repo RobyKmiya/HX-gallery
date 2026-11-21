@@ -115,16 +115,118 @@ function normalizeTagName(raw: string): string {
   return name.replace(/\s+/g, " ").trim();
 }
 
+
+/** 分类 → 命名空间键的反向映射（每类取第一个键，保证回贴可解析）。 */
+const CATEGORY_NAMESPACES: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const [key, value] of Object.entries(NAMESPACE_CATEGORIES)) {
+    if (!(value in map)) map[value] = key;
+  }
+  return map;
+})();
+
+/** 把标签列表序列化成可回贴的文本：`命名空间: t1, t2` 分行；未分类的裸行放最后。 */
+export function tagsToCopyText(
+  tags: { name: string; category: string | null }[],
+): string {
+  const grouped = new Map<string, string[]>();
+  const loose: string[] = [];
+  for (const tag of tags) {
+    if (tag.category && CATEGORY_NAMESPACES[tag.category]) {
+      const key = CATEGORY_NAMESPACES[tag.category];
+      const list = grouped.get(key) ?? [];
+      list.push(tag.name);
+      grouped.set(key, list);
+    } else {
+      loose.push(tag.name);
+    }
+  }
+  const lines: string[] = [];
+  for (const [key, list] of grouped) {
+    if (list.length > 0) lines.push(`${key}: ${list.join(", ")}`);
+  }
+  if (loose.length > 0) lines.push(loose.join(", "));
+  return lines.join("\n");
+}
+
 /** 按 Unicode 码点计数，与后端 Rust 的 `chars().count()` 对齐。 */
 function codePointLength(text: string): number {
   return [...text].length;
 }
 
-export function parseTagInput(raw: string): TagParseResult {
+/**
+ * 词库切分：一段没有标点的文本（例如从 exhentai 页面整段复制的标签块），
+ * 按已有标签词典做贪心最长匹配。命中段输出词典里的规范名（大小写/下划线
+ * 自动归一，能直接挂上既有标签）；连续未命中的词合并为一个标签保留原文，
+ * 整段零命中时整段作为一个标签（与旧行为一致，不丢内容）。
+ */
+function segmentByDictionary(text: string, dictionary: string[] | null): string[] {
+  if (!dictionary || dictionary.length === 0) return [text.trim()].filter(Boolean);
+  const source = text.trim();
+  if (!source) return [];
+  const found: string[] = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+    if (cursor >= source.length) break;
+    let hit: string | null = null;
+    for (const name of dictionary) {
+      if (
+        name.length <= source.length - cursor &&
+        source.slice(cursor, cursor + name.length).toLowerCase() === name.toLowerCase()
+      ) {
+        hit = name;
+        break;
+      }
+    }
+    if (hit) {
+      found.push(hit);
+      cursor += hit.length;
+      continue;
+    }
+    // 未命中：吃一个词；连续未命中的词合并为一个标签（避免丢内容）
+    const wordStart = cursor;
+    let end = source.length;
+    for (let probe = cursor + 1; probe < source.length; probe += 1) {
+      if (/\s/.test(source[probe])) {
+        // 试探：从这里往后还有词典命中吗？有就在命中处截断
+        const rest = source.slice(probe).trimStart();
+        let futureHit = false;
+        for (const name of dictionary) {
+          if (rest.toLowerCase().startsWith(name.toLowerCase())) {
+            futureHit = true;
+            break;
+          }
+        }
+        if (futureHit) {
+          end = probe;
+          break;
+        }
+      }
+    }
+    const chunk = source.slice(wordStart, end).trim();
+    if (chunk) found.push(chunk);
+    cursor = wordStart + chunk.length || cursor + 1;
+    if (chunk.length === 0) cursor += 1;
+  }
+  return found;
+}
+
+export function parseTagInput(
+  raw: string,
+  knownNames?: readonly string[],
+): TagParseResult {
   const tags: ParsedTag[] = [];
   const rejected: RejectedTag[] = [];
   const seen = new Set<string>();
   let category: string | null = null;
+  // 词库：归一化后按长度降序（贪心最长匹配）
+  const dictionary = knownNames
+    ? knownNames
+        .map((name) => normalizeTagName(name))
+        .filter((name) => name.length > 1)
+        .sort((left, right) => right.length - left.length)
+    : null;
 
   const push = (rawName: string, currentCategory: string | null) => {
     const name = normalizeTagName(rawName);
@@ -158,14 +260,27 @@ export function parseTagInput(raw: string): TagParseResult {
         : NAMESPACE_CATEGORIES[key.toLowerCase()];
       if (mapped) {
         category = mapped;
-        for (const part of header[2].split(TAG_SEPARATORS)) {
-          push(part, category);
+        const content = header[2].trim();
+        if (!content) continue;
+        if (TAG_SEPARATORS.test(content)) {
+          // 有显式分隔符：逗号/分号/顿号是权威边界
+          for (const part of content.split(TAG_SEPARATORS)) {
+            push(part, category);
+          }
+        } else {
+          // 无分隔符：词库最长匹配（exhentai 复制块就是这种形态）
+          for (const part of segmentByDictionary(content, dictionary)) {
+            push(part, category);
+          }
         }
         continue;
       }
     }
 
-    for (const part of text.split(TAG_SEPARATORS)) {
+    const pieces = TAG_SEPARATORS.test(text)
+      ? text.split(TAG_SEPARATORS)
+      : segmentByDictionary(text, dictionary);
+    for (const part of pieces) {
       push(part, category);
     }
   }

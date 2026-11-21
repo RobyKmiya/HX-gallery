@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import { formatBytes, formatDateTime } from "../format";
-import { parseTagInput, summarizeByCategory } from "../tags";
+import { parseTagInput, summarizeByCategory, tagsToCopyText } from "../tags";
 import type {
   ArchiveCardData,
   BulkTagReport,
@@ -271,7 +271,18 @@ export default function DetailDrawer({
     [tagPickerOptions],
   );
 
-  const bulkParsed = useMemo(() => parseTagInput(bulkTagText), [bulkTagText]);
+  // 词库切分：粘贴整段无标点文本时，按标签中心已有标签做最长匹配
+  const knownTagNames = useMemo(
+    () =>
+      knownTags.flatMap((tag) =>
+        tag.translatedName ? [tag.name, tag.translatedName] : [tag.name],
+      ),
+    [knownTags],
+  );
+  const bulkParsed = useMemo(
+    () => parseTagInput(bulkTagText, knownTagNames),
+    [bulkTagText, knownTagNames],
+  );
   const bulkNewNames = useMemo(() => {
     const attached = new Set(tags.map((tag) => tag.name.toLowerCase()));
     return bulkParsed.tags.filter(
@@ -794,6 +805,21 @@ export default function DetailDrawer({
             <span className="meta-hint">
               {tags.length > 0 ? `${tags.length} 个` : "尚未添加"}
             </span>
+            {tags.length > 0 && (
+              <button
+                type="button"
+                className="btn btn-quiet btn-compact"
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(tagsToCopyText(tags))
+                    .then(() => onNotify("标签已复制（命名空间: 逗号分隔，可直接回贴）", "success"))
+                    .catch(() => onNotify("复制失败", "error"));
+                }}
+                title="复制为「命名空间: 逗号分隔」格式，回贴批量导入可正确拆分"
+              >
+                复制标签
+              </button>
+            )}
           </div>
 
           {tags.length > 0 && (
