@@ -29,17 +29,15 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tauri::utils::config::WebviewUrl;
 use tauri::webview::WebviewWindow;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State};
 use zip::write::SimpleFileOptions;
 
 use crate::models::{ImportOptions, ImportReport, TagDraft};
 use crate::{importer, paths, AppState};
 
-/// 建窗口最多等这么久；超时说明 WebView2 初始化卡住，直接报错收场。
-const WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
 /// 整个抓取流程的上限。整部作品顺序下载几百张要不少时间，给足余量。
+/// （窗口建窗超时已移交匣浏览器引擎 browser.rs。）
 const FETCH_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 /// 单张图片的等待上限（从发起取字节到拿回结果）。
 const GRAB_TIMEOUT: Duration = Duration::from_secs(60);
@@ -136,126 +134,6 @@ const D2_INIT_SCRIPT: &str = r###"
     });
     return { imageUrl: abs(imageUrl), mime: blob.type || "image/jpeg", base64: base64 };
   };
-})();
-"###;
-
-/// 浏览窗口自带的「浏览器外壳」：地址栏 + 前进/后退/刷新/主页 + 缩放。
-///
-/// 用 Shadow DOM 挂在页面最上层：样式与站点完全隔离，既不被站点 CSS 冲掉，
-/// 也不污染站点样式。纯客户端实现——浏览窗口没有 IPC 能力，站点页面拿不到
-/// 画匣命令，安全边界不变。
-///
-/// 缩放走 CSS `zoom`（写 documentElement），工具栏自身用 `1/zoom` 抵消，
-/// 效果接近 Edge 的「页面缩放 + 浏览器 UI 不缩放」。
-const D2_TOOLBAR_SCRIPT: &str = r###"
-(function () {
-  if (window.top !== window || window.__d2Toolbar) return;
-  window.__d2Toolbar = true;
-  var HOST_ID = "__d2_toolbar_host";
-  var zoomPct = 100;
-  try {
-    var saved = parseInt(sessionStorage.getItem("__d2_zoom") || "", 10);
-    if (saved >= 25 && saved <= 400) zoomPct = saved;
-  } catch (e) {}
-
-  function mount() {
-    if (document.getElementById(HOST_ID)) return;
-    var host = document.createElement("div");
-    host.id = HOST_ID;
-    host.setAttribute("style", "position:fixed;inset:0;pointer-events:none;z-index:2147483647;");
-    (document.documentElement || document.body).appendChild(host);
-    if (!host.attachShadow) return;
-    var root = host.attachShadow({ mode: "open" });
-
-    var style = document.createElement("style");
-    style.textContent = [
-      ".bar{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;gap:6px;",
-      "padding:6px 8px;background:rgba(18,20,25,.97);border-bottom:1px solid #333842;",
-      "color:#e8eaf0;font:13px 'Segoe UI','Microsoft YaHei UI',sans-serif;pointer-events:auto;",
-      "box-shadow:0 2px 10px rgba(0,0,0,.35);}",
-      ".bar button{height:26px;min-width:30px;border:1px solid #3a3f4a;border-radius:6px;",
-      "background:#262a33;color:#e8eaf0;cursor:pointer;font-size:13px;line-height:1;}",
-      ".bar button:hover{background:#313642;}",
-      ".bar button.zoom{min-width:54px;font-variant-numeric:tabular-nums;}",
-      ".addr{flex:1 1 auto;height:26px;min-width:80px;border:1px solid #3a3f4a;border-radius:6px;",
-      "background:#0f1116;color:#e8eaf0;padding:0 10px;font:12px 'Cascadia Mono',Consolas,monospace;}",
-      ".pill{position:fixed;top:6px;right:8px;height:26px;padding:0 12px;border:1px solid #3a3f4a;",
-      "border-radius:13px;background:rgba(18,20,25,.92);color:#e8eaf0;cursor:pointer;",
-      "font:12px 'Segoe UI','Microsoft YaHei UI',sans-serif;pointer-events:auto;}",
-    ].join("");
-    root.appendChild(style);
-
-    var bar = document.createElement("div");
-    bar.className = "bar";
-
-    function mkBtn(label, title, fn) {
-      var b = document.createElement("button");
-      b.textContent = label;
-      b.title = title;
-      b.addEventListener("click", fn);
-      return b;
-    }
-
-    var addr = document.createElement("input");
-    addr.className = "addr";
-    addr.spellcheck = false;
-    addr.addEventListener("keydown", function (e) {
-      if (e.key !== "Enter") return;
-      var v = addr.value.trim();
-      if (!v) return;
-      if (!/^https?:\/\//i.test(v)) v = "https://" + v;
-      location.href = v;
-    });
-    addr.addEventListener("focus", function () { addr.value = location.href; addr.select(); });
-    function syncAddr() { if (document.activeElement !== addr) addr.value = location.href; }
-
-    var zoomLabel = mkBtn(zoomPct + "%", "重置为 100%", function () {
-      zoomPct = 100; applyZoom(); zoomLabel.textContent = "100%";
-    });
-    zoomLabel.className = "zoom";
-
-    var pill = document.createElement("button");
-    pill.className = "pill";
-    pill.textContent = "\u2630 \u753b\u5323";
-    pill.style.display = "none";
-
-    function applyZoom() {
-      var z = zoomPct / 100;
-      document.documentElement.style.zoom = zoomPct === 100 ? "" : String(z);
-      bar.style.zoom = zoomPct === 100 ? "" : String(1 / z);
-      try { sessionStorage.setItem("__d2_zoom", String(zoomPct)); } catch (e) {}
-    }
-    function collapse() { bar.style.display = "none"; pill.style.display = "block"; }
-    function expand() { bar.style.display = "flex"; pill.style.display = "none"; syncAddr(); }
-    pill.addEventListener("click", expand);
-
-    bar.appendChild(mkBtn("\u2190", "后退", function () { history.back(); }));
-    bar.appendChild(mkBtn("\u2192", "前进", function () { history.forward(); }));
-    bar.appendChild(mkBtn("\u27f3", "刷新", function () { location.reload(); }));
-    bar.appendChild(mkBtn("\u2302", "回到 e-hentai", function () { location.href = "https://e-hentai.org/"; }));
-    bar.appendChild(addr);
-    bar.appendChild(mkBtn("\u2212", "缩小", function () {
-      zoomPct = Math.max(25, zoomPct - 10); applyZoom(); zoomLabel.textContent = zoomPct + "%";
-    }));
-    bar.appendChild(zoomLabel);
-    bar.appendChild(mkBtn("+", "放大", function () {
-      zoomPct = Math.min(400, zoomPct + 10); applyZoom(); zoomLabel.textContent = zoomPct + "%";
-    }));
-    bar.appendChild(mkBtn("\u2303", "收起工具栏", collapse));
-
-    root.appendChild(bar);
-    root.appendChild(pill);
-
-    applyZoom();
-    syncAddr();
-    setInterval(syncAddr, 1000);
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mount);
-  } else {
-    mount();
-  }
 })();
 "###;
 
@@ -428,34 +306,29 @@ fn eval_json(window: &WebviewWindow, expression: &str, wait: Duration) -> Result
     Ok(serde_json::from_str::<String>(&raw).unwrap_or(raw))
 }
 
-/// 浏览窗口是否真的活着（页面还能执行脚本并把结果送回来）。
-///
-/// 「卡退」的尸体有两种形态：被关掉的（句柄已死，任何调用都报错）和渲染
-/// 进程冻住的（外壳还在，navigate 等调用全部「成功」但页面永远不动）。
-/// 后一种光看返回值看不出来，必须发脚本探针并等回调真的回来。
-fn window_is_alive(window: &WebviewWindow) -> bool {
-    matches!(
-        eval_json(window, "1", Duration::from_secs(5)),
-        Ok(value) if value.trim() == "1"
-    )
-}
-
-fn build_window(
+/// 打开 D2 浏览窗口：全部窗口生命周期交给匣浏览器引擎（browser.rs）——
+/// 工具栏、弹窗接管、下载上报、油猴内核、存活探针、幽灵窗防护都在引擎里。
+/// 这里只保留 D2 自己的站点解析脚本与 WINDOW 句柄管理。
+fn open_browser_window(
     app: &AppHandle,
     url: tauri::Url,
     label: String,
-    with_toolbar: bool,
 ) -> Result<WebviewWindow, String> {
-    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
-        .title("画匣 · 内建浏览器")
-        .inner_size(1180.0, 860.0)
-        .initialization_script(D2_INIT_SCRIPT);
-    if with_toolbar {
-        builder = builder.initialization_script(D2_TOOLBAR_SCRIPT);
-    }
-    let window = builder
-        .build()
-        .map_err(|error| format!("打开浏览窗口失败：{error}"))?;
+    let app_for_log = app.clone();
+    let (window, _stop) = crate::browser::open(
+        app,
+        url,
+        label,
+        crate::browser::BrowserOptions {
+            title: "画匣 · 内建浏览器".to_string(),
+            home: tauri::Url::parse("https://e-hentai.org/")
+                .map_err(|error| format!("主页 URL 不合法: {error}"))?,
+            extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
+            userscript_store: crate::userscripts::store_dir(app),
+            size: (1180.0, 860.0),
+            log: Some(Box::new(move |message| log(&app_for_log, message))),
+        },
+    )?;
     // 用户点 × / 窗口崩掉 → 立刻清全局句柄。没有这一步，「卡退后被关掉」的
     // 窗口会在 WINDOW 里留一具尸体，d2_open / fetch_flow 的复用分支撞上它，
     // 就是「浏览器卡退之后再也打不开」。
@@ -474,31 +347,6 @@ fn build_window(
         }
     });
     Ok(window)
-}
-
-/// 建窗放到独立线程并加超时：WebView2 初始化卡住时也不至于永远没有下文。
-fn open_window(
-    app: &AppHandle,
-    url: tauri::Url,
-    label: String,
-    with_toolbar: bool,
-) -> Result<WebviewWindow, String> {
-    let (tx, rx) = mpsc::channel::<Result<WebviewWindow, String>>();
-    let app_for_window = app.clone();
-    std::thread::spawn(move || {
-        let result = build_window(&app_for_window, url, label, with_toolbar);
-        // 调用方已经超时放弃（WebView2 初始化卡住）：迟到的窗口直接销毁，
-        // 不给用户留一扇几十秒后才突然出现的幽灵窗。
-        if tx.send(result.clone()).is_err() {
-            if let Ok(window) = result {
-                let _ = window.destroy();
-            }
-        }
-    });
-    match rx.recv_timeout(WINDOW_TIMEOUT) {
-        Ok(result) => result,
-        Err(_) => Err("打开浏览窗口超时（30 秒），WebView2 没有响应".to_string()),
-    }
 }
 
 fn close_window() {
@@ -653,7 +501,7 @@ fn fetch_flow(
     let label = format!("d2-browser-{}", uuid::Uuid::new_v4());
     // 复用已经打开的浏览窗口：用户正在看的作品页直接抓，不再弹第二个窗口。
     let window = match existing_window() {
-        Some(window) if window_is_alive(&window) => {
+        Some(window) if crate::browser::window_is_alive(&window) => {
             let same = window
                 .url()
                 .map(|current| current.as_str() == parsed.as_str())
@@ -674,7 +522,7 @@ fn fetch_flow(
                 *guard = None;
             }
             status(app, "正在打开浏览窗口…");
-            let window = open_window(app, parsed.clone(), label, true)?;
+            let window = open_browser_window(app, parsed.clone(), label)?;
             if let Ok(mut guard) = WINDOW.lock() {
                 *guard = Some(window.clone());
             }
@@ -930,7 +778,7 @@ pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
     let mut stale = false;
     if let Ok(mut guard) = WINDOW.lock() {
         if let Some(window) = guard.as_ref() {
-            if window_is_alive(window) {
+            if crate::browser::window_is_alive(window) {
                 match window.navigate(parsed.clone()) {
                     Ok(()) => {
                         log(&app, &format!("导航到 {parsed}"));
@@ -956,7 +804,7 @@ pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
     // 建窗会阻塞，必须离开调用线程，命令本身立刻返回。
     std::thread::spawn(move || {
         status(&app_for_window, "正在打开浏览窗口…");
-        match open_window(&app_for_window, parsed, label, true) {
+        match open_browser_window(&app_for_window, parsed, label) {
             Ok(window) => {
                 if let Ok(mut guard) = WINDOW.lock() {
                     *guard = Some(window);
