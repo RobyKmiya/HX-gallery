@@ -277,6 +277,71 @@ pub fn scan_collection(
     Ok((added, missing, total - missing))
 }
 
+/// 把外部图片复制进散图区的文件夹，然后登记（拖放导入）。
+///
+/// 与 `scan_collection` 的分工：这里负责「把文件放到该区文件夹里」，登记仍归扫描，
+/// 这样拖进来的图和手动复制粘贴进来的图走同一条入库路径，不会出现两套规则。
+pub fn import_files(
+    conn: &mut Connection,
+    collection_id: i64,
+    paths: &[String],
+) -> Result<(i64, i64, i64), String> {
+    let (name, folder) = with_collection(conn, collection_id, |name, folder| {
+        (name.to_string(), folder.to_string())
+    })
+    .ok_or("散图区不存在")?;
+    let folder_path = PathBuf::from(&folder);
+    fs::create_dir_all(&folder_path)
+        .map_err(|e| format!("无法创建文件夹 {folder}（区「{name}」）: {e}"))?;
+
+    let mut copied = 0i64;
+    for raw in paths {
+        let source = Path::new(raw);
+        if !source.is_file() || !is_image_path(source) {
+            continue;
+        }
+        // 保持原文件名；重名则加 (2)(3)…后缀，绝不覆盖已有文件。
+        let file_name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "image".to_string());
+        let stem = Path::new(&file_name)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "image".to_string());
+        let ext = Path::new(&file_name)
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut target = folder_path.join(&file_name);
+        let mut suffix = 2;
+        while target.exists() {
+            let candidate = if ext.is_empty() {
+                format!("{stem} ({suffix})")
+            } else {
+                format!("{stem} ({suffix}).{ext}")
+            };
+            target = folder_path.join(candidate);
+            suffix += 1;
+            if suffix > 9999 {
+                break;
+            }
+        }
+        if fs::copy(source, &target).is_ok() {
+            copied += 1;
+        }
+    }
+
+    let (added, missing, total) = scan_collection(conn, collection_id)?;
+    if copied == 0 {
+        return Err(format!(
+            "没有可导入的图片（支持 {}）",
+            IMAGE_EXTENSIONS.join(" / ")
+        ));
+    }
+    Ok((added, missing, total))
+}
+
 fn with_collection<R>(
     conn: &Connection,
     collection_id: i64,
@@ -737,6 +802,20 @@ pub async fn loose_scan_collection(
     crate::run_blocking(state, move |state| {
         crate::with_library_mut(state, |library| {
             scan_collection(&mut library.conn, collection_id)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn loose_import_files(
+    state: tauri::State<'_, crate::AppState>,
+    collection_id: i64,
+    paths: Vec<String>,
+) -> Result<(i64, i64, i64), String> {
+    crate::run_blocking(state, move |state| {
+        crate::with_library_mut(state, |library| {
+            import_files(&mut library.conn, collection_id, &paths)
         })
     })
     .await

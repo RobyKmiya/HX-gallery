@@ -149,8 +149,7 @@ export function tagsToCopyText(
   return lines.join("\n");
 }
 
-/** 按 Unicode 码点计数，与后端 Rust 的 `chars().count()` 对齐。 */
-function codePointLength(text: string): number {
+/** 按 Unicode 码点计数，与后端 Rust 的 `chars().count()` 对齐。 */function codePointLength(text: string): number {
   return [...text].length;
 }
 
@@ -210,6 +209,49 @@ function segmentByDictionary(text: string, dictionary: string[] | null): string[
     if (chunk.length === 0) cursor += 1;
   }
   return found;
+}
+
+/**
+ * 从「富文本粘贴」里无损还原标签边界。
+ *
+ * 从网页或 AI 对话里复制标签块时，每个 tag 往往是一个独立链接（`<a>`）。浏览器转成
+ * 纯文本会把它们黏在一起（`big breasts business suit`），这时只能靠词库去猜；
+ * 但 HTML 里链接边界本来就是清晰的——把每个 `<a>` 的内文抽出来、之间补逗号，再交给
+ * `parseTagInput`，就是无损切分，连词库都不需要命中。
+ *
+ * 返回 null 表示这段 HTML 不像标签块（链接少于 2 个），调用方应退回普通文本处理。
+ */
+export function tagsFromHtml(html: string): string | null {
+  if (!html || !/<a[\s>]/i.test(html)) return null;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const links = doc.body.querySelectorAll("a");
+  if (links.length < 2) return null;
+
+  const BLOCKS = new Set([
+    "p", "div", "li", "tr", "ul", "ol", "table", "h1", "h2", "h3", "h4", "h5", "h6",
+  ]);
+  const walk = (node: Node): string => {
+    if (node.nodeType === 3) return node.textContent ?? ""; // 文本节点
+    if (node.nodeType !== 1) return "";
+    const element = node as Element;
+    const tag = element.tagName.toLowerCase();
+    if (tag === "br") return "\n";
+    const inner = Array.from(element.childNodes).map(walk).join("");
+    // 链接 = 一个完整标签，用逗号收尾，让 TAG_SEPARATORS 当权威边界切。
+    if (tag === "a") return inner.trim() ? `${inner.trim()},` : "";
+    if (BLOCKS.has(tag)) return `\n${inner}\n`;
+    return inner;
+  };
+
+  const text = Array.from(doc.body.childNodes)
+    .map(walk)
+    .join("")
+    .replace(/,+/g, ",")
+    .replace(/,\s*\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+  return text || null;
 }
 
 export function parseTagInput(

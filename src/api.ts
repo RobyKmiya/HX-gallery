@@ -241,6 +241,9 @@ export const api = {
     invoke<void>("loose_delete_collection", { collectionId }),
   looseScanCollection: (collectionId: number) =>
     invoke<[number, number, number]>("loose_scan_collection", { collectionId }),
+  /** 拖放进来的图片：先复制进该区文件夹，再登记。返回 [新增, 缺失, 现有]。 */
+  looseImportFiles: (collectionId: number, paths: string[]) =>
+    invoke<[number, number, number]>("loose_import_files", { collectionId, paths }),
   looseListImages: (collectionId: number) =>
     invoke<LooseImage[]>("loose_list_images", { collectionId }),
   looseSetRating: (id: number, rating: number) =>

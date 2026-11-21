@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api } from "../api";
 import type { LooseImage, LooseImageCollection } from "../types";
 import {
@@ -44,6 +45,8 @@ export default function LoosePanel({
   const [createBusy, setCreateBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
   const [viewIndex, setViewIndex] = useState<number | null>(null);
+  const [dropping, setDropping] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const loadCollections = useCallback(async () => {
     const list = await api.looseListCollections();
@@ -233,6 +236,69 @@ export default function LoosePanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [viewIndex, images.length]);
 
+  // 整页形态支持把图片直接拖进来：复制进当前散图区的文件夹，再走扫描登记。
+  const activeIdRef = useRef<number | null>(null);
+  activeIdRef.current = activeId;
+
+  useEffect(() => {
+    if (!isPage) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter") {
+          setDropping(true);
+          return;
+        }
+        if (payload.type === "leave") {
+          setDropping(false);
+          return;
+        }
+        if (payload.type !== "drop") return;
+        setDropping(false);
+
+        const target = activeIdRef.current;
+        const paths = payload.paths.filter((path) =>
+          /\.(jpe?g|png|webp|gif|avif|bmp)$/i.test(path),
+        );
+        if (!target) {
+          onNotify("先在左侧选一个散图区，再往里拖图片", "error");
+          return;
+        }
+        if (paths.length === 0) {
+          onNotify("只支持拖入图片文件（jpg / png / webp / gif / avif / bmp）", "error");
+          return;
+        }
+        void (async () => {
+          setImporting(true);
+          try {
+            const [added, missing, total] = await api.looseImportFiles(target, paths);
+            await loadImages(target);
+            await loadCollections();
+            onNotify(
+              `已导入 ${paths.length} 个文件：新增 ${added}，缺失 ${missing}，现有 ${total} 张`,
+              "success",
+            );
+          } catch (error) {
+            onNotify(`导入失败：${String(error)}`, "error");
+          } finally {
+            setImporting(false);
+          }
+        })();
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isPage, loadCollections, loadImages, onNotify]);
+
   const inner = (
     <div
       className={isPage ? "loose-page" : "queue-panel loose-panel"}
@@ -357,6 +423,7 @@ export default function LoosePanel({
                 </button>
                 <span className="queue-hint">
                   {active.folder} · {active.count} 张 · 收藏 {active.favorites}
+                  {importing ? " · 导入中…" : ""}
                 </span>
               </div>
             )}
@@ -489,6 +556,12 @@ export default function LoosePanel({
                 </button>
               </div>
             </div>
+          </div>
+        )}
+        {isPage && dropping && (
+          <div className="loose-drop" aria-hidden="true">
+            <strong>松开即导入到「{active?.name ?? "当前散图区"}」</strong>
+            <span>会复制进该区的文件夹并登记；原文件留在原处不动</span>
           </div>
         )}
     </div>

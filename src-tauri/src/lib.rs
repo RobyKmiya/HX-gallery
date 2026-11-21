@@ -64,7 +64,9 @@ pub struct AppState {
 pub(crate) fn library_root_and_db(state: &AppState) -> Option<(PathBuf, PathBuf)> {
     let guard = state.inner.lock().ok()?;
     let library = guard.library.as_ref()?;
-    let db_path = library.root.join("library.db");
+    // 库数据库在 <库根>/.gallery/library.db（不是库根下的 library.db）。
+    // 这里拼错会让散图协议按 id 查记录时永远查不到 → 每张图 404（2026-11-22 全裂图事故）。
+    let db_path = library.root.join(".gallery").join("library.db");
     Some((library.root.clone(), db_path))
 }
 
@@ -1439,6 +1441,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             loose_images::loose_create_collection,
             loose_images::loose_delete_collection,
             loose_images::loose_scan_collection,
+            loose_images::loose_import_files,
             loose_images::loose_list_images,
             loose_images::loose_set_rating,
             loose_images::loose_set_favorite,

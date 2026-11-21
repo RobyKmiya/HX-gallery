@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import { formatBytes, formatDateTime } from "../format";
-import { parseTagInput, summarizeByCategory, tagsToCopyText } from "../tags";
+import { parseTagInput, summarizeByCategory, tagsFromHtml, tagsToCopyText } from "../tags";
 import type {
   ArchiveCardData,
   BulkTagReport,
@@ -930,6 +930,29 @@ export default function DetailDrawer({
                   "直接粘贴标准 tag 格式，可带命名空间：\nfemale:big breasts, sole female\ncharacter:aoba utsumihikari, tachibanasensei\nartist:mountainhan\n\n也支持纯标签，每行一个或用逗号、分号、顿号分隔：\n全彩, 纯爱；萝莉、黑白"
                 }
                 onChange={(event) => setBulkTagText(event.target.value)}
+                onPaste={(event) => {
+                  // 从网页 / AI 对话复制的标签块，HTML 里每个 tag 是独立链接：
+                  // 直接按链接边界还原，比拿词库猜黏连单词可靠得多。
+                  const converted = tagsFromHtml(
+                    event.clipboardData.getData("text/html"),
+                  );
+                  if (!converted) return; // 不是链接块，走浏览器默认粘贴
+                  event.preventDefault();
+                  const target = event.currentTarget;
+                  const start = target.selectionStart ?? bulkTagText.length;
+                  const end = target.selectionEnd ?? start;
+                  const next =
+                    bulkTagText.slice(0, start) + converted + bulkTagText.slice(end);
+                  setBulkTagText(next);
+                  requestAnimationFrame(() => {
+                    const caret = start + converted.length;
+                    try {
+                      target.setSelectionRange(caret, caret);
+                    } catch {
+                      // 失焦时设光标会抛，忽略
+                    }
+                  });
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     event.stopPropagation();

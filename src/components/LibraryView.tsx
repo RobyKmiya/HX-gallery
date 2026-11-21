@@ -327,6 +327,25 @@ export default function LibraryView({
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
+  /** 侧栏「收藏夹」大类是否折叠（记在本机，重开也保持）。 */
+  const [collectionsCollapsed, setCollectionsCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("huaxia.collectionsCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleCollectionsCollapsed = useCallback(() => {
+    setCollectionsCollapsed((previous) => {
+      const next = !previous;
+      try {
+        localStorage.setItem("huaxia.collectionsCollapsed", next ? "1" : "0");
+      } catch {
+        // 存不了就只在本次生效
+      }
+      return next;
+    });
+  }, []);
   const [releasePanelOpen, setReleasePanelOpen] = useState(false);
   const [d2PanelOpen, setD2PanelOpen] = useState(false);
   /**
@@ -1026,6 +1045,8 @@ export default function LibraryView({
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         const payload = event.payload;
+        // 散图整页开着时，拖进来的是图片，由 LoosePanel 自己接（复制进散图区）。
+        if (looseView) return;
         if (payload.type === "enter") {
           setDragActive(payload.paths.length > 0);
           return;
@@ -1062,7 +1083,7 @@ export default function LibraryView({
       disposed = true;
       unlisten?.();
     };
-  }, [importing, notify, openImport]);
+  }, [importing, notify, openImport, looseView]);
 
   const pickFiles = useCallback(async () => {
     try {
@@ -1841,7 +1862,20 @@ export default function LibraryView({
             <span className="nav-count">{library.archiveCount}</span>
           </button>
 
-          {collections.map((collection, index) => {
+          <button
+            type="button"
+            className="nav-item nav-group-toggle"
+            onClick={toggleCollectionsCollapsed}
+            aria-expanded={!collectionsCollapsed}
+            title={collectionsCollapsed ? "展开收藏夹列表" : "折叠收藏夹列表"}
+          >
+            <span className={`nav-caret${collectionsCollapsed ? "" : " is-open"}`}>▸</span>
+            <span className="nav-label">收藏夹</span>
+            <span className="nav-count">{collections.length}</span>
+          </button>
+
+          {!collectionsCollapsed &&
+            collections.map((collection, index) => {
             const isRenaming = renamingCollectionId === collection.id;
             if (isRenaming) {
               return (
@@ -1888,6 +1922,8 @@ export default function LibraryView({
             }
 
             const isActive = activeCollectionId === collection.id;
+            // 默认收藏夹在界面上统一叫「默认收藏」（库里的名字不动，避免动用户数据）。
+            const displayName = collection.isDefault ? "默认收藏" : collection.name;
             const confirmingDelete =
               pendingDeleteCollectionId === collection.id;
             return (
@@ -1898,14 +1934,14 @@ export default function LibraryView({
                 <button
                   type="button"
                   className={`nav-item${isActive ? " is-active" : ""}`}
-                  title={collection.name}
+                  title={displayName}
                   onClick={() => {
                     setLooseView(false);
                     setActiveCollectionId(collection.id);
                   }}
                 >
                   <HeartIcon width={16} height={16} />
-                  <span className="nav-label">{collection.name}</span>
+                  <span className="nav-label">{displayName}</span>
                   <span className="nav-count">{collection.count}</span>
                 </button>
                 <div className="nav-row-actions">
@@ -2128,7 +2164,11 @@ export default function LibraryView({
                     ? activeTags
                         .map((tag) => `#${tag.translatedName || tag.name}`)
                         .join(" ")
-                    : (activeCollection?.name ?? "全部画集")}
+                    : (activeCollection
+                        ? activeCollection.isDefault
+                          ? "默认收藏"
+                          : activeCollection.name
+                        : "全部画集")}
             </h1>
             <span className="title-meta">
               {total} 个画集
