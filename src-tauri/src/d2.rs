@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tauri::webview::WebviewWindow;
+use tauri::webview::Webview;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zip::write::SimpleFileOptions;
 
@@ -45,7 +45,7 @@ const GRAB_TIMEOUT: Duration = Duration::from_secs(60);
 const NO_RESULT_HINT: Duration = Duration::from_secs(30);
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
-static WINDOW: Mutex<Option<WebviewWindow>> = Mutex::new(None);
+static BROWSER_LABEL: Mutex<Option<String>> = Mutex::new(None);
 
 /// 注入到站点页面里的解析脚本。只做解析与取字节，结果写进 `window.__d2*`，
 /// Rust 侧轮询读取（避开 WebView2 `eval_with_callback` 不等待 Promise 的限制）。
@@ -291,7 +291,7 @@ fn tag_drafts(tags: &HashMap<String, Vec<String>>) -> Vec<TagDraft> {
 ///
 /// `eval_with_callback` 不等待 Promise，所以页面侧统一用「先写全局变量、
 /// 再轮询读取」的写法。调用方都在后台线程，不会阻塞主线程。
-fn eval_json(window: &WebviewWindow, expression: &str, wait: Duration) -> Result<String, String> {
+fn eval_json(window: &Webview, expression: &str, wait: Duration) -> Result<String, String> {
     let (tx, rx) = mpsc::channel::<String>();
     window
         .eval_with_callback(expression, move |value| {
@@ -309,13 +309,17 @@ fn eval_json(window: &WebviewWindow, expression: &str, wait: Duration) -> Result
 /// 打开 D2 浏览窗口：全部窗口生命周期交给匣浏览器引擎（browser.rs）——
 /// 工具栏、弹窗接管、下载上报、油猴内核、存活探针、幽灵窗防护都在引擎里。
 /// 这里只保留 D2 自己的站点解析脚本与 WINDOW 句柄管理。
+/// 打开 D2 浏览窗口：全部窗口生命周期交给匣浏览器引擎 v2（browser.rs）——
+/// 多标签、独立工具栏、弹窗接管、下载上报、油猴内核、存活探针都在引擎里。
+/// 这里只保留 D2 自己的站点解析脚本与浏览器 label 路由。
 fn open_browser_window(
     app: &AppHandle,
     url: tauri::Url,
     label: String,
-) -> Result<WebviewWindow, String> {
+) -> Result<String, String> {
     let app_for_log = app.clone();
-    let (window, _stop) = crate::browser::open(
+    // 窗口销毁/状态清理都在匣浏览器引擎内部完成（browser.rs）。
+    let opened = crate::browser::open(
         app,
         url,
         label,
@@ -326,43 +330,28 @@ fn open_browser_window(
             extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
             userscript_store: crate::userscripts::store_dir(app),
             size: (1180.0, 860.0),
-            log: Some(Box::new(move |message| log(&app_for_log, message))),
+            log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),
         },
     )?;
-    // 用户点 × / 窗口崩掉 → 立刻清全局句柄。没有这一步，「卡退后被关掉」的
-    // 窗口会在 WINDOW 里留一具尸体，d2_open / fetch_flow 的复用分支撞上它，
-    // 就是「浏览器卡退之后再也打不开」。
-    let label_for_close = window.label().to_string();
-    window.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            if let Ok(mut guard) = WINDOW.lock() {
-                let same = guard
-                    .as_ref()
-                    .map(|w| w.label() == label_for_close)
-                    .unwrap_or(false);
-                if same {
-                    *guard = None;
-                }
-            }
-        }
-    });
-    Ok(window)
+    if let Ok(mut guard) = BROWSER_LABEL.lock() {
+        *guard = Some(opened.clone());
+    }
+    Ok(opened)
+}
+
+/// 当前浏览器的窗口 label（没有浏览器在跑时为 None）。
+fn current_label() -> Option<String> {
+    BROWSER_LABEL.lock().ok()?.as_ref().cloned()
 }
 
 fn close_window() {
-    if let Ok(mut guard) = WINDOW.lock() {
-        if let Some(window) = guard.take() {
-            let _ = window.close();
-        }
+    if let Some(label) = current_label() {
+        let _ = crate::browser::close_browser(&label);
     }
 }
 
-fn existing_window() -> Option<WebviewWindow> {
-    WINDOW.lock().ok().and_then(|guard| guard.as_ref().cloned())
-}
-
 /// 等页面进入作品页（出现 `#gdt`）。期间对空白页做一次诊断提示。
-fn wait_for_gallery(window: &WebviewWindow, app: &AppHandle, deadline: Instant) -> Result<(), String> {
+fn wait_for_gallery(window: &Webview, app: &AppHandle, deadline: Instant) -> Result<(), String> {
     let started = Instant::now();
     let mut blank_checked = false;
     loop {
@@ -406,7 +395,7 @@ fn wait_for_gallery(window: &WebviewWindow, app: &AppHandle, deadline: Instant) 
 }
 
 /// 触发页面侧收集并轮询结果。
-fn collect_page_urls(window: &WebviewWindow, deadline: Instant) -> Result<Vec<String>, String> {
+fn collect_page_urls(window: &Webview, deadline: Instant) -> Result<Vec<String>, String> {
     window
         .eval(
             "window.__d2Urls=null;window.__d2UrlErr=null;\
@@ -442,7 +431,7 @@ fn collect_page_urls(window: &WebviewWindow, deadline: Instant) -> Result<Vec<St
 }
 
 /// 取单张图片（原图字节）。
-fn grab_one(window: &WebviewWindow, page_url: &str) -> Result<GrabPayload, String> {
+fn grab_one(window: &Webview, page_url: &str) -> Result<GrabPayload, String> {
     let encoded = serde_json::to_string(page_url).unwrap_or_else(|_| "\"\"".to_string());
     window
         .eval(&format!(
@@ -479,7 +468,7 @@ fn grab_one(window: &WebviewWindow, page_url: &str) -> Result<GrabPayload, Strin
     }
 }
 
-fn meta_of(window: &WebviewWindow) -> MetaPayload {
+fn meta_of(window: &Webview) -> MetaPayload {
     eval_json(
         window,
         "JSON.stringify(window.__d2Meta ? window.__d2Meta() : {title:'',tags:{}})",
@@ -498,37 +487,21 @@ fn fetch_flow(
     library_id: String,
     parsed: tauri::Url,
 ) -> Result<D2FetchReport, String> {
-    let label = format!("d2-browser-{}", uuid::Uuid::new_v4());
-    // 复用已经打开的浏览窗口：用户正在看的作品页直接抓，不再弹第二个窗口。
-    let window = match existing_window() {
-        Some(window) if crate::browser::window_is_alive(&window) => {
-            let same = window
-                .url()
-                .map(|current| current.as_str() == parsed.as_str())
-                .unwrap_or(false);
-            if !same {
-                let _ = window.navigate(parsed.clone());
-            }
-            window
-        }
-        maybe_stale => {
-            // 尸体窗口（被关掉 / 卡退冻住）先销毁再重建，绝不复用：
-            // 旧逻辑撞上冻住的窗口会在这里干等整个抓取超时。
-            if let Some(stale) = maybe_stale {
-                log(app, "已有浏览窗口无响应，销毁后重新打开");
-                let _ = stale.destroy();
-            }
-            if let Ok(mut guard) = WINDOW.lock() {
-                *guard = None;
-            }
-            status(app, "正在打开浏览窗口…");
-            let window = open_browser_window(app, parsed.clone(), label)?;
-            if let Ok(mut guard) = WINDOW.lock() {
-                *guard = Some(window.clone());
-            }
-            window
-        }
-    };
+    // 抓取复用已打开浏览窗口的**激活标签**：用户正在看的作品页直接抓。
+    // 浏览器没开就明确报错引导（多标签时代，抓谁要明确，不再后台偷偷开窗）。
+    let label = current_label()
+        .ok_or("浏览窗口还没打开——先在面板里点「打开」，进到作品页再抓取")?;
+    if !crate::browser::is_alive(&label) {
+        return Err("浏览窗口已无响应，请关掉后重新打开再抓取".to_string());
+    }
+    let window = crate::browser::active_webview_of(&label)?;
+    let same = window
+        .url()
+        .map(|current| current.as_str() == parsed.as_str())
+        .unwrap_or(false);
+    if !same {
+        let _ = window.navigate(parsed.clone());
+    }
     log(app, "浏览窗口就绪");
 
     let started = Instant::now();
@@ -751,16 +724,14 @@ fn normalize_url(raw: &str) -> Result<tauri::Url, String> {
     Ok(parsed)
 }
 
-/// 在已开的浏览窗口上执行一小段脚本。
+/// 在已开浏览窗口的激活标签上执行一小段脚本。
 fn with_window<F>(f: F) -> Result<(), String>
 where
-    F: FnOnce(&WebviewWindow) -> Result<(), String>,
+    F: FnOnce(&Webview) -> Result<(), String>,
 {
-    let guard = WINDOW.lock().map_err(|_| "浏览窗口状态异常".to_string())?;
-    match guard.as_ref() {
-        Some(window) => f(window),
-        None => Err("浏览窗口还没打开".to_string()),
-    }
+    let label = current_label().ok_or("浏览窗口还没打开".to_string())?;
+    let webview = crate::browser::active_webview_of(&label)?;
+    f(&webview)
 }
 
 /// 打开 / 导航到一个网址用于**浏览**（不是抓取）。自带浏览器工具栏。
@@ -771,30 +742,19 @@ where
 pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
     let parsed = normalize_url(&url)?;
 
-    // 窗口还在且**响应正常**：直接导航，不重建（保留登录态与历史）。
-    // 「卡退」会留下两种尸体：被关掉的（调用即报错）和渲染进程冻住的
-    // （调用全部「成功」但页面永远不动——2026-11-21 实测：日志连发八条
-    // 「导航到」而页面纹丝不动）。存活判定必须用回调探针，不能看返回值。
-    let mut stale = false;
-    if let Ok(mut guard) = WINDOW.lock() {
-        if let Some(window) = guard.as_ref() {
-            if crate::browser::window_is_alive(window) {
-                match window.navigate(parsed.clone()) {
-                    Ok(()) => {
-                        log(&app, &format!("导航到 {parsed}"));
-                        return Ok(());
-                    }
-                    Err(_) => stale = true,
+    // 浏览器还在且响应正常：激活标签直接导航（保留登录态与历史）。
+    // 存活判定在引擎里用回调探针（browser::is_alive），冻住的尸体瞒不过它。
+    if let Some(label) = current_label() {
+        if crate::browser::is_alive(&label) {
+            match crate::browser::navigate_active(&label, &parsed.to_string()) {
+                Ok(()) => {
+                    log(&app, &format!("导航到 {parsed}"));
+                    return Ok(());
                 }
-            } else {
-                stale = true;
+                Err(error) => log(&app, &format!("导航失败，重开浏览器：{error}")),
             }
-        }
-        if stale {
-            if let Some(window) = guard.take() {
-                log(&app, "上次浏览窗口已无响应，先销毁再重建");
-                let _ = window.destroy();
-            }
+        } else {
+            log(&app, "上次浏览窗口已无响应，重开一个");
         }
     }
 
@@ -805,11 +765,8 @@ pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
     std::thread::spawn(move || {
         status(&app_for_window, "正在打开浏览窗口…");
         match open_browser_window(&app_for_window, parsed, label) {
-            Ok(window) => {
-                if let Ok(mut guard) = WINDOW.lock() {
-                    *guard = Some(window);
-                }
-                log(&app_for_window, &format!("窗口已创建：{target}"));
+            Ok(opened) => {
+                log(&app_for_window, &format!("窗口已创建：{target}（{opened}）"));
                 status(&app_for_window, "窗口已打开，可以直接浏览。");
             }
             Err(error) => {
@@ -824,41 +781,40 @@ pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
 /// 读当前浏览窗口的地址（供「抓取当前页」一键使用，免去重新粘贴）。
 #[tauri::command]
 pub fn d2_current_url() -> Result<String, String> {
-    let guard = WINDOW.lock().map_err(|_| "浏览窗口状态异常".to_string())?;
-    match guard.as_ref() {
-        Some(window) => Ok(window.url().map(|url| url.to_string()).unwrap_or_default()),
-        None => Ok(String::new()),
+    let Some(label) = current_label() else {
+        return Ok(String::new());
+    };
+    match crate::browser::active_webview_of(&label) {
+        Ok(webview) => Ok(webview.url().map(|url| url.to_string()).unwrap_or_default()),
+        Err(_) => Ok(String::new()),
     }
 }
 
 /// 后退。
 #[tauri::command]
 pub fn d2_back() -> Result<(), String> {
-    with_window(|window| {
-        window
-            .eval("history.back()")
-            .map_err(|error| format!("后退失败：{error}"))
-    })
+    let Some(label) = current_label() else {
+        return Err("浏览窗口还没打开".to_string());
+    };
+    crate::browser::history_action(&label, "back")
 }
 
 /// 前进。
 #[tauri::command]
 pub fn d2_forward() -> Result<(), String> {
-    with_window(|window| {
-        window
-            .eval("history.forward()")
-            .map_err(|error| format!("前进失败：{error}"))
-    })
+    let Some(label) = current_label() else {
+        return Err("浏览窗口还没打开".to_string());
+    };
+    crate::browser::history_action(&label, "forward")
 }
 
 /// 刷新。
 #[tauri::command]
 pub fn d2_reload() -> Result<(), String> {
-    with_window(|window| {
-        window
-            .eval("location.reload()")
-            .map_err(|error| format!("刷新失败：{error}"))
-    })
+    let Some(label) = current_label() else {
+        return Err("浏览窗口还没打开".to_string());
+    };
+    crate::browser::history_action(&label, "reload")
 }
 
 /// 关掉浏览窗口（不影响主界面）。
