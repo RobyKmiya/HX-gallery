@@ -24,6 +24,8 @@ interface ArchiveCardProps {
   eager?: boolean;
   /** 队列视图：把这本在待看队列里往前/往后挪一格（不传＝不显示按钮）。 */
   onQueueMove?: (direction: -1 | 1) => void;
+  /** 右键菜单：传了才启用（宿主负责定位与菜单内容）。 */
+  onContextMenu?: (card: ArchiveCardData, x: number, y: number) => void;
   /** 队列两端禁用对应方向的按钮。 */
   queueEdges?: { upDisabled: boolean; downDisabled: boolean };
 }
@@ -47,6 +49,7 @@ function ArchiveCard({
   eager = false,
   onQueueMove,
   queueEdges,
+  onContextMenu,
 }: ArchiveCardProps) {
   const [imageFailed, setImageFailed] = useState(false);
 
@@ -90,6 +93,14 @@ function ArchiveCard({
       }
       aria-pressed={selectionMode ? selected : undefined}
       onClick={activate}
+      onContextMenu={
+        onContextMenu
+          ? (event) => {
+              event.preventDefault();
+              onContextMenu(card, event.clientX, event.clientY);
+            }
+          : undefined
+      }
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();

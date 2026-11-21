@@ -372,6 +372,12 @@ export default function LibraryView({
   const [queues, setQueues] = useState<Queue[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchDeleteConfirm, setBatchDeleteConfirm] = useState(false);
+  /** 卡片右键菜单：定位 + 目标卡（null = 关闭）。 */
+  const [cardMenu, setCardMenu] = useState<{
+    card: ArchiveCardData;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const navHistoryRef = useRef<NavSnapshot[]>([]);
   const navIndexRef = useRef(0);
@@ -1383,6 +1389,58 @@ export default function LibraryView({
     },
     [activeQueue, loadPage, notify],
   );
+
+  // —— 卡片右键菜单 ——
+  const openCardMenu = useCallback((card: ArchiveCardData, x: number, y: number) => {
+    // 视口内收放：菜单大约 210×240
+    const menuX = Math.min(x, window.innerWidth - 224);
+    const menuY = Math.min(y, window.innerHeight - 252);
+    setCardMenu({ card, x: Math.max(4, menuX), y: Math.max(4, menuY) });
+  }, []);
+  const closeCardMenu = useCallback(() => setCardMenu(null), []);
+
+  // 菜单开着时：Esc 关、滚动关、点空白关（backdrop 自带 onClick）
+  useEffect(() => {
+    if (!cardMenu) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCardMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", () => setCardMenu(null), true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", () => setCardMenu(null), true);
+    };
+  }, [cardMenu]);
+
+  /** 右键「加入待看」：加入最新创建的目录（没有就引导去面板新建）。 */
+  const addCardToQueue = useCallback(async (card: ArchiveCardData) => {
+    const list = await api.listQueues();
+    setQueues(list);
+    const newest = list[0];
+    if (!newest) {
+      notify("还没有待看目录——先去「待看目录」面板「新建空目录」", "error");
+      return;
+    }
+    const added = await api.addManyToQueue(newest.id, [card.id]);
+    notify(
+      added > 0
+        ? `已把「${card.title}」加入「${newest.name}」`
+        : "这本已经在目录里了",
+      added > 0 ? "success" : "info",
+    );
+  }, [notify]);
+
+  /** 右键「移入回收站」：可恢复操作，不做二次确认。 */
+  const trashFromMenu = useCallback(async (card: ArchiveCardData) => {
+    try {
+      await api.deleteArchive(card.id);
+      await refreshAfterTrashChange();
+      notify(`「${card.title}」已移入回收站，可在侧栏「回收站」恢复`, "success");
+    } catch (error) {
+      notify(`移入回收站失败：${String(error)}`, "error");
+    }
+  }, [notify, refreshAfterTrashChange]);
 
   const startRenameCollection = useCallback((collection: Collection) => {
     setRenamingCollectionId(collection.id);
@@ -2816,6 +2874,7 @@ export default function LibraryView({
                             ? (direction) => void moveQueueCard(card.id, direction)
                             : undefined
                         }
+                        onContextMenu={openCardMenu}
                         queueEdges={
                           queueEdgeIds
                             ? {
@@ -3153,6 +3212,81 @@ export default function LibraryView({
         />
       )}
 
+        {cardMenu && (
+          <div
+            className="ctx-backdrop"
+            onClick={closeCardMenu}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              closeCardMenu();
+            }}
+          >
+            <div
+              className="ctx-menu"
+              style={{ left: cardMenu.x, top: cardMenu.y }}
+              role="menu"
+              aria-label="画集操作菜单"
+            >
+              <div className="ctx-title">{cardMenu.card.title}</div>
+              <button
+                type="button"
+                onClick={() => {
+                  setReaderCard(cardMenu.card);
+                  closeCardMenu();
+                }}
+              >
+                开始阅读
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelected(cardMenu.card);
+                  closeCardMenu();
+                }}
+              >
+                查看详情
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void addCardToQueue(cardMenu.card);
+                  closeCardMenu();
+                }}
+              >
+                加入待看目录
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuickEditCard(cardMenu.card);
+                  closeCardMenu();
+                }}
+              >
+                收藏到…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectionMode(true);
+                  setSelectedIds([cardMenu.card.id]);
+                  closeCardMenu();
+                }}
+              >
+                进入多选
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => {
+                  void trashFromMenu(cardMenu.card);
+                  closeCardMenu();
+                }}
+              >
+                移入回收站
+              </button>
+            </div>
+          </div>
+        )}
       {queuePanelOpen && (
         <QueuePanel
           tags={tags}

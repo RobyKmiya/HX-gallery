@@ -5997,3 +5997,52 @@ svg {
   align-items: center;
   gap: 4px;
 }
+
+/* 卡片右键菜单 */
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+.ctx-menu {
+  position: fixed;
+  min-width: 200px;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid #333842;
+  background: rgba(20, 22, 27, 0.98);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+}
+.ctx-title {
+  padding: 6px 12px 8px;
+  font-size: 11px;
+  color: var(--faint, #8b93a7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-bottom: 1px solid #2c313c;
+  margin-bottom: 4px;
+}
+.ctx-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text, #e8eaf0);
+  font: 12px "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  cursor: pointer;
+}
+.ctx-menu button:hover {
+  background: #2c313c;
+}
+.ctx-menu button.danger {
+  color: var(--danger, #ff6b6b);
+}
+.ctx-menu button.danger:hover {
+  background: #3a2126;
+}
