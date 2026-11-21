@@ -1,6 +1,7 @@
 mod anim;
 mod archive;
 mod asset_protocol;
+mod browser;
 mod container;
 mod d2;
 pub mod db;
@@ -15,6 +16,7 @@ pub mod queue;
 mod reader;
 mod release;
 pub mod translate;
+pub mod userscripts;
 
 use std::fs;
 use std::path::PathBuf;
@@ -1416,6 +1418,11 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             d2::d2_back,
             d2::d2_forward,
             d2::d2_reload,
+            userscripts::gm_list_scripts,
+            userscripts::gm_add_script_from_path,
+            userscripts::gm_add_script_from_url,
+            userscripts::gm_remove_script,
+            userscripts::gm_set_script_enabled,
             d2::d2_close_window,
             d2::d2_current_url,
             scan_library,

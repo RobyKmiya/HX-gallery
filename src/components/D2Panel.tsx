@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import type { D2Done, D2FetchReport } from "../types";
+import type { D2Done, D2FetchReport, GmScriptMeta } from "../types";
+import { PlusIcon, TrashIcon } from "./Icons";
 
 interface D2PanelProps {
   onClose: () => void;
@@ -37,6 +39,91 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [report, setReport] = useState<D2FetchReport | null>(null);
+  const [gmScripts, setGmScripts] = useState<GmScriptMeta[]>([]);
+  const [scriptUrl, setScriptUrl] = useState("");
+  const [gmBusy, setGmBusy] = useState(false);
+  const [gmRemoving, setGmRemoving] = useState<string | null>(null);
+
+  const loadGmScripts = useCallback(async () => {
+    try {
+      setGmScripts(await api.listGmScripts());
+    } catch {
+      // 列表拉不到不影响其他功能
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadGmScripts();
+  }, [loadGmScripts]);
+
+  /** 从网址安装 .user.js（curl 直连，走系统代理）。 */
+  async function installFromUrl() {
+    const url = scriptUrl.trim();
+    if (!url) {
+      onNotify("先填脚本网址", "error");
+      return;
+    }
+    if (gmBusy) return;
+    setGmBusy(true);
+    try {
+      const meta = await api.addGmScriptFromUrl(url);
+      setScriptUrl("");
+      onNotify(`已安装「${meta.name}」，重开浏览窗口生效`, "success");
+      await loadGmScripts();
+    } catch (error) {
+      onNotify(`安装失败：${String(error)}`, "error");
+    } finally {
+      setGmBusy(false);
+    }
+  }
+
+  /** 从本地 .user.js 文件安装。 */
+  async function installFromFile() {
+    if (gmBusy) return;
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "油猴脚本", extensions: ["user.js", "js"] }],
+    });
+    if (typeof picked !== "string") return;
+    setGmBusy(true);
+    try {
+      const meta = await api.addGmScriptFromPath(picked);
+      onNotify(`已安装「${meta.name}」，重开浏览窗口生效`, "success");
+      await loadGmScripts();
+    } catch (error) {
+      onNotify(`安装失败：${String(error)}`, "error");
+    } finally {
+      setGmBusy(false);
+    }
+  }
+
+  async function toggleScript(script: GmScriptMeta) {
+    try {
+      await api.setGmScriptEnabled(script.id, !script.enabled);
+      await loadGmScripts();
+    } catch (error) {
+      onNotify(`切换失败：${String(error)}`, "error");
+    }
+  }
+
+  async function removeScript(script: GmScriptMeta) {
+    if (gmRemoving !== script.id) {
+      setGmRemoving(script.id);
+      window.setTimeout(
+        () => setGmRemoving((current) => (current === script.id ? null : current)),
+        3200,
+      );
+      return;
+    }
+    setGmRemoving(null);
+    try {
+      await api.removeGmScript(script.id);
+      onNotify(`已删除「${script.name}」`, "success");
+      await loadGmScripts();
+    } catch (error) {
+      onNotify(`删除失败：${String(error)}`, "error");
+    }
+  }
 
   useEffect(() => {
     const unlistenStatus = listen<{ message: string }>("d2://status", (event) => {
@@ -216,6 +303,98 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
                   </button>
                 ))}
               </div>
+            </div>
+          </section>
+
+          <section className="release-section">
+            <div className="release-row-text">
+              <strong>油猴脚本（.user.js）</strong>
+              <p className="queue-hint">
+                Chrome/Edge 生态的 Tampermonkey 兼容子集：@match / @include /
+                @exclude / @run-at + GM_* 常用 API。改动脚本后
+                <strong>重开浏览窗口</strong>生效。
+              </p>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <input
+                  value={scriptUrl}
+                  onChange={(event) => setScriptUrl(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void installFromUrl();
+                  }}
+                  placeholder="https://.../xxx.user.js"
+                  spellCheck={false}
+                  style={{
+                    flex: 1,
+                    padding: "7px 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-strong)",
+                    background: "var(--panel-raised)",
+                    color: "var(--text)",
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => void installFromUrl()}
+                  disabled={gmBusy}
+                >
+                  从网址安装
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => void installFromFile()}
+                  disabled={gmBusy}
+                >
+                  <PlusIcon width={13} height={13} />
+                  从文件
+                </button>
+              </div>
+              {gmScripts.length > 0 && (
+                <ul style={{ margin: "8px 0 0", padding: 0, listStyle: "none" }}>
+                  {gmScripts.map((script) => (
+                    <li
+                      key={script.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "5px 0",
+                        borderTop: "1px solid var(--border, #2a2d36)",
+                        fontSize: 12,
+                      }}
+                    >
+                      <label
+                        style={{ display: "flex", alignItems: "center", gap: 5 }}
+                        title={script.enabled ? "已启用（点击停用）" : "已停用（点击启用）"}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={script.enabled}
+                          onChange={() => void toggleScript(script)}
+                        />
+                        <strong>{script.name}</strong>
+                      </label>
+                      {script.version && (
+                        <span style={{ color: "var(--faint)" }}>v{script.version}</span>
+                      )}
+                      <span className="queue-hint" style={{ flex: 1, overflow: "hidden" }}>
+                        {(script.matches[0] || script.includes[0] || "全站生效")}
+                      </span>
+                      <button
+                        type="button"
+                        className={`btn btn-compact${
+                          gmRemoving === script.id ? " btn-danger" : " btn-quiet"
+                        }`}
+                        onClick={() => void removeScript(script)}
+                      >
+                        <TrashIcon width={13} height={13} />
+                        {gmRemoving === script.id ? "确认" : "删"}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </section>
 

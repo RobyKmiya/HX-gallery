@@ -182,6 +182,19 @@ export interface Queue {
 }
 
 /** 生成待看目录的选项。 */
+/** 匣浏览器 · 油猴脚本元数据（==UserScript== 头解析结果）。 */
+export interface GmScriptMeta {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  matches: string[];
+  includes: string[];
+  excludes: string[];
+  runAt: string;
+  enabled: boolean;
+}
+
 export interface QueueFillOptions {
   /** 每个目录放几本，默认 10。 */
   size?: number;

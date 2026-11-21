@@ -7,6 +7,7 @@ import type {
   ImportOptions,
   ImportReport,
   LibraryState,
+  GmScriptMeta,
   Queue,
   QueueFillOptions,
   QueueFillReport,
@@ -226,6 +227,23 @@ export const api = {
 
   removeFromQueue: (queueId: number, archiveId: number) =>
     invoke<void>("remove_from_queue", { queueId, archiveId }),
+
+  // ── 匣浏览器 · 油猴脚本（Chrome/Edge 生态 .user.js）──
+
+  listGmScripts: () => invoke<GmScriptMeta[]>("gm_list_scripts"),
+
+  /** 从本地 .user.js 文件导入。 */
+  addGmScriptFromPath: (path: string) =>
+    invoke<GmScriptMeta>("gm_add_script_from_path", { path }),
+
+  /** 从网址拉取 .user.js 源码导入（curl 直连，走系统代理）。 */
+  addGmScriptFromUrl: (url: string) =>
+    invoke<GmScriptMeta>("gm_add_script_from_url", { url }),
+
+  removeGmScript: (id: string) => invoke<void>("gm_remove_script", { id }),
+
+  setGmScriptEnabled: (id: string, enabled: boolean) =>
+    invoke<void>("gm_set_script_enabled", { id, enabled }),
 
   /** 新建一个空的待看目录（先建壳，再用多选挑入）。 */
   createQueue: (name: string) => invoke<Queue>("create_queue", { name }),
