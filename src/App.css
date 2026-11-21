@@ -501,6 +501,70 @@ body.is-splitting {
   padding: 0 4px;
 }
 
+/* 侧栏收起/展开按钮（品牌行右侧） */
+.sidebar-collapse {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.sidebar-collapse:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-collapse svg.is-flipped { transform: rotate(180deg); }
+
+/* 折叠成图标条：只留图标，靠 title 悬停看名字 */
+.sidebar.is-collapsed {
+  padding: 12px 8px;
+  gap: 12px;
+  overflow-x: hidden;
+}
+
+.sidebar.is-collapsed .sidebar-brand {
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+}
+
+.sidebar.is-collapsed .sidebar-brand > div,
+.sidebar.is-collapsed .library-card,
+.sidebar.is-collapsed .nav-label,
+.sidebar.is-collapsed .nav-count,
+.sidebar.is-collapsed .nav-caret,
+.sidebar.is-collapsed .nav-row-actions,
+.sidebar.is-collapsed .nav-divider {
+  display: none;
+}
+
+.sidebar.is-collapsed .sidebar-collapse { margin-left: 0; }
+.sidebar.is-collapsed .nav-item { justify-content: center; padding: 9px 0; }
+.sidebar.is-collapsed .nav-row { display: block; }
+/* 按钮里的文字是裸文本节点，用 font-size:0 收掉，图标有显式尺寸不受影响 */
+.sidebar.is-collapsed .sidebar-actions .btn {
+  font-size: 0;
+  padding: 9px 0;
+  justify-content: center;
+  gap: 0;
+}
+.sidebar.is-collapsed .sidebar-footer {
+  font-size: 0;
+  justify-content: center;
+  gap: 0;
+}
+
 .sidebar-brand div {
   display: flex;
   flex-direction: column;

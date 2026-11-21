@@ -13,7 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, assetUrl } from "../api";
-import { usePersistentSize } from "../layout";
+import { usePersistentFlag, usePersistentSize } from "../layout";
 import { formatBytes } from "../format";
 import type {
   ArchiveCardData,
@@ -342,6 +342,16 @@ export default function LibraryView({
     320,
     760,
   );
+  /** 侧栏折叠成图标条（双击分界线或点侧栏底部按钮切换）。 */
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistentFlag(
+    "huaxia.layout.sidebarCollapsed",
+    false,
+  );
+  const toggleSidebarCollapsed = useCallback(
+    () => setSidebarCollapsed(!sidebarCollapsed),
+    [setSidebarCollapsed, sidebarCollapsed],
+  );
+  const SIDEBAR_RAIL_WIDTH = 62;
   /** 侧栏「收藏夹」大类是否折叠（记在本机，重开也保持）。 */
   const [collectionsCollapsed, setCollectionsCollapsed] = useState(() => {
     try {
@@ -1830,9 +1840,13 @@ export default function LibraryView({
   return (
     <div
       className="app-shell"
-      style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}
+      style={{
+        gridTemplateColumns: `${
+          sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth
+        }px 6px minmax(0, 1fr)`,
+      }}
     >
-      <aside className="sidebar">
+      <aside className={`sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
         <div className="sidebar-brand">
           <span className="brand-mark">
             <LogoIcon />
@@ -1841,6 +1855,29 @@ export default function LibraryView({
             <strong>画匣</strong>
             <span>本地画廊</span>
           </div>
+          <button
+            type="button"
+            className="sidebar-collapse"
+            onClick={toggleSidebarCollapsed}
+            aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+            aria-expanded={!sidebarCollapsed}
+            title={sidebarCollapsed ? "展开侧栏（双击分界线也行）" : "收起成图标条（双击分界线也行）"}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width={14}
+              height={14}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className={sidebarCollapsed ? "is-flipped" : undefined}
+            >
+              <path d="M9.5 4.5 6 8l3.5 3.5" />
+            </svg>
+          </button>
         </div>
 
         <section className="library-card">
@@ -1874,6 +1911,7 @@ export default function LibraryView({
               setActiveCollectionId(null);
               clearActiveQueue();
             }}
+            title="全部画集"
           >
             <BookIcon />
             <span className="nav-label">全部画集</span>
@@ -2115,6 +2153,7 @@ export default function LibraryView({
             type="button"
             className="nav-item nav-item-add"
             onClick={() => setCollectionCreateIntent("browse")}
+            title="新建收藏夹"
           >
             <PlusIcon width={15} height={15} />
             <span className="nav-label">新建收藏夹</span>
@@ -2167,8 +2206,17 @@ export default function LibraryView({
         value={sidebarWidth}
         min={190}
         max={420}
-        onChange={setSidebarWidth}
+        onChange={(next) => {
+          setSidebarWidth(next);
+          if (sidebarCollapsed) setSidebarCollapsed(false);
+        }}
         onReset={resetSidebarWidth}
+        onToggle={toggleSidebarCollapsed}
+        toggleTitle={
+          sidebarCollapsed
+            ? "双击展开侧栏（拖动也可展开）"
+            : "双击收起成图标条（Shift+回车复位宽度）"
+        }
       />
 
       <main className="main-panel">

@@ -9,6 +9,9 @@ interface SplitterProps {
   onChange: (next: number) => void;
   /** 双击 / 回车复位到默认宽度。 */
   onReset: () => void;
+  /** 有的话，双击与回车改成「收起 / 展开」（侧栏用这个手势更顺手）。 */
+  onToggle?: () => void;
+  toggleTitle?: string;
   /**
    * 拖动方向：1 = 往右拖变大（左侧面板）；-1 = 往右拖变小（右侧抽屉）。
    */
@@ -28,6 +31,8 @@ export default function Splitter({
   max,
   onChange,
   onReset,
+  onToggle,
+  toggleTitle,
   direction = 1,
   label,
 }: SplitterProps) {
@@ -68,12 +73,12 @@ export default function Splitter({
       aria-valuemin={min}
       aria-valuemax={max}
       tabIndex={0}
-      title={`拖动调整${label}宽度，双击复位`}
+      title={toggleTitle ?? `拖动调整${label}宽度，双击复位`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
-      onDoubleClick={onReset}
+      onDoubleClick={onToggle ?? onReset}
       onKeyDown={(event) => {
         if (event.key === "ArrowLeft") {
           event.preventDefault();
@@ -83,7 +88,8 @@ export default function Splitter({
           onChange(clamp(value + 8 * direction));
         } else if (event.key === "Enter") {
           event.preventDefault();
-          onReset();
+          if (event.shiftKey) onReset();
+          else (onToggle ?? onReset)();
         }
       }}
     />
