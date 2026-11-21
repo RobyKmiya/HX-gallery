@@ -329,7 +329,110 @@ fn migrate(conn: &Connection, gallery_dir: &Path) -> Result<(), String> {
             .map_err(|e| format!("提交升级事务失败: {e}"))?;
     }
 
-    ensure_full_text(conn)
+    unify_dictionary_tags(conn)?;
+    ensure_full_text(conn)?;
+    backfill_dictionary_translations(conn)
+}
+
+/// 标签归一：把「中文固定词」或「非规范拼写」的标签改到词典的英文规范名上。
+///
+/// 背景（管理员 2026-11-22）：他习惯贴中文标签，但 exhentai 源标签是英文，
+/// 结果库里「全彩」和「full color」并存，看着是两条其实是同一条。
+/// 这里一次性归一：能改名就改名（顺带补上中文译名），撞名就把挂载关系挪到
+/// 已有的规范标签上、旧标签软删（`merged_into` 指向新标签，与手工合并同语义）。
+///
+/// 幂等：名字已经规范的标签会被跳过，所以每次开库跑一遍也不会重复动作。
+fn unify_dictionary_tags(conn: &Connection) -> Result<(), String> {
+    let rows: Vec<(i64, String)> = {
+        let mut statement = conn
+            .prepare("SELECT id, name FROM tags WHERE deleted_at IS NULL")
+            .map_err(|e| format!("读取标签失败: {e}"))?;
+        let mapped = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("读取标签失败: {e}"))?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取标签失败: {e}"))?
+    };
+
+    let now = fsutil::now_ms();
+    for (id, name) in rows {
+        let Some((canonical, chinese)) = translate::canonical_tag_name(&name)
+            .and_then(|canonical| translate::translate_tag(canonical).map(|zh| (canonical, zh)))
+        else {
+            continue;
+        };
+        if canonical.eq_ignore_ascii_case(&name) {
+            continue; // 已经是规范名
+        }
+        let twin: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM tags
+                 WHERE name = ?1 COLLATE NOCASE AND id <> ?2 AND deleted_at IS NULL
+                 LIMIT 1",
+                params![canonical, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("查询同名标签失败: {e}"))?;
+        match twin {
+            Some(target) => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO archive_tags(archive_id, tag_id)
+                     SELECT archive_id, ?1 FROM archive_tags WHERE tag_id = ?2",
+                    params![target, id],
+                )
+                .map_err(|e| format!("迁移标签挂载失败: {e}"))?;
+                conn.execute("DELETE FROM archive_tags WHERE tag_id = ?1", params![id])
+                    .map_err(|e| format!("清理旧标签挂载失败: {e}"))?;
+                conn.execute(
+                    "UPDATE tags SET deleted_at = ?1, merged_into = ?2 WHERE id = ?3",
+                    params![now, target, id],
+                )
+                .map_err(|e| format!("软删旧标签失败: {e}"))?;
+            }
+            None => {
+                conn.execute(
+                    "UPDATE tags
+                     SET name = ?1,
+                         translated_name = COALESCE(NULLIF(translated_name, ''), ?2),
+                         translation_source = 'dictionary',
+                         translated_at = ?3
+                     WHERE id = ?4",
+                    params![canonical, chinese, now, id],
+                )
+                .map_err(|e| format!("标签改名失败: {e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 用内置词典把覆盖到的标签补上中文译名。
+///
+/// 只补 `translated_name` 为空的：AI 翻过的、人工填过的都不动，避免把用户
+/// 已经调好的译名冲掉。词典只覆盖固定含义的词（female/male/全彩…），
+/// 角色名、社团名本来就不在表里。
+fn backfill_dictionary_translations(conn: &Connection) -> Result<(), String> {
+    let now = fsutil::now_ms();
+    let mut changed = 0usize;
+    for (english, chinese) in translate::dictionary() {
+        let updated = conn
+            .execute(
+                "UPDATE tags
+                 SET translated_name = ?2, translation_source = 'dictionary', translated_at = ?3
+                 WHERE name = ?1 COLLATE NOCASE
+                   AND (translated_name IS NULL OR translated_name = '')",
+                params![english, chinese, now],
+            )
+            .map_err(|e| format!("回填标签译名失败: {e}"))?;
+        changed += updated;
+    }
+    if changed > 0 {
+        // 译名参与全文检索的 tag_text，改过就同步一次，否则搜中文搜不到。
+        backfill_tag_text(conn)?;
+    }
+    Ok(())
 }
 
 fn create_schema(conn: &Connection) -> Result<(), String> {
@@ -1503,6 +1606,10 @@ pub fn remove_reader_bookmark(
 
 pub fn add_tag(conn: &Connection, archive_id: i64, name: &str) -> Result<Tag, String> {
     let name = normalize_label(name, MAX_TAG_NAME, "标签")?;
+    // 中文输入归一到规范英文名（「女性」→ female），同一含义只留一条标签。
+    let name = translate::canonical_tag_name(&name)
+        .map(str::to_string)
+        .unwrap_or(name);
     ensure_archive_exists(conn, archive_id)?;
 
     let existing: Option<(i64, Option<i64>, Option<i64>)> = conn
@@ -1613,6 +1720,10 @@ pub fn link_tags_in_tx(
                 continue;
             }
         };
+        // 同 add_tag：中文归一到规范英文名，批量粘贴里的「女性」不会再建重复标签。
+        let name = translate::canonical_tag_name(&name)
+            .map(str::to_string)
+            .unwrap_or(name);
         if !seen.insert(name.to_lowercase()) {
             continue;
         }

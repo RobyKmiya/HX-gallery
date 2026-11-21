@@ -350,7 +350,7 @@ fn combined_filters_narrow_results() {
     let tag = db::list_tags(&context.conn)
         .unwrap()
         .into_iter()
-        .find(|item| item.name == "风景")
+        .find(|item| item.name == "landscape")
         .unwrap();
     let tagged = titles(ArchiveQuery {
         rating_buckets: Some(vec![3, 5]),
@@ -728,7 +728,7 @@ fn bulk_tag_import_categorizes_and_survives_bad_rows() {
     let find = |name: &str| attached.iter().find(|tag| tag.name == name).unwrap();
     assert_eq!(find("长裙").category.as_deref(), Some("角色"));
     assert_eq!(find("mountainhan").category.as_deref(), Some("作者"));
-    assert_eq!(find("全彩").category, None);
+    assert_eq!(find("full color").category, None);
 
     // 再导一次：不新增、不重复挂、且不覆盖已有分类，只把空的补上。
     let again = db::add_tags_bulk(
@@ -841,7 +841,9 @@ fn tags_and_collections_persist() {
     assert_eq!(empty.total, 0);
 
     let tag = db::add_tag(&context.conn, archive_id, "  #风景 ").unwrap();
-    assert_eq!(tag.name, "风景");
+    // 中文固定词归一到规范英文名，显示时用「风景」这个译名。
+    assert_eq!(tag.name, "landscape");
+    assert_eq!(tag.translated_name.as_deref(), Some("风景"));
     assert_eq!(tag.count, 1);
     let again = db::add_tag(&context.conn, archive_id, "风景").unwrap();
     assert_eq!(again.id, tag.id);
@@ -849,7 +851,7 @@ fn tags_and_collections_persist() {
 
     let all_tags = db::list_tags(&context.conn).unwrap();
     assert_eq!(all_tags.len(), 1);
-    assert_eq!(all_tags[0].name, "风景");
+    assert_eq!(all_tags[0].name, "landscape");
     assert_eq!(db::archive_tags(&context.conn, archive_id).unwrap().len(), 1);
     assert!(db::add_tag(&context.conn, 999_999, "孤立").is_err());
     assert!(db::add_tag(&context.conn, archive_id, "   ").is_err());
@@ -1963,7 +1965,7 @@ fn import_stage_preview_and_tags_on_import() {
             .starts_with("角色"),
         "显式路径应落进角色大类"
     );
-    assert_eq!(find("全彩").category.as_deref(), Some("其他"));
+    assert_eq!(find("full color").category.as_deref(), Some("其他"));
 
     // 「疑似重复」只看同名同大小，命中后导入流程自己还会按内容哈希复核。
     let size = fs::metadata(&zip).unwrap().len() as i64;
@@ -2069,8 +2071,36 @@ fn migration_v10_creates_loose_image_tables() {
     assert_eq!(version, db::SCHEMA_VERSION);
 }
 
-/// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。
+/// 中文固定词标签要归一到规范英文名，并带出中文译名（管理员 2026-11-22）。
 #[test]
+fn chinese_fixed_tags_unify_to_canonical_english() {
+    let fixture = Fixture::new();
+    {
+        let context = db::open_library(&fixture.library).unwrap();
+        // 绕过 add_tag 的归一，模拟历史遗留的中文标签
+        context
+            .conn
+            .execute(
+                "INSERT INTO tags(name, original_name) VALUES ('巨乳', '巨乳')",
+                [],
+            )
+            .unwrap();
+    }
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let tags = db::list_tags(&context.conn).unwrap();
+    let tag = tags
+        .iter()
+        .find(|tag| tag.name == "big breasts")
+        .expect("中文标签应改成规范英文名");
+    assert_eq!(tag.translated_name.as_deref(), Some("巨乳"));
+    assert!(
+        !tags.iter().any(|tag| tag.name == "巨乳"),
+        "旧的中文名不应再独立存在"
+    );
+}
+
+/// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。#[test]
 fn zero_weight_tag_excludes_archive_entirely() {
     let fixture = Fixture::new();
 
