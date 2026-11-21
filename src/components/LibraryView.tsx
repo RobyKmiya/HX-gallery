@@ -326,7 +326,7 @@ export default function LibraryView({
   const [tagCenterOpen, setTagCenterOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
-  const [loosePanelOpen, setLoosePanelOpen] = useState(false);
+  const [looseView, setLooseView] = useState(false);
   const [releasePanelOpen, setReleasePanelOpen] = useState(false);
   const [d2PanelOpen, setD2PanelOpen] = useState(false);
   /**
@@ -1831,6 +1831,7 @@ export default function LibraryView({
               activeCollectionId === null && !activeQueue ? " is-active" : ""
             }`}
             onClick={() => {
+              setLooseView(false);
               setActiveCollectionId(null);
               clearActiveQueue();
             }}
@@ -1898,7 +1899,10 @@ export default function LibraryView({
                   type="button"
                   className={`nav-item${isActive ? " is-active" : ""}`}
                   title={collection.name}
-                  onClick={() => setActiveCollectionId(collection.id)}
+                  onClick={() => {
+                    setLooseView(false);
+                    setActiveCollectionId(collection.id);
+                  }}
                 >
                   <HeartIcon width={16} height={16} />
                   <span className="nav-label">{collection.name}</span>
@@ -1958,7 +1962,10 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item nav-item-tags"
-            onClick={() => setTagCenterOpen(true)}
+            onClick={() => {
+              setLooseView(false);
+              setTagCenterOpen(true);
+            }}
             title="管理标签、搜索标签、生成标签导图"
           >
             <TagIcon width={16} height={16} />
@@ -1969,7 +1976,10 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
-            onClick={() => setQueuePanelOpen(true)}
+            onClick={() => {
+              setLooseView(false);
+              setQueuePanelOpen(true);
+            }}
             title="随机挑一批画集排队看，带进度"
           >
             <BookIcon width={16} height={16} />
@@ -1978,8 +1988,8 @@ export default function LibraryView({
 
           <button
             type="button"
-            className="nav-item"
-            onClick={() => setLoosePanelOpen(true)}
+            className={`nav-item${looseView ? " is-active" : ""}`}
+            onClick={() => setLooseView((open) => !open)}
             title="散图收藏夹：单图多区收藏，文件夹形式只记引用"
           >
             <FolderIcon width={16} height={16} />
@@ -2095,6 +2105,7 @@ export default function LibraryView({
       </aside>
 
       <main className="main-panel">
+        {looseView && <LoosePanel variant="page" onNotify={notify} />}
         <header className="topbar">
           <div className="topbar-title">
             <p className="eyebrow">
@@ -3299,9 +3310,6 @@ export default function LibraryView({
             </div>
           </div>
         )}
-      {loosePanelOpen && (
-        <LoosePanel onClose={() => setLoosePanelOpen(false)} onNotify={notify} />
-      )}
       {queuePanelOpen && (
         <QueuePanel
           tags={tags}

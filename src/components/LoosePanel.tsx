@@ -11,8 +11,14 @@ import {
 } from "./Icons";
 
 interface LoosePanelProps {
-  onClose: () => void;
+  /** 弹层形态的关闭回调；整页形态（variant="page"）不需要传。 */
+  onClose?: () => void;
   onNotify: (message: string, kind?: "info" | "success" | "error") => void;
+  /**
+   * modal = 盖在画廊上的弹层（旧形态，保留兼容）；
+   * page = 作为主导航的主内容区整页渲染（侧栏「散图收藏夹」点进来就是这个）。
+   */
+  variant?: "modal" | "page";
 }
 
 const DEFAULT_RATING_STEP = 10;
@@ -26,7 +32,9 @@ const DEFAULT_RATING_STEP = 10;
 export default function LoosePanel({
   onClose,
   onNotify,
+  variant = "modal",
 }: LoosePanelProps) {
+  const isPage = variant === "page";
   const [collections, setCollections] = useState<LooseImageCollection[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [images, setImages] = useState<LooseImage[]>([]);
@@ -225,15 +233,14 @@ export default function LoosePanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [viewIndex, images.length]);
 
-  return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div
-        className="queue-panel loose-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label="散图收藏夹"
-        onClick={(event) => event.stopPropagation()}
-      >
+  const inner = (
+    <div
+      className={isPage ? "loose-page" : "queue-panel loose-panel"}
+      role={isPage ? undefined : "dialog"}
+      aria-modal={isPage ? undefined : true}
+      aria-label="散图收藏夹"
+      onClick={isPage ? undefined : (event) => event.stopPropagation()}
+    >
         <header className="queue-panel-head">
           <div>
             <p className="eyebrow">LOOSE IMAGES</p>
@@ -249,13 +256,15 @@ export default function LoosePanel({
             >
               <RefreshIcon width={16} height={16} />
             </button>
-            <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-              <CloseIcon width={16} height={16} />
-            </button>
+            {onClose && (
+              <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+                <CloseIcon width={16} height={16} />
+              </button>
+            )}
           </div>
         </header>
 
-        <div className="queue-panel-body">
+        <div className={isPage ? "loose-page-body" : "queue-panel-body"}>
           <section className="queue-generate">
             <div className="queue-generate-row">
               <div>
@@ -482,7 +491,14 @@ export default function LoosePanel({
             </div>
           </div>
         )}
-      </div>
+    </div>
+  );
+
+  // 整页形态直接铺进主内容区；弹层形态再套一层遮罩（旧入口兼容）。
+  if (isPage) return inner;
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={() => onClose?.()}>
+      {inner}
     </div>
   );
 }
