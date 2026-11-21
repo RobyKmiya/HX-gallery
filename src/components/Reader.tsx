@@ -78,6 +78,10 @@ const STATIC_PAGE_DWELL_MS = 2000;
 /** 播放模式下动图页的停留上下限：太短看不清，太长（几分钟的长动图）会卡住模式。 */
 const PLAYBACK_MIN_PAGE_MS = 400;
 const PLAYBACK_MAX_PAGE_MS = 30000;
+/** 动图翻页缓冲：动画总时长之后多留一小段，让最后一帧安心播完再翻。 */
+const PLAYBACK_GRACE_MS = 150;
+/** 动图 img 一直等不到 load 事件（如正处在静默重试）时的兜底时长。 */
+const PLAYBACK_LOAD_FALLBACK_MS = 3000;
 
 function isAnimName(name: string): boolean {
   const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
@@ -254,8 +258,11 @@ export default function Reader({
   const [playing, setPlaying] = useState(false);
   /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
+  /** 当前页 <img> 真实 load 完成的时刻（0=还没加载好，-1=兜底已触发）。 */
+  const [pageShownAt, setPageShownAt] = useState(0);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const pageDataRef = useRef<ReaderPage | null>(null);
   const cacheRef = useRef<Map<number, ReaderPage>>(new Map());
   const thumbCacheRef = useRef<Map<number, string>>(new Map());
   const inflightRef = useRef<Map<number, Promise<ReaderPage>>>(new Map());
@@ -288,6 +295,7 @@ const archiveEpochRef = useRef(0);
 
   infoRef.current = info;
   pageRef.current = page + 1;
+  pageDataRef.current = pageData;
 
   const fetchPageData = useCallback(
     (index: number, current = false): Promise<ReaderPage> => {
@@ -438,6 +446,8 @@ const archiveEpochRef = useRef(0);
 
     const seq = ++requestSeqRef.current;
     setPageInput(String(page + 1));
+    // 换页就重置「真实显示时刻」：等新页的 <img> load 事件重新记。
+    setPageShownAt(0);
 
     const secondIndex = spread && page + 1 < info.pageCount ? page + 1 : null;
     const cached = cacheRef.current.get(page);
@@ -640,6 +650,10 @@ const archiveEpochRef = useRef(0);
 
   // 播放模式节拍：动图按真实总时长播一遍再翻页，静态页停 2 秒；
   // 翻到本尾自动换下一本，没有下一本就结束播放。
+  // 动图的计时起点 = <img> 真实 load 完成那一刻（pageShownAt）——大动图从
+  // pageData 就位到真正起播有几百毫秒差，从就位起算会切在动画中段，
+  // 衔接不连贯（管理员反馈）。等 3 秒还等不到 load（如正静默重试）就按
+  // 兜底起点计整段时长，宁可稍长也不把播放卡死。
   useEffect(() => {
     if (!playing || !info || info.pageCount === 0 || !pageData) return;
     const looksAnim = isAnimName(pageData.name);
@@ -648,10 +662,24 @@ const archiveEpochRef = useRef(0);
     // 元数据拿不到时上面的 catch 已把它记成静态页，不会永久等待。
     if (looksAnim && !meta) return;
 
-    const duration =
+    if (looksAnim && pageShownAt === 0) {
+      const fallback = window.setTimeout(
+        () => setPageShownAt(-1),
+        PLAYBACK_LOAD_FALLBACK_MS,
+      );
+      return () => window.clearTimeout(fallback);
+    }
+
+    const startedAt = looksAnim && pageShownAt > 0 ? pageShownAt : 0;
+    const raw =
       meta?.animated && meta.totalDurationMs > 0
-        ? Math.min(Math.max(meta.totalDurationMs, PLAYBACK_MIN_PAGE_MS), PLAYBACK_MAX_PAGE_MS)
+        ? meta.totalDurationMs
         : STATIC_PAGE_DWELL_MS;
+    const elapsed = startedAt > 0 ? Date.now() - startedAt : 0;
+    const duration = Math.min(
+      Math.max(raw - elapsed + PLAYBACK_GRACE_MS, PLAYBACK_MIN_PAGE_MS),
+      PLAYBACK_MAX_PAGE_MS,
+    );
 
     const timer = window.setTimeout(() => {
       const count = info.pageCount;
@@ -675,6 +703,7 @@ const archiveEpochRef = useRef(0);
     animMetas,
     page,
     spread,
+    pageShownAt,
     hasNextArchive,
     onSwitchArchive,
     onNotify,
@@ -1051,6 +1080,11 @@ const archiveEpochRef = useRef(0);
         ...previous,
         [index]: { width: naturalWidth, height: naturalHeight },
       }));
+      // 记录当前页真实显示时刻：播放模式的动图计时从这一刻起算，
+      // 和 Chromium 实际开始播动画对齐（否则翻页会切在动画中段）。
+      if (index === (pageDataRef.current?.index ?? -1)) {
+        setPageShownAt(Date.now());
+      }
       // 成功即清零退避计数：之后若再失败，退避从头算。
       poolRetryRef.current.delete(index);
     },
