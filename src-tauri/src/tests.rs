@@ -2881,3 +2881,124 @@ fn progress_hud_source_raw_string_is_safe() {
     assert!(source.starts_with("# 由画匣生成"));
     assert!(source.contains("$form.ShowDialog()"));
 }
+
+/// v10 散图收藏夹：迁移建表 + 全链路（建区/扫描/评分收藏/画廊收集/提取另存）。
+#[test]
+fn loose_collection_roundtrip_scan_collect_extract() {
+    let fixture = Fixture::new();
+    let zip = fixture.source.join("A.cbz");
+    write_zip(&zip, &["a.png", "b.png"], 30);
+    let report = importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![zip],
+        ImportOptions::default(),
+        |_| {},
+    );
+    assert_eq!(report.imported, 1, "errors: {:?}", report.errors);
+
+    let mut context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    let archive_id = page.items[0].id;
+
+    // 建区（默认根 = 库根旁「散图」）+ 手动放两张图 + 扫描
+    let loose_root = fixture.library.parent().unwrap().join("散图");
+    let loose_dir = loose_root.join("测试区");
+    std::fs::create_dir_all(&loose_dir).unwrap();
+    std::fs::write(loose_dir.join("手动.png"), png_bytes([10, 20, 30])).unwrap();
+    std::fs::write(loose_dir.join("手动2.jpg"), png_bytes([40, 50, 60])).unwrap();
+
+    let collection = crate::loose_images::create_collection(
+        &mut context.conn,
+        "测试区",
+        None,
+        &loose_root,
+    )
+    .unwrap();
+    assert_eq!(collection.count, 0);
+
+    let (added, missing, total) =
+        crate::loose_images::scan_collection(&mut context.conn, collection.id).unwrap();
+    assert_eq!((added, missing, total), (2, 0, 2), "两张图都应登记");
+
+    // 评分与收藏
+    let images = crate::loose_images::list_images(&context.conn, collection.id).unwrap();
+    let manual = images
+        .iter()
+        .find(|image| image.path.as_deref().unwrap_or("").ends_with("手动.png"))
+        .unwrap();
+    crate::loose_images::set_rating(&context.conn, manual.id, 88).unwrap();
+    crate::loose_images::set_favorite(&context.conn, manual.id, true).unwrap();
+    let images = crate::loose_images::list_images(&context.conn, collection.id).unwrap();
+    let manual = images
+        .iter()
+        .find(|image| image.id == manual.id)
+        .unwrap();
+    assert_eq!(manual.rating, 88);
+    assert!(manual.favorite);
+
+    // 画廊收集（指向源页）+ 幂等
+    let collected =
+        crate::loose_images::collect_archive_page(&context.conn, collection.id, archive_id, 0)
+            .unwrap();
+    assert_eq!(collected.kind, "archive_page");
+    assert_eq!(collected.page_index, Some(0));
+    let again = crate::loose_images::collect_archive_page(
+        &context.conn,
+        collection.id,
+        archive_id,
+        0,
+    )
+    .unwrap();
+    assert_eq!(again.id, collected.id, "重复收集应幂等");
+
+    // 提取另存：文件落进区文件夹并登记为 file 型
+    let extracted = crate::loose_images::extract_page(
+        &mut context.conn,
+        &fixture.library,
+        collection.id,
+        archive_id,
+        1,
+    )
+    .unwrap();
+    assert_eq!(extracted.kind, "file");
+    assert!(
+        extracted
+            .path
+            .as_deref()
+            .unwrap_or("")
+            .contains("散图"),
+        "提取文件应落在区文件夹里：{:?}",
+        extracted.path
+    );
+    assert!(Path::new(extracted.path.as_deref().unwrap_or("")).exists());
+
+    // 文件被外部删除 → 扫描标缺失；恢复 → 复活
+    std::fs::remove_file(loose_dir.join("手动2.jpg")).unwrap();
+    let (_, missing, _) =
+        crate::loose_images::scan_collection(&mut context.conn, collection.id).unwrap();
+    assert_eq!(missing, 1, "外部删除应标缺失");
+    std::fs::write(loose_dir.join("手动2.jpg"), png_bytes([9, 9, 9])).unwrap();
+    let (_, missing, _) =
+        crate::loose_images::scan_collection(&mut context.conn, collection.id).unwrap();
+    assert_eq!(missing, 0, "文件恢复应复活");
+
+    // 删除区：记录清空，磁盘文件原样保留
+    let files_before: Vec<_> = std::fs::read_dir(&loose_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    crate::loose_images::delete_collection(&mut context.conn, collection.id).unwrap();
+    let files_after: Vec<_> = std::fs::read_dir(&loose_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(files_before.len(), files_after.len(), "删区不动文件");
+}
+

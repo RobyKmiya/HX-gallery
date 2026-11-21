@@ -397,6 +397,35 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_collection_archives_archive
             ON collection_archives(archive_id);
 
+
+        CREATE TABLE IF NOT EXISTS image_collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            folder TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS image_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_id INTEGER NOT NULL REFERENCES image_collections(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            path TEXT,
+            archive_id INTEGER REFERENCES archives(id) ON DELETE SET NULL,
+            page_index INTEGER,
+            rating INTEGER NOT NULL DEFAULT 0,
+            favorite INTEGER NOT NULL DEFAULT 0,
+            file_size INTEGER,
+            missing INTEGER NOT NULL DEFAULT 0,
+            added_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_image_records_collection
+            ON image_records(collection_id);
+        CREATE INDEX IF NOT EXISTS idx_image_records_favorite
+            ON image_records(favorite);
+        CREATE INDEX IF NOT EXISTS idx_image_records_archive
+            ON image_records(archive_id);
+
         CREATE TABLE IF NOT EXISTS tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -639,6 +668,36 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
     conn.execute("DROP TABLE IF EXISTS archives_fts", [])
         .map_err(|e| format!("删除旧全文索引失败: {e}"))?;
     backfill_tag_text(conn)?;
+
+    // v10：散图收藏夹（区 + 记录，只记引用不迁移文件）。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS image_collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            folder TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS image_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_id INTEGER NOT NULL REFERENCES image_collections(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            path TEXT,
+            archive_id INTEGER REFERENCES archives(id) ON DELETE SET NULL,
+            page_index INTEGER,
+            rating INTEGER NOT NULL DEFAULT 0,
+            favorite INTEGER NOT NULL DEFAULT 0,
+            file_size INTEGER,
+            missing INTEGER NOT NULL DEFAULT 0,
+            added_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_records_collection
+            ON image_records(collection_id);
+        CREATE INDEX IF NOT EXISTS idx_image_records_favorite
+            ON image_records(favorite);
+        CREATE INDEX IF NOT EXISTS idx_image_records_archive
+            ON image_records(archive_id);"
+    )
+    .map_err(|e| format!("创建散图收藏夹表失败: {e}"))?;
 
     conn.execute(
         "UPDATE tags SET original_name = name

@@ -9,6 +9,7 @@ pub mod fsutil;
 pub mod importer;
 pub mod instance;
 pub mod library;
+pub mod loose_images;
 pub mod models;
 mod pagecache;
 mod paths;
@@ -57,6 +58,14 @@ struct AppInner {
 /// 的闭包里执行，`State<'_, _>` 带生命周期，只有可克隆的状态句柄能跨线程使用。
 pub struct AppState {
     inner: Arc<Mutex<AppInner>>,
+}
+
+/// 给 loose:// 协议与散图命令用的（库根, 库数据库文件路径）。
+pub(crate) fn library_root_and_db(state: &AppState) -> Option<(PathBuf, PathBuf)> {
+    let guard = state.inner.lock().ok()?;
+    let library = guard.library.as_ref()?;
+    let db_path = library.root.join("library.db");
+    Some((library.root.clone(), db_path))
 }
 
 impl Clone for AppState {
@@ -1399,6 +1408,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .register_uri_scheme_protocol("gallery", asset_protocol::serve)
+        .register_uri_scheme_protocol("loose", move |context, request| {
+            crate::loose_images::serve(context.app_handle(), request)
+        })
         .setup(move |app| {
             // 上次发布成功后补记基线：之后关窗不会再无脑抬版本
             release::settle_baseline_after_success(app.handle());
@@ -1423,6 +1435,17 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             userscripts::gm_add_script_from_url,
             userscripts::gm_remove_script,
             userscripts::gm_set_script_enabled,
+            loose_images::loose_list_collections,
+            loose_images::loose_create_collection,
+            loose_images::loose_delete_collection,
+            loose_images::loose_scan_collection,
+            loose_images::loose_list_images,
+            loose_images::loose_set_rating,
+            loose_images::loose_set_favorite,
+            loose_images::loose_remove_image,
+            loose_images::loose_collect_page,
+            loose_images::loose_extract_page,
+            loose_images::loose_open_folder,
             d2::d2_close_window,
             d2::d2_current_url,
             scan_library,
