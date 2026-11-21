@@ -526,6 +526,9 @@ fn attach_tab_hooks(
                 true
             }
         })
+        // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
+        // 由本脚本画匣系自己的菜单。
+        .initialization_script(CONTEXT_MENU_SCRIPT)
 }
 
 /// 挂油猴加载器（含日志），返回追加后的 builder。
@@ -551,6 +554,134 @@ fn attach_userscripts(
     log_for(label, &format!("油猴：注入 {} 个脚本", sources.len()));
     builder.initialization_script(userscripts::loader_source(&sources))
 }
+
+
+/// 内容页右键菜单脚本（引擎级，所有内容标签注入）。
+///
+/// WebView2 的规则：页面在 `contextmenu` 事件里 `preventDefault()`，原生默认
+/// 菜单就不弹——所以纯页内实现即可。菜单本体也是 Shadow DOM（不沾站点样式）。
+/// 本地动作（复制/后退/刷新）页面内完成；需要引擎的动作（开新标签）写
+/// `window.__xkReq` 队列，由引擎轮询器消化。
+const CONTEXT_MENU_SCRIPT: &str = r###"
+(function () {
+  if (window.__xkCtxMenu) return;
+  window.__xkCtxMenu = true;
+  var host = null;
+
+  function closeMenu() {
+    if (host) { host.remove(); host = null; }
+    document.removeEventListener("click", closeMenu, true);
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("blur", closeMenu, true);
+  }
+  function onKey(e) { if (e.key === "Escape") closeMenu(); }
+
+  function item(label, fn, disabled) {
+    var it = document.createElement("div");
+    it.className = "xm-item";
+    it.textContent = label;
+    if (disabled) it.className += " xm-disabled";
+    else it.addEventListener("click", function (e) { e.stopPropagation(); closeMenu(); fn(); });
+    return it;
+  }
+  function sep() { var s = document.createElement("div"); s.className = "xm-sep"; return s; }
+
+  function copyText(text) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(function () { legacyCopy(text); });
+    } else legacyCopy(text);
+  }
+  function legacyCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  }
+
+  function openMenu(x, y, target) {
+    closeMenu();
+    var link = target.closest ? target.closest("a") : null;
+    var img = target.tagName === "IMG" ? target : (target.closest ? target.closest("img") : null);
+    var selection = String(window.getSelection ? window.getSelection() : "");
+    var items = [];
+
+    if (link) {
+      items.push(item("在新标签打开链接", function () { window.__xkReq = { action: "new", url: link.href }; }));
+      items.push(item("复制链接地址", function () { copyText(link.href); }));
+    }
+    if (img && (img.currentSrc || img.src)) {
+      items.push(item("在新标签打开图片", function () { window.__xkReq = { action: "new", url: img.currentSrc || img.src }; }));
+      items.push(item("复制图片地址", function () { copyText(img.currentSrc || img.src); }));
+      items.push(item("打开原图并另存", function () {
+        var url = img.currentSrc || img.src;
+        var a = document.createElement("a");
+        a.href = url; a.download = "";
+        document.body.appendChild(a); a.click(); a.remove();
+      }));
+    }
+    if (selection) items.push(item("复制选中文本", function () { copyText(selection); }));
+    items.push(sep());
+    items.push(item("后退", function () { history.back(); }));
+    items.push(item("前进", function () { history.forward(); }));
+    items.push(item("刷新", function () { location.reload(); }));
+    items.push(sep());
+    items.push(item("全选", function () {
+      var range = document.createRange();
+      range.selectNodeContents(document.body);
+      var sel = window.getSelection();
+      if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+    }));
+
+    host = document.createElement("div");
+    host.setAttribute("style", "position:fixed;inset:0;z-index:2147483646;");
+    var root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+    var style = document.createElement("style");
+    style.textContent = [
+      ".xm{position:fixed;min-width:180px;padding:5px;border-radius:10px;",
+      "background:rgba(20,22,27,.98);border:1px solid #333842;",
+      "box-shadow:0 8px 24px rgba(0,0,0,.45);color:#e8eaf0;",
+      "font:12px 'Segoe UI','Microsoft YaHei UI',sans-serif;}",
+      ".xm-item{padding:7px 12px;border-radius:6px;cursor:pointer;}",
+      ".xm-item:hover{background:#2c313c;}",
+      ".xm-disabled{color:#5a6070;cursor:default;}",
+      ".xm-disabled:hover{background:transparent;}",
+      ".xm-sep{height:1px;margin:4px 8px;background:#333842;}",
+    ].join("");
+    root.appendChild(style);
+    var menu = document.createElement("div");
+    menu.className = "xm";
+    for (var i = 0; i < items.length; i++) menu.appendChild(items[i]);
+    root.appendChild(menu);
+    document.documentElement.appendChild(host);
+
+    // 视口内收放
+    var rect = menu.getBoundingClientRect();
+    var maxX = window.innerWidth - rect.width - 4;
+    var maxY = window.innerHeight - rect.height - 4;
+    menu.style.left = Math.min(x, Math.max(0, maxX)) + "px";
+    menu.style.top = Math.min(y, Math.max(0, maxY)) + "px";
+
+    setTimeout(function () {
+      document.addEventListener("click", closeMenu, true);
+      document.addEventListener("keydown", onKey, true);
+      window.addEventListener("blur", closeMenu, true);
+      // 右键另一处：换菜单不关壳
+      document.addEventListener("contextmenu", function (e) {
+        if (host) { e.preventDefault(); }
+      }, true);
+    }, 0);
+  }
+
+  document.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+    openMenu(e.clientX, e.clientY, e.target);
+  }, false);
+})();
+"###;
 
 /// 待建标签的进程级队列（弹窗/工具栏入口都往里塞，消化线程统一建）。
 static PENDING_TABS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -729,8 +860,9 @@ fn start_gm_poller(label: &str, app: AppHandle) {
             if webviews.is_empty() {
                 return;
             }
-            for webview in webviews {
-                poll_gm_xhr_queue(&webview);
+            for webview in &webviews {
+                poll_tab_req(&label, webview);
+                poll_gm_xhr_queue(webview);
             }
         }
     });
@@ -740,6 +872,44 @@ fn tab_webviews(label: &str) -> Option<Vec<Webview>> {
     with_state(label, |state| {
         state.tabs.iter().map(|tab| tab.webview.clone()).collect()
     })
+}
+
+fn app_of(label: &str) -> Option<AppHandle> {
+    with_state(label, |state| state.window.app_handle().clone())
+}
+
+/// 内容页右键菜单的「新标签」请求：与工具栏同一套动作分派。
+fn poll_tab_req(label: &str, webview: &Webview) {
+    let raw = match eval_json(
+        webview,
+        "JSON.stringify(window.__xkReq || null)",
+        Duration::from_secs(2),
+    ) {
+        Ok(raw) if !raw.trim().is_empty() && raw != "null" => raw,
+        _ => return,
+    };
+    let req: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    if req.get("action").and_then(|value| value.as_str()) != Some("new") {
+        return;
+    }
+    let Some(url) = req.get("url").and_then(|value| value.as_str()) else {
+        return;
+    };
+    if url.is_empty() {
+        return;
+    }
+        let Some(app) = app_of(label) else {
+        return;
+    };
+    match new_tab(&app, label, url, true) {
+        Ok(_) => {
+            let _ = webview.eval("window.__xkReq = null;");
+        }
+        Err(error) => log_for(label, &format!("右键新标签失败：{error}")),
+    }
 }
 
 /// 油猴跨域 XHR：轮询页面侧 `window.__xkGmXhr` 队列，把 pending 的请求用
