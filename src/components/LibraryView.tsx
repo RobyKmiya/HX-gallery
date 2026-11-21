@@ -13,6 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, assetUrl } from "../api";
+import { usePersistentSize } from "../layout";
 import { formatBytes } from "../format";
 import type {
   ArchiveCardData,
@@ -42,6 +43,7 @@ import ImportResultDialog from "./ImportResultDialog";
 import LoosePanel from "./LoosePanel";
 import QueuePanel from "./QueuePanel";
 import Reader from "./Reader";
+import Splitter from "./Splitter";
 import ReleasePanel from "./ReleasePanel";
 import D2Panel from "./D2Panel";
 import TagCenter from "./TagCenter";
@@ -327,6 +329,19 @@ export default function LibraryView({
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
+  /** 布局尺寸：侧栏宽度与停靠详情宽度，拖动分界线改、存在本机。 */
+  const [sidebarWidth, setSidebarWidth, resetSidebarWidth] = usePersistentSize(
+    "huaxia.layout.sidebar",
+    262,
+    190,
+    420,
+  );
+  const [drawerWidth, setDrawerWidth, resetDrawerWidth] = usePersistentSize(
+    "huaxia.layout.drawer",
+    430,
+    320,
+    760,
+  );
   /** 侧栏「收藏夹」大类是否折叠（记在本机，重开也保持）。 */
   const [collectionsCollapsed, setCollectionsCollapsed] = useState(() => {
     try {
@@ -1813,7 +1828,10 @@ export default function LibraryView({
   ]);
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}
+    >
       <aside className="sidebar">
         <div className="sidebar-brand">
           <span className="brand-mark">
@@ -1995,6 +2013,8 @@ export default function LibraryView({
             );
           })}
 
+          <div className="nav-divider" aria-hidden="true" />
+
           <button
             type="button"
             className="nav-item nav-item-tags"
@@ -2031,6 +2051,8 @@ export default function LibraryView({
             <FolderIcon width={16} height={16} />
             <span className="nav-label">散图收藏夹</span>
           </button>
+
+          <div className="nav-divider" aria-hidden="true" />
 
           <button
             type="button"
@@ -2139,6 +2161,15 @@ export default function LibraryView({
           {appVersion ? `v${appVersion}` : "画匣"} · ZIP/CBZ/7Z/RAR · 完全离线
         </div>
       </aside>
+
+      <Splitter
+        label="侧栏"
+        value={sidebarWidth}
+        min={190}
+        max={420}
+        onChange={setSidebarWidth}
+        onReset={resetSidebarWidth}
+      />
 
       <main className="main-panel">
         {looseView && <LoosePanel variant="page" onNotify={notify} />}
@@ -2622,7 +2653,10 @@ export default function LibraryView({
           </div>
         </header>
 
-        <div className="content-shell">
+        <div
+          className="content-shell"
+          style={{ ["--drawer-w" as string]: `${drawerWidth}px` } as React.CSSProperties}
+        >
           <div className="content-scroll" ref={contentRef}>
           {hasFilter && (
             <div className="active-filter-bar">
@@ -3148,25 +3182,36 @@ export default function LibraryView({
           {/* 详情「外拓」停靠：作为 content-shell 的 flex 兄弟节点渲染，
               画廊网格 repeat(auto-fill) 自动让位重排，不铺遮罩不遮挡。 */}
           {selected && detailDock === "dock" && (
-            <DetailDrawer
-              docked
-              dock={detailDock}
-              onDockChange={setDetailDock}
-              card={selected}
-              collections={collections}
-              onClose={() => setSelected(null)}
-              onRead={() => {
-                setReaderCard(selected);
-                setSelected(null);
-              }}
-              onNotify={notify}
-              onRatingChange={updateRating}
-              onCollectionToggle={toggleCollectionMembership}
-              onCollectionCover={setCollectionCover}
-              onNoteChange={updateNote}
-              onTagsChanged={loadTags}
-              onDelete={removeArchive}
-            />
+            <>
+              <Splitter
+                label="详情面板"
+                value={drawerWidth}
+                min={320}
+                max={760}
+                direction={-1}
+                onChange={setDrawerWidth}
+                onReset={resetDrawerWidth}
+              />
+              <DetailDrawer
+                docked
+                dock={detailDock}
+                onDockChange={setDetailDock}
+                card={selected}
+                collections={collections}
+                onClose={() => setSelected(null)}
+                onRead={() => {
+                  setReaderCard(selected);
+                  setSelected(null);
+                }}
+                onNotify={notify}
+                onRatingChange={updateRating}
+                onCollectionToggle={toggleCollectionMembership}
+                onCollectionCover={setCollectionCover}
+                onNoteChange={updateNote}
+                onTagsChanged={loadTags}
+                onDelete={removeArchive}
+              />
+            </>
           )}
         </div>
       </main>

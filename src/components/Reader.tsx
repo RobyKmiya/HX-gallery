@@ -8,6 +8,7 @@ import {
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
 import { api, readerPageUrl } from "../api";
+import { usePersistentFlag } from "../layout";
 import type {
   AnimMeta,
   ArchiveCardData,
@@ -245,6 +246,38 @@ export default function Reader({
   const [secondData, setSecondData] = useState<ReaderPage | null>(null);
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  /** 沉浸（无框）阅读：隐藏顶栏/进度条，鼠标一动才浮出来。默认开，记在本机。 */
+  const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const chromeTimerRef = useRef<number | null>(null);
+
+  /** 鼠标一动就把顶栏/进度条浮出来，停 2.2 秒再自动藏回去。 */
+  const revealChrome = useCallback(() => {
+    setChromeVisible(true);
+    if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
+    chromeTimerRef.current = window.setTimeout(() => {
+      setChromeVisible(false);
+      chromeTimerRef.current = null;
+    }, 2200);
+  }, []);
+
+  useEffect(() => {
+    if (!immersive) {
+      if (chromeTimerRef.current !== null) {
+        window.clearTimeout(chromeTimerRef.current);
+        chromeTimerRef.current = null;
+      }
+      setChromeVisible(true);
+      return;
+    }
+    revealChrome();
+    return () => {
+      if (chromeTimerRef.current !== null) {
+        window.clearTimeout(chromeTimerRef.current);
+        chromeTimerRef.current = null;
+      }
+    };
+  }, [immersive, revealChrome]);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
   /** 播放阅读模式（持久化）：开着的书播完自动翻页、翻完自动换下一本。 */
@@ -971,6 +1004,8 @@ const archiveEpochRef = useRef(0);
         setBookmarksOpen((value) => !value);
       } else if (event.key.toLowerCase() === "t") {
         setThumbsOpen((value) => !value);
+      } else if (event.key.toLowerCase() === "f") {
+        setImmersive(!immersive);
       } else {
         handled = false;
       }
@@ -996,6 +1031,8 @@ const archiveEpochRef = useRef(0);
     pausePlayback,
     togglePlayback,
     onOpenDetail,
+    immersive,
+    setImmersive,
   ]);
 
   useEffect(() => {
@@ -1231,10 +1268,14 @@ const archiveEpochRef = useRef(0);
 
   return (
     <div
-      className="reader"
+      className={`reader${immersive ? " is-immersive" : ""}${
+        immersive && chromeVisible ? " is-chrome-visible" : ""
+      }`}
       role="dialog"
       aria-modal="true"
       aria-label={`阅读 ${card.title}`}
+      onPointerMove={immersive ? revealChrome : undefined}
+      onPointerDown={immersive ? revealChrome : undefined}
     >
       <header className="reader-head">
         <div className="reader-head-title">
@@ -1278,6 +1319,26 @@ const archiveEpochRef = useRef(0);
                 </button>
               </>
             )}
+            <button
+              type="button"
+              className={`icon-button${immersive ? " is-active" : ""}`}
+              onClick={() => setImmersive(!immersive)}
+              aria-label="沉浸阅读（无框）"
+              title="沉浸阅读：隐藏顶栏与进度条，鼠标一动即浮现 (F)"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width={16}
+                height={16}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.4}
+                strokeLinecap="round"
+                aria-hidden="true"
+              >
+                <path d="M2 6V3.2h3M14 6V3.2h-3M2 10v2.8h3M14 10v2.8h-3" />
+              </svg>
+            </button>
             <button
               type="button"
               className={`icon-button${thumbsOpen ? " is-active" : ""}`}

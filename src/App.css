@@ -440,6 +440,47 @@ svg {
     var(--bg);
 }
 
+/* ---------- 分界线（可拖动） ---------- */
+
+.splitter {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: stretch;
+  touch-action: none;
+  background: transparent;
+}
+
+.splitter-v {
+  width: 6px;
+  cursor: col-resize;
+}
+
+/* 一条 1px 的分界线画在 6px 热区正中，视觉上是线、手感上是条 */
+.splitter-v::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.splitter-v:hover::after,
+.splitter-v:focus-visible::after {
+  background: var(--accent, #7c93ff);
+  box-shadow: 0 0 0 1px rgba(124, 147, 255, 0.25);
+}
+
+.splitter-v:focus-visible { outline: none; }
+
+body.is-splitting {
+  cursor: col-resize;
+  user-select: none;
+}
+
 /* ---------- sidebar ---------- */
 
 .sidebar {
@@ -589,6 +630,13 @@ svg {
 .nav-item.is-active .nav-count {
   background: rgba(232, 163, 92, 0.16);
   color: var(--accent-strong);
+}
+
+/* 侧栏分组之间的分界线：画集 / 收藏夹 / 工具 三块一眼分得清 */
+.nav-divider {
+  height: 1px;
+  margin: 8px 4px;
+  background: var(--border);
 }
 
 /* 侧栏「收藏夹」大类：折叠开关（收藏夹多了会占满侧栏） */
@@ -4441,6 +4489,52 @@ svg {
   transition: width 0.18s ease;
 }
 
+/* ---------- 沉浸（无框）阅读 ---------- */
+/* 顶栏与进度条脱离文档流、浮在画面之上：翻页时看不到边框，鼠标一动才浮现。 */
+.reader.is-immersive .reader-head {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  opacity: 0;
+  transform: translateY(-100%);
+  transition: transform 0.18s ease, opacity 0.18s ease;
+  background: linear-gradient(180deg, rgba(8, 9, 13, 0.94), rgba(8, 9, 13, 0.62));
+  backdrop-filter: blur(10px);
+}
+
+.reader.is-immersive.is-chrome-visible .reader-head {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.reader.is-immersive .reader-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  height: 3px;
+  opacity: 0;
+  transition: opacity 0.18s ease, height 0.18s ease;
+}
+
+.reader.is-immersive.is-chrome-visible .reader-progress {
+  opacity: 1;
+  height: 5px;
+}
+
+/* 无框：舞台不留内边距，图片贴边 */
+.reader.is-immersive .reader-stage {
+  padding: 0;
+}
+
+/* 侧栏（缩略图/书签）也贴着画面，不再被 padding 挤出一条缝 */
+.reader.is-immersive .reader-body {
+  height: 100%;
+}
+
 /* 可拖拽跳页：视觉上还是同一条细进度线，但热区上下各扩 6px，
    悬停/拖动时进度线加亮。高度不变，避免布局抖动。 */
 .reader-progress.is-seekable {
@@ -5981,7 +6075,7 @@ svg {
   z-index: auto;
   display: block;
   flex: 0 0 auto;
-  width: min(430px, 40vw);
+  width: var(--drawer-w, min(430px, 40vw));
   height: 100%;
   min-height: 0;
   background: none;
