@@ -12,7 +12,8 @@ interface D2PanelProps {
 
 /** 常用入口。只是快捷方式，不是白名单——地址栏可以填任何站点。 */
 const QUICK_SITES: { label: string; url: string; hint?: string }[] = [
-  { label: "登录 e-hentai", url: "https://forums.e-hentai.org/index.php?act=Login&CODE=01" },
+  { label: "登录 e-hentai", url: "https://e-hentai.org/" },
+  { label: "论坛登录", url: "https://forums.e-hentai.org/index.php?act=Login&CODE=01" },
   { label: "e-hentai", url: "https://e-hentai.org/" },
   { label: "exhentai", url: "https://exhentai.org/" },
   { label: "nhentai", url: "https://nhentai.net/" },
@@ -253,7 +254,7 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
             <div className="release-row-text">
               <strong>浏览器</strong>
               <p className="queue-hint">
-                地址栏可以填任何站点，没有域名限制。窗口和主程序共用登录态，登一次就够。
+                多标签浏览器：地址栏直接改网址回车即走；站点弹窗自动开成新标签；无域名限制，窗口和主程序共用登录态。
               </p>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <input
@@ -402,8 +403,9 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
             <div className="release-row-text">
               <strong>作品页网址</strong>
               <p className="queue-hint">
-                exhentai 未登录一定是白屏（地址会变成 <code>?poni=no</code>）。先点「登录 e-hentai」登录，
-                再回到 exhentai 打开作品页，然后回来点下面这个按钮。
+                exhentai 白屏 = 未登录或账号无 exh 权限（地址会变成 <code>?poni=no</code>）。正确顺序：
+                点「登录 e-hentai」在主站登录（右上角 Log in）→ 再开 exhentai.org。
+                登录完成后回到这里填作品页网址。系统代理必须开着。
               </p>
               <input
                 value={url}
