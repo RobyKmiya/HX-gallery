@@ -738,10 +738,16 @@ if ($script:s -le 0) { $script:s = 1.0 }
 $progressPath = __PROGRESS_PATH__
 $exePath = __EXE_PATH__
 
+# 本次更新的起点。比它早的 progress.json 属于上一次更新，里面常残留 result=success：
+# 吃进去会立刻显示「已完成」再 20 秒自动关窗，用户什么都看不到（2026-11-22 反馈）。
+$script:baselineAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+$script:sawFresh = $false
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = '画匣更新'
 $form.FormBorderStyle = 'None'
 $form.TopMost = $true
+$form.ShowInTaskbar = $true
 $form.StartPosition = 'Manual'
 $form.Size = New-Object System.Drawing.Size(396, 172)
 $form.BackColor = [System.Drawing.Color]::FromArgb(16, 18, 22)
@@ -897,7 +903,14 @@ $timer.Add_Tick({
     try {
         if (-not (Test-Path -LiteralPath $progressPath)) { return }
         $data = Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($data.startedAt) { $script:startedAt = [int64]$data.startedAt }
+        # 上一次更新留下的进度文件（startedAt 早于本次起点）一律不认，避免把旧的
+        # result=success 当成「这次已经更新好了」。
+        $isStale = $false
+        if ($data.startedAt -and ([int64]$data.startedAt) -lt ($script:baselineAt - 5000)) {
+            $isStale = $true
+        }
+        if (-not $isStale) { $script:sawFresh = $true }
+        if ($data.startedAt -and -not $isStale) { $script:startedAt = [int64]$data.startedAt }
         $elapsedText = '00:00'
         if ($script:startedAt) {
             $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:startedAt
@@ -907,24 +920,25 @@ $timer.Add_Tick({
         if ($null -eq $data) { return }
 
         $result = ''
-        if ($data.result) { $result = [string]$data.result }
+        if (-not $isStale -and $data.result) { $result = [string]$data.result }
         $pct = $null
         $etaText = ''
         $pillText = ''
-        if ($data.version) { $title.Text = ('画匣 · 正在更新 v' + $data.version) }
+        if (-not $isStale -and $data.version) { $title.Text = ('画匣 · 正在更新 v' + $data.version) }
 
         if ($result -eq 'success') {
             $bar.BackColor = $accent
-            $stage.Text = '更新完成，新版已安装'
+            $newVer = ''
+            if ($data.version) { $newVer = [string]$data.version }
+            if ($newVer -ne '') {
+                $stage.Text = ('已更新到 v' + $newVer + '，可以打开画匣了')
+            } else {
+                $stage.Text = '更新完成，新版已安装'
+            }
             $pillText = '更新完成'
             if (-not $script:collapsed) { $actions.Visible = $true }
-            if (-not $script:closing) {
-                $script:closing = $true
-                $autoClose = New-Object System.Windows.Forms.Timer
-                $autoClose.Interval = 20000
-                $autoClose.Add_Tick({ $form.Close() })
-                $autoClose.Start()
-            }
+            # 不再自动关窗：关闭由用户点「打开画匣」或「关闭」决定，
+            # 否则一闪而过，用户永远不知道更新到底成没成。
         } elseif ($result -eq 'failed') {
             $bar.BackColor = $danger
             $stage.Text = '更新失败（不影响当前安装的版本）'
@@ -932,6 +946,11 @@ $timer.Add_Tick({
             $errorLabel.Visible = $true
             $pillText = '更新失败'
             if (-not $script:collapsed) { $actions.Visible = $true }
+        } elseif ($isStale) {
+            # 还没等到本次任务的进度：显式说「正在启动」，不要拿上一次的进度糊弄。
+            $stage.Text = '正在启动更新…'
+            $meta.Text = '构建即将开始，进度会自动刷新'
+            $pillText = '启动中'
         } else {
             $index = 0
             if ($data.stageIndex) { $index = [int]$data.stageIndex }

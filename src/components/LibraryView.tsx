@@ -352,6 +352,7 @@ export default function LibraryView({
     [setSidebarCollapsed, sidebarCollapsed],
   );
   const SIDEBAR_RAIL_WIDTH = 62;
+
   /** 侧栏「收藏夹」大类是否折叠（记在本机，重开也保持）。 */
   const [collectionsCollapsed, setCollectionsCollapsed] = useState(() => {
     try {
@@ -559,6 +560,44 @@ export default function LibraryView({
   const notify = useCallback((message: string, kind: ToastKind = "info") => {
     setToast({ id: Date.now(), message, kind });
   }, []);
+
+  // 开场把「上次更新到底成没成」说清楚，别让人自己去猜。
+  // 同一次失败只提示一次（按 lastAt 去重），否则每次开都弹会很烦。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const state = await api.getReleaseState();
+        if (cancelled) return;
+        const status = state.status;
+        if (status.lastResult !== "failed" && status.lastResult !== "running") return;
+        const shownAt = (() => {
+          try {
+            return localStorage.getItem("huaxia.release.lastFailureShown");
+          } catch {
+            return null;
+          }
+        })();
+        if (shownAt === String(status.lastAt)) return;
+        try {
+          localStorage.setItem("huaxia.release.lastFailureShown", String(status.lastAt));
+        } catch {
+          // 存不了就每次都说
+        }
+        notify(
+          status.lastResult === "running"
+            ? "上次更新被中断了，当前还是已安装的版本（可在「更新画匣」里重试）"
+            : `上次更新没成功：${status.lastMessage || "构建或安装出错"}（当前仍是已安装的版本）`,
+          "error",
+        );
+      } catch {
+        // 读不到更新状态就安静
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
 
   const patchCachedCards = useCallback(
     (patch: (card: ArchiveCardData) => ArchiveCardData) => {
