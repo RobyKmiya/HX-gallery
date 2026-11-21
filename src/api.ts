@@ -8,6 +8,8 @@ import type {
   ImportReport,
   LibraryState,
   GmScriptMeta,
+  LooseImage,
+  LooseImageCollection,
   Queue,
   QueueFillOptions,
   QueueFillReport,
@@ -230,6 +232,34 @@ export const api = {
 
   // ── 匣浏览器 · 油猴脚本（Chrome/Edge 生态 .user.js）──
 
+  // ── 散图收藏夹（单图多区，只记录引用不迁移）──
+
+  looseListCollections: () => invoke<LooseImageCollection[]>("loose_list_collections"),
+  looseCreateCollection: (name: string, folder?: string) =>
+    invoke<LooseImageCollection>("loose_create_collection", { name, folder }),
+  looseDeleteCollection: (collectionId: number) =>
+    invoke<void>("loose_delete_collection", { collectionId }),
+  looseScanCollection: (collectionId: number) =>
+    invoke<[number, number, number]>("loose_scan_collection", { collectionId }),
+  looseListImages: (collectionId: number) =>
+    invoke<LooseImage[]>("loose_list_images", { collectionId }),
+  looseSetRating: (id: number, rating: number) =>
+    invoke<void>("loose_set_rating", { id, rating }),
+  looseSetFavorite: (id: number, favorite: boolean) =>
+    invoke<void>("loose_set_favorite", { id, favorite }),
+  looseRemoveImage: (id: number, deleteFile?: boolean) =>
+    invoke<void>("loose_remove_image", { id, deleteFile }),
+  looseCollectPage: (collectionId: number, archiveId: number, pageIndex: number) =>
+    invoke<LooseImage>("loose_collect_page", { collectionId, archiveId, pageIndex }),
+  looseExtractPage: (collectionId: number, archiveId: number, pageIndex: number) =>
+    invoke<LooseImage>("loose_extract_page", { collectionId, archiveId, pageIndex }),
+  looseOpenFolder: (folder: string) => invoke<void>("loose_open_folder", { folder }),
+
+  /** 散图 URL（loose:// 协议：Windows 映射 http://loose.localhost）。 */
+  looseImageUrl: (kind: "img" | "thumb", id: number) =>
+    LOOSE_ORIGIN +
+    `/${kind}/${id}`,
+
   listGmScripts: () => invoke<GmScriptMeta[]>("gm_list_scripts"),
 
   /** 从本地 .user.js 文件导入。 */
@@ -297,6 +327,12 @@ const GALLERY_ORIGIN =
   typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
     ? "http://gallery.localhost"
     : "gallery://localhost";
+
+/** 散图自定义协议（loose://）在 Windows 上同样映射成 http 主机。 */
+const LOOSE_ORIGIN =
+  typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
+    ? "http://loose.localhost"
+    : "loose://localhost";
 
 /**
  * 阅读器页面 URL。

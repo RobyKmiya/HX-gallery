@@ -39,6 +39,7 @@ import ImportDialog, {
   type ImportSubmit,
 } from "./ImportDialog";
 import ImportResultDialog from "./ImportResultDialog";
+import LoosePanel from "./LoosePanel";
 import QueuePanel from "./QueuePanel";
 import Reader from "./Reader";
 import ReleasePanel from "./ReleasePanel";
@@ -325,6 +326,7 @@ export default function LibraryView({
   const [tagCenterOpen, setTagCenterOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
+  const [loosePanelOpen, setLoosePanelOpen] = useState(false);
   const [releasePanelOpen, setReleasePanelOpen] = useState(false);
   const [d2PanelOpen, setD2PanelOpen] = useState(false);
   /**
@@ -1977,6 +1979,16 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
+            onClick={() => setLoosePanelOpen(true)}
+            title="散图收藏夹：单图多区收藏，文件夹形式只记引用"
+          >
+            <FolderIcon width={16} height={16} />
+            <span className="nav-label">散图收藏夹</span>
+          </button>
+
+          <button
+            type="button"
+            className="nav-item"
             onClick={() => setReleasePanelOpen(true)}
             title="设置退出后自动更新，或立即更新"
           >
@@ -3287,6 +3299,9 @@ export default function LibraryView({
             </div>
           </div>
         )}
+      {loosePanelOpen && (
+        <LoosePanel onClose={() => setLoosePanelOpen(false)} onNotify={notify} />
+      )}
       {queuePanelOpen && (
         <QueuePanel
           tags={tags}

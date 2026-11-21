@@ -182,6 +182,31 @@ export interface Queue {
 }
 
 /** 生成待看目录的选项。 */
+/** 散图收藏夹 · 区（一个真实文件夹 + 一组单图记录）。 */
+export interface LooseImageCollection {
+  id: number;
+  name: string;
+  folder: string;
+  count: number;
+  favorites: number;
+}
+
+/** 散图收藏夹 · 单图记录（kind=file 磁盘引用 / archive_page 画廊源页引用）。 */
+export interface LooseImage {
+  id: number;
+  collectionId: number;
+  kind: "file" | "archive_page";
+  path: string | null;
+  archiveId: number | null;
+  pageIndex: number | null;
+  archiveTitle: string | null;
+  rating: number;
+  favorite: boolean;
+  fileSize: number | null;
+  missing: boolean;
+  addedAt: number;
+}
+
 /** 匣浏览器 · 油猴脚本元数据（==UserScript== 头解析结果）。 */
 export interface GmScriptMeta {
   id: string;

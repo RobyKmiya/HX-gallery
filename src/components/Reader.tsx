@@ -22,6 +22,7 @@ import {
   ChevronRightIcon,
   CloseIcon,
   FirstPageIcon,
+  FolderIcon,
   GridIcon,
   LastPageIcon,
   PauseIcon,
@@ -258,6 +259,13 @@ export default function Reader({
   const [playing, setPlaying] = useState(false);
   /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
+  /** 收藏到散图夹的弹层与目标区（null = 关闭）。 */
+  const [looseOpen, setLooseOpen] = useState(false);
+  const [looseCollections, setLooseCollections] = useState<
+    { id: number; name: string; folder: string; count: number }[]
+  >([]);
+  const [looseTarget, setLooseTarget] = useState<number | "">("");
+  const [looseBusy, setLooseBusy] = useState(false);
   /** 当前页 <img> 真实 load 完成的时刻（0=还没加载好，-1=兜底已触发）。 */
   const [pageShownAt, setPageShownAt] = useState(0);
 
@@ -763,6 +771,47 @@ const archiveEpochRef = useRef(0);
     (bookmark) => bookmark.page === currentPage,
   );
 
+  /** 打开「收藏到散图」弹层：拉散图区列表，默认选最新创建的。 */
+  const openLoosePicker = useCallback(async () => {
+    setLooseOpen((value) => !value);
+    try {
+      const list = await api.looseListCollections();
+      setLooseCollections(list);
+      setLooseTarget(list[0]?.id ?? "");
+    } catch (error) {
+      onNotify(`读取散图区失败：${String(error)}`, "error");
+    }
+  }, [onNotify]);
+
+  /** 把当前页收进散图夹：mode = pointer（指向源页，零空间）| extract（提取另存）。 */
+  const collectToLoose = useCallback(
+    async (mode: "pointer" | "extract") => {
+      if (!pageData || looseTarget === "" || looseBusy) return;
+      setLooseBusy(true);
+      try {
+        const collectionId = Number(looseTarget);
+        if (mode === "pointer") {
+          await api.looseCollectPage(collectionId, card.id, pageData.index);
+        } else {
+          await api.looseExtractPage(collectionId, card.id, pageData.index);
+        }
+        const target = looseCollections.find((c) => c.id === collectionId);
+        onNotify(
+          mode === "pointer"
+            ? `已收藏到「${target?.name ?? "散图区"}」（指向源页，不占空间）`
+            : `已提取到「${target?.name ?? "散图区"}」文件夹`,
+          "success",
+        );
+        setLooseOpen(false);
+      } catch (error) {
+        onNotify(`收藏失败：${String(error)}`, "error");
+      } finally {
+        setLooseBusy(false);
+      }
+    },
+    [pageData, looseTarget, looseBusy, looseCollections, card.id, onNotify],
+  );
+
   const toggleBookmark = useCallback(async () => {
     if (!info || bookmarkBusy) return;
     setBookmarkBusy(true);
@@ -1249,6 +1298,64 @@ const archiveEpochRef = useRef(0);
             >
               <StarIcon width={16} height={16} />
             </button>
+            <div style={{ position: "relative" }}>
+              <button
+                type="button"
+                className={`icon-button${looseOpen ? " is-active" : ""}`}
+                onClick={() => void openLoosePicker()}
+                disabled={pageCount === 0}
+                aria-label="收藏当前页到散图夹"
+                title="收藏当前页到散图夹"
+              >
+                <FolderIcon width={16} height={16} />
+              </button>
+              {looseOpen && (
+                <div className="loose-picker">
+                  <div className="loose-picker-title">收藏当前页到散图夹</div>
+                  <select
+                    value={looseTarget}
+                    aria-label="选择散图区"
+                    onChange={(event) =>
+                      setLooseTarget(
+                        event.target.value ? Number(event.target.value) : "",
+                      )
+                    }
+                  >
+                    <option value="">选择散图区…</option>
+                    {looseCollections.map((collection) => (
+                      <option key={collection.id} value={collection.id}>
+                        {collection.name}（{collection.count}）
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="loose-picker-action"
+                    disabled={looseTarget === "" || looseBusy}
+                    onClick={() => void collectToLoose("pointer")}
+                    title="指向源页：零空间；源画集删除后失效"
+                  >
+                    收藏（指向源页）
+                  </button>
+                  <button
+                    type="button"
+                    className="loose-picker-action"
+                    disabled={looseTarget === "" || looseBusy}
+                    onClick={() => void collectToLoose("extract")}
+                    title="把这一页提取成独立文件，存进区的文件夹"
+                  >
+                    提取到文件夹
+                  </button>
+                  <button
+                    type="button"
+                    className="loose-picker-action is-quiet"
+                    onClick={() => setLooseOpen(false)}
+                  >
+                    取消
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               className={`icon-button${bookmarksOpen ? " is-active" : ""}`}
