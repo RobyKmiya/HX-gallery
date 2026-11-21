@@ -8,6 +8,7 @@
  *   node scripts/release.mjs --major    # 主版本 +1（1.1.0 → 2.0.0）
  *   node scripts/release.mjs --set 1.2.3
  *   node scripts/release.mjs --dry-run  # 只打印要做什么
+ *   node scripts/release.mjs --fast     # 快速编译档（热修/日常迭代用，见下方说明）
  *
  * 背景（务必读）：`npm run build` 只编前端 dist，不会重编 Rust；
  * 桌面程序必须走 `tauri build` 才会产出新 exe。这个脚本强制走完整链路，
@@ -35,6 +36,18 @@ const bumpKind = argv.includes('--major')
     : 'patch';
 const setIndex = argv.indexOf('--set');
 const explicitVersion = setIndex >= 0 ? argv[setIndex + 1] : null;
+
+// ── 编译档位 ──────────────────────────────────────────────
+// 默认用 Cargo.toml 里的压体积档（lto=true + codegen-units=1）：exe 约 12.6MB，
+// 代价是 release 编译基本单核跑满，打包一步约 18 分钟、全程约 23 分钟。
+// --fast 用环境变量盖掉这两项（Cargo 支持 CARGO_PROFILE_<档案>_<键> 覆盖）：
+// 关 LTO + 并行 codegen，构建降到 3~5 分钟，exe 涨到约 25MB。
+// 规则：热修/日常迭代带 --fast，正式发版不带（保住小体积）。
+const fastBuild = argv.includes('--fast');
+if (fastBuild) {
+  process.env.CARGO_PROFILE_RELEASE_LTO = 'false';
+  process.env.CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '16';
+}
 
 const log = (msg) => console.log(`\n▸ ${msg}`);
 const ok = (msg) => console.log(`  ✓ ${msg}`);
@@ -213,6 +226,9 @@ if (explicitVersion && !/^\d+\.\d+\.\d+$/.test(explicitVersion)) {
 
 console.log('画匣 · 一键发布');
 console.log(`  当前版本 ${current} → ${next}${dryRun ? '（dry-run）' : ''}`);
+console.log(
+  `  编译档位 ${fastBuild ? '快速（关 LTO、并行 codegen，约 4 分钟）' : '压体积（LTO + 单 codegen，约 20 分钟）'}`,
+);
 
 warnIfDirtyTree();
 
@@ -241,7 +257,7 @@ step('结束正在运行的实例', 3, () => {
   );
 });
 
-step('打包（含 Rust release 编译）', 1080, () => {
+step('打包（含 Rust release 编译）', fastBuild ? 300 : 1080, () => {
   runNpm('build:bundle');
   ok('安装包已生成');
 });

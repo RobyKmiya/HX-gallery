@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::translate;
 
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+pub(crate) const SCHEMA_VERSION: i64 = 10;
 
 /// 待看目录默认放几本。
 pub const DEFAULT_QUEUE_SIZE: i64 = 10;

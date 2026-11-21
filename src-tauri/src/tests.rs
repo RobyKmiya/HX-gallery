@@ -2029,6 +2029,46 @@ fn migration_v8_adds_read_count_and_queues() {
     assert_eq!(version, db::SCHEMA_VERSION);
 }
 
+/// v9 → v10：老库必须补出散图收藏夹的两张表。
+///
+/// 2026-11-21 线上事故复现：v10 的建表语句确实写进了 `upgrade_schema`，但
+/// `SCHEMA_VERSION` 忘了从 9 抬到 10，老库 `version == SCHEMA_VERSION` 直接把
+/// 迁移整段跳过，点「新建散图区」就报 `no such table: image_collections`。
+/// 这里把库伪造成事故现场（表没有、版本号仍是 9）再开一次库。
+#[test]
+fn migration_v10_creates_loose_image_tables() {
+    let fixture = Fixture::new();
+    {
+        let context = db::open_library(&fixture.library).unwrap();
+        context
+            .conn
+            .execute_batch(
+                "DROP TABLE IF EXISTS image_records;
+                 DROP TABLE IF EXISTS image_collections;
+                 PRAGMA user_version = 9;",
+            )
+            .unwrap();
+    }
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let tables: i64 = context
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN ('image_collections', 'image_records')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 2, "散图收藏夹表未建出来");
+
+    let version: i64 = context
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, db::SCHEMA_VERSION);
+}
+
 /// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。
 #[test]
 fn zero_weight_tag_excludes_archive_entirely() {
