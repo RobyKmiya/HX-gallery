@@ -71,10 +71,10 @@ const RELEASE_DIR = path.join(
   'release',
 );
 const PROGRESS_FILE = path.join(RELEASE_DIR, 'progress.json');
-const STAGE_TOTAL = 7;
-// 每阶段预计秒数，与下面 7 个 step() 调用一一对应。快了 ETA 偏乐观、
+const STAGE_TOTAL = 8;
+// 每阶段预计秒数，与下面 8 个 step() 调用一一对应。快了 ETA 偏乐观、
 // 慢了 HUD 会标注「本步比平时慢」——只影响进度观感，不改变发布行为。
-const STAGE_EXPECTED_SEC = [2, 30, 240, 3, 1080, 15, 10];
+const STAGE_EXPECTED_SEC = [2, 30, 240, 3, 1080, 15, 10, 3];
 const TOTAL_EXPECTED_SEC = STAGE_EXPECTED_SEC.reduce((sum, sec) => sum + sec, 0);
 let stageIndex = 0;
 let doneExpectedSec = 0;
@@ -284,6 +284,25 @@ step('验证', 10, () => {
     ok('exe 未被锁定');
   } catch {
     warn('exe 仍被占用，可能还有进程没退干净');
+  }
+});
+
+step('刷新桌面快捷方式', 3, () => {
+  // 管理员要求：每次更新后桌面的「画匣」快捷方式都换成最新安装
+  // （重写 .lnk 的目标/工作目录/图标，顺手刷一次图标缓存）。失败只警告。
+  try {
+    const script =
+      "$s = New-Object -ComObject WScript.Shell; " +
+      "$lnk = $s.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\\画匣.lnk'); " +
+      `$lnk.TargetPath = '${INSTALL_DIR}\\archive-gallery.exe'; ` +
+      `$lnk.WorkingDirectory = '${INSTALL_DIR}'; ` +
+      `$lnk.IconLocation = '${INSTALL_DIR}\\archive-gallery.exe,0'; ` +
+      '$lnk.Save(); ' +
+      'ie4uinit.exe -show';
+    execSync(`powershell -NoProfile -Command "${script}"`, { stdio: 'ignore' });
+    ok('桌面快捷方式已指向最新安装');
+  } catch (error) {
+    warn(`刷新桌面快捷方式失败（不影响安装）: ${String(error)}`);
   }
 });
 
