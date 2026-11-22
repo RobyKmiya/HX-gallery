@@ -45,6 +45,8 @@ import LoosePanel from "./LoosePanel";
 import QueuePanel from "./QueuePanel";
 import SeriesCard from "./SeriesCard";
 import SeriesDrawer from "./SeriesDrawer";
+import SettingsDialog from "./SettingsDialog";
+import ReaderMenu from "./ReaderMenu";
 import Reader from "./Reader";
 import Splitter from "./Splitter";
 import ReleasePanel from "./ReleasePanel";
@@ -227,6 +229,10 @@ export default function LibraryView({
   const [openSeries, setOpenSeries] = useState<SeriesSummary | null>(null);
   const [seriesCreateOpen, setSeriesCreateOpen] = useState(false);
   const [seriesBusy, setSeriesBusy] = useState(false);
+  /** 统一设置对话框。 */
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 主目录空白处右键菜单。 */
+  const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
   const [warmCovers, setWarmCovers] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -2218,10 +2224,20 @@ export default function LibraryView({
             type="button"
             className="nav-item"
             onClick={() => setReleasePanelOpen(true)}
-            title="设置退出后自动更新，或立即更新"
+            title="检查更新并立即安装"
           >
             <RefreshIcon width={16} height={16} />
             <span className="nav-label">更新画匣</span>
+          </button>
+
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => setSettingsOpen(true)}
+            title="统一设置：视图 / 快捷键 / 存储 / 各面板入口"
+          >
+            <SwapIcon width={16} height={16} />
+            <span className="nav-label">设置</span>
           </button>
 
           <button
@@ -2341,7 +2357,23 @@ export default function LibraryView({
         }
       />
 
-      <main className="main-panel">
+      <main
+        className="main-panel"
+        onContextMenu={(event) => {
+          // 卡片自己的右键菜单已经 preventDefault，这里只管空白处。
+          if (event.defaultPrevented) return;
+          const target = event.target as HTMLElement;
+          if (
+            target.closest(
+              ".archive-card, button, input, select, textarea, a, .modal-backdrop",
+            )
+          ) {
+            return;
+          }
+          event.preventDefault();
+          setBgMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
         {looseView && <LoosePanel variant="page" onNotify={notify} />}
         <header className="topbar">
           <div className="topbar-title">
@@ -3489,6 +3521,66 @@ export default function LibraryView({
             })();
           }}
           onNotify={notify}
+        />
+      )}
+
+      {bgMenu && (
+        <ReaderMenu
+          x={bgMenu.x}
+          y={bgMenu.y}
+          entries={[
+            { label: "导入压缩包", onClick: () => void pickFiles() },
+            { label: "导入文件夹", onClick: () => void pickFolder() },
+            {
+              label: "刷新当前视图",
+              onClick: () => void loadPage(page, true, true),
+            },
+            {
+              label:
+                viewMode === "pages" ? "切换为网格滚动" : "切换为分页浏览",
+              dividerBefore: true,
+              onClick: () => setViewMode(viewMode === "pages" ? "scroll" : "pages"),
+            },
+            {
+              label:
+                detailDock === "dock" ? "详情浮层改为浮动" : "详情浮层改为停靠",
+              onClick: () => setDetailDock(detailDock === "dock" ? "float" : "dock"),
+            },
+            { label: "打开标签中心", dividerBefore: true, onClick: () => setTagCenterOpen(true) },
+            { label: "打开网页抓取", onClick: () => setD2PanelOpen(true) },
+            { label: "打开更新面板", onClick: () => setReleasePanelOpen(true) },
+            {
+              label: "在资源管理器中显示库目录",
+              onClick: () => {
+                if (library.libraryPath) void api.revealInExplorer(library.libraryPath);
+              },
+            },
+            { label: "设置…", dividerBefore: true, onClick: () => setSettingsOpen(true) },
+          ]}
+          onClose={() => setBgMenu(null)}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          library={library}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
+          detailDock={detailDock}
+          onDetailDockChange={setDetailDock}
+          onOpenTagCenter={() => {
+            setSettingsOpen(false);
+            setTagCenterOpen(true);
+          }}
+          onOpenD2={() => {
+            setSettingsOpen(false);
+            setD2PanelOpen(true);
+          }}
+          onOpenRelease={() => {
+            setSettingsOpen(false);
+            setReleasePanelOpen(true);
+          }}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
 
