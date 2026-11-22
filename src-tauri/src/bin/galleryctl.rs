@@ -345,6 +345,7 @@ fn run(cli: Cli) -> Result<Value, String> {
                     missing_only: if missing { Some(true) } else { None },
                     search: query,
                     group: None,
+                    archive_ids: None,
                 },
             )?;
             serde_json::to_value(page).map_err(|e| format!("序列化查询结果失败: {e}"))?
