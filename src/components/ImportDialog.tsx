@@ -41,6 +41,8 @@ export interface ImportSubmit {
   preserveStructure: boolean;
   /** 导入完成后把这批新画集合成一个合集（名字）；null 表示不合成。 */
   seriesName: string | null;
+  /** 加密压缩包的密码：一行一个；单行 = 所有加密包共用。 */
+  passwords: string[];
 }
 
 export interface ImportDialogHandle {
@@ -86,6 +88,8 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
     const [stageErrors, setStageErrors] = useState<ImportErrorItem[]>([]);
     const [staging, setStaging] = useState(initialPaths.length > 0);
     const [tagText, setTagText] = useState("");
+    /** 密码输入：一行一个（ZIP/CBZ 支持；7z/RAR 加密会提示先解压）。 */
+    const [passwordText, setPasswordText] = useState("");
     const [collectionId, setCollectionId] = useState<number | "">("");
     const [preserveStructure, setPreserveStructure] = useState(false);
     /** 每行单独的标签文本（按 path 存）。空字符串＝这行用全局标签。 */
@@ -141,6 +145,15 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
       () => summarizeByCategory(parsed.tags),
       [parsed.tags],
     );
+    /** 库里出现过的大类，做成快选按钮，避免反复手打 artist: 之类前缀。 */
+    const knownCategories = useMemo(() => {
+      const set = new Set<string>();
+      for (const tag of knownTags) {
+        if (tag.category) set.add(tag.category);
+      }
+      return [...set].sort((a, b) => a.localeCompare(b)).slice(0, 12);
+    }, [knownTags]);
+
     const knownNames = useMemo(
       () => new Set(knownTags.map((tag) => tag.name.toLowerCase())),
       [knownTags],
@@ -225,6 +238,10 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
           makeSeries && archives.length >= 2
             ? seriesName.trim() || archives[0].stem
             : null,
+        passwords: passwordText
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0),
       });
     }, [
       busy,
@@ -237,6 +254,7 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
       makeSeries,
       seriesName,
       archives,
+      passwordText,
     ]);
 
     const requestClose = useCallback(() => {
@@ -458,6 +476,28 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
                 </span>
               </div>
 
+              {knownCategories.length > 0 && (
+                <div className="category-quick">
+                  <span className="category-quick-label">大类快选</span>
+                  {knownCategories.map((category) => (
+                    <button
+                      key={category}
+                      type="button"
+                      className="category-chip"
+                      disabled={busy}
+                      title={`插入 ${category}: 前缀，接着打字即可`}
+                      onClick={() =>
+                        setTagText((current) =>
+                          `${current}${current && !current.endsWith("\n") ? "\n" : ""}${category}:`,
+                        )
+                      }
+                    >
+                      {category}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               <textarea
                 className="import-tag-input"
                 rows={6}
@@ -496,6 +536,21 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
                   </span>
                 </p>
               )}
+
+              <h3 className="import-section-title">加密压缩包密码（可选）</h3>
+              <textarea
+                className="import-tag-input import-password-input"
+                rows={3}
+                value={passwordText}
+                disabled={busy}
+                placeholder={
+                  "只填一行 = 所有加密包共用这个密码；\n多个密码则一行一个，按顺序对应每个加密压缩包。\n留空则遇到加密包会提示需要密码。"
+                }
+                onChange={(event) => setPasswordText(event.target.value)}
+              />
+              <p className="import-tag-hint">
+                密码只保存在本机库里，用于解包读取；7z / RAR 加密暂不支持，请先解压后重新打包成 ZIP/CBZ。
+              </p>
 
               <p className="import-tag-hint">
                 {parsed.tags.length === 0

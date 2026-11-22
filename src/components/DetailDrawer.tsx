@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import CopyTitleButton from "./CopyTitleButton";
@@ -610,6 +617,81 @@ export default function DetailDrawer({
   }
   requestCloseRef.current = () => void requestClose();
 
+  // 浮层吸附：靠左 / 靠右，拖到中线另一侧就换边；宽度可拖内边缘调。
+  const [snapSide, setSnapSide] = useState<"left" | "right">(() => {
+    try {
+      return window.localStorage.getItem("huaxia.detail.side") === "left"
+        ? "left"
+        : "right";
+    } catch {
+      return "right";
+    }
+  });
+  const [floatWidth, setFloatWidth] = useState<number>(() => {
+    try {
+      const raw = Number(window.localStorage.getItem("huaxia.detail.width"));
+      return Number.isFinite(raw) && raw >= 360 ? Math.min(780, raw) : 440;
+    } catch {
+      return 440;
+    }
+  });
+
+  const persistSnap = (side: "left" | "right") => {
+    setSnapSide(side);
+    try {
+      window.localStorage.setItem("huaxia.detail.side", side);
+    } catch {
+      // 存不了就只在本次生效
+    }
+  };
+
+  /** 拖标题栏：越过中线就换边，松手后贴边。 */
+  const startHeaderDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (docked) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, textarea, select, a")) return;
+    event.preventDefault();
+    const onMove = (moveEvent: PointerEvent) => {
+      const side =
+        moveEvent.clientX < window.innerWidth / 2 ? "left" : "right";
+      if (side !== snapSide) persistSnap(side);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  /** 拖内边缘调宽度（贴右边时往左拖变宽，反之亦然）。 */
+  const startWidthDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (docked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = floatWidth;
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta =
+        snapSide === "right"
+          ? startX - moveEvent.clientX
+          : moveEvent.clientX - startX;
+      const next = Math.min(780, Math.max(360, Math.round(startWidth + delta)));
+      setFloatWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      try {
+        window.localStorage.setItem("huaxia.detail.width", String(floatWidth));
+      } catch {
+        // 同上
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
   const hasProgress = card.lastPage > 0 && card.pageCount > 0;
   const finished = hasProgress && card.lastPage >= card.pageCount;
   const readLabel = finished
@@ -624,15 +706,30 @@ export default function DetailDrawer({
         embeddedInReader ? " is-in-reader" : ""
       }`}
       onClick={docked ? undefined : () => void requestClose()}
+      style={docked ? undefined : { justifyContent: snapSide === "left" ? "flex-start" : "flex-end" }}
     >
       <aside
-        className={`detail-drawer${docked ? " is-docked" : ""}`}
+        className={`detail-drawer${docked ? " is-docked" : ""}${
+          docked ? "" : ` is-snap-${snapSide}`
+        }`}
         role={docked ? "complementary" : "dialog"}
         aria-modal={docked ? undefined : true}
         aria-label={card.title}
         onClick={(event) => event.stopPropagation()}
+        style={docked ? undefined : { width: `min(${floatWidth}px, 100vw)` }}
       >
-        <div className="drawer-header">
+        {!docked && (
+          <div
+            className="drawer-width-handle"
+            onPointerDown={startWidthDrag}
+            title="拖动调整详情宽度"
+          />
+        )}
+        <div
+          className="drawer-header is-draggable"
+          onPointerDown={startHeaderDrag}
+          title={docked ? undefined : "拖动标题栏：越过中线自动贴到另一边"}
+        >
           <div className="drawer-title-block">
             <p className="eyebrow">ARCHIVE DETAIL</p>
             <div className="drawer-title-row">

@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
@@ -13,7 +14,17 @@ import {
   SHORTCUTS_CHANGED_EVENT,
   loadShortcuts,
   matchShortcut,
+  type ShortcutAction,
 } from "../shortcuts";
+import {
+  GESTURES_CHANGED_EVENT,
+  ZONES_CHANGED_EVENT,
+  loadGestures,
+  loadZones,
+  saveZones,
+  type GestureAction,
+  type GestureSlot,
+} from "../gestures";
 import { usePersistentFlag } from "../layout";
 import type {
   AnimMeta,
@@ -24,6 +35,7 @@ import type {
 } from "../types";
 import {
   AlertIcon,
+  HeartIcon,
   BookIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -299,6 +311,48 @@ export default function Reader({
     window.addEventListener(SHORTCUTS_CHANGED_EVENT, sync);
     return () => window.removeEventListener(SHORTCUTS_CHANGED_EVENT, sync);
   }, []);
+
+  /** 鼠标手势（6 槽位）与点击分区边界，均可在设置里改。 */
+  const [gestures, setGestures] = useState(loadGestures);
+  const gesturesRef = useRef(gestures);
+  useEffect(() => {
+    gesturesRef.current = gestures;
+  }, [gestures]);
+  useEffect(() => {
+    const sync = () => setGestures(loadGestures());
+    window.addEventListener(GESTURES_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(GESTURES_CHANGED_EVENT, sync);
+  }, []);
+
+  const [zones, setZones] = useState(loadZones);
+  const zonesRef = useRef(zones);
+  useEffect(() => {
+    zonesRef.current = zones;
+  }, [zones]);
+  useEffect(() => {
+    const sync = () => setZones(loadZones());
+    window.addEventListener(ZONES_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(ZONES_CHANGED_EVENT, sync);
+  }, []);
+
+  /** 分区边界拖动状态：left / right / null。 */
+  const [zoneDragging, setZoneDragging] = useState<"left" | "right" | null>(
+    null,
+  );
+  /** 单击延后触发（给双击让路）：220ms 内双击就取消单击。 */
+  const pendingClickRef = useRef<number | null>(null);
+  /** 拖拽平移过就不算单击。 */
+  const dragMovedRef = useRef(false);
+
+  // 卸载时清掉待触发的单击定时器，避免退出后还去跑动作。
+  useEffect(() => {
+    return () => {
+      if (pendingClickRef.current !== null) {
+        window.clearTimeout(pendingClickRef.current);
+      }
+    };
+  }, []);
+
 
   // 鼠标后退侧键：沉浸态先退出沉浸，再按一次才退出阅读（管理员 11-22）。
   // 事件由 LibraryView 的侧键处理器派发，避免两边抢同一个 mouseup。
@@ -1015,19 +1069,156 @@ const archiveEpochRef = useRef(0);
     );
   }, [zoomMode]);
 
-  // Ctrl+滚轮缩放：不随翻页滚轮走，preventDefault 阻止浏览器页缩放。
+  /** 快捷键收藏：用上次选过的散图区；一次都没选过就弹面板让选。 */
+  const quickFavorite = useCallback(
+    async (kind: "page" | "left" | "right") => {
+      if (!info || looseBusy) return;
+      const index =
+        kind === "right" && spread
+          ? Math.min(page + 1, Math.max(0, (info?.pageCount ?? 1) - 1))
+          : page;
+      const saved = Number(
+        window.localStorage.getItem("huaxia.reader.looseTarget") ?? "",
+      );
+      if (!Number.isFinite(saved) || saved <= 0) {
+        void openLoosePicker();
+        onNotify(
+          "先在面板里选一个散图区，之后按快捷键就能直接收藏",
+          "info",
+        );
+        return;
+      }
+      setLooseBusy(true);
+      try {
+        await api.looseCollectPage(saved, card.id, index);
+        onNotify(`已收藏第 ${index + 1} 页到散图夹`, "success");
+      } catch (error) {
+        onNotify(`收藏失败：${String(error)}`, "error");
+      } finally {
+        setLooseBusy(false);
+      }
+    },
+    [info, looseBusy, spread, page, openLoosePicker, card.id, onNotify],
+  );
+
+  /**
+   * 统一动作分发：键盘、鼠标手势、右键菜单共用一套语义。
+   * 这样「一个动作」只有一处实现，改键/改手势都不会出现行为不一致。
+   */
+  const runAction = useCallback(
+    (action: ShortcutAction | GestureAction) => {
+      switch (action) {
+        case "none":
+          return;
+        case "nextPage":
+          pausePlayback();
+          goNext();
+          break;
+        case "prevPage":
+          pausePlayback();
+          goPrev();
+          break;
+        case "firstPage":
+          pausePlayback();
+          goTo(0);
+          break;
+        case "lastPage":
+          pausePlayback();
+          goTo(Math.max(0, (info?.pageCount ?? 1) - 1));
+          break;
+        case "zoomIn":
+          pausePlayback();
+          zoomIn();
+          break;
+        case "zoomOut":
+          pausePlayback();
+          zoomOut();
+          break;
+        case "fitPage":
+          setZoomMode("fit");
+          break;
+        case "fitWidth":
+          setZoomMode("width");
+          break;
+        case "toggleSpread":
+          toggleSpread();
+          break;
+        case "toggleImmersive":
+          setImmersive(!immersive);
+          break;
+        case "togglePlayback":
+          togglePlayback();
+          break;
+        case "toggleBookmark":
+          void toggleBookmark();
+          break;
+        case "openBookmarks":
+          setBookmarksOpen(true);
+          break;
+        case "openDetail":
+          onOpenDetail?.();
+          break;
+        case "copyPage":
+          copyCurrentPage();
+          break;
+        case "revealArchive":
+          revealArchive();
+          break;
+        case "toggleThumbs":
+          setThumbsOpen((value) => !value);
+          break;
+        case "prevArchive":
+          pausePlayback();
+          onSwitchArchive?.(-1);
+          break;
+        case "nextArchive":
+          pausePlayback();
+          onSwitchArchive?.(1);
+          break;
+        case "favoritePage":
+          void quickFavorite("page");
+          break;
+        case "favoriteLeft":
+          void quickFavorite("left");
+          break;
+        case "favoriteRight":
+          void quickFavorite("right");
+          break;
+      }
+    },
+    [
+      pausePlayback,
+      goNext,
+      goPrev,
+      goTo,
+      info,
+      zoomIn,
+      zoomOut,
+      toggleSpread,
+      immersive,
+      togglePlayback,
+      toggleBookmark,
+      onOpenDetail,
+      copyCurrentPage,
+      revealArchive,
+      onSwitchArchive,
+      quickFavorite,
+    ],
+  );
+
+  // Ctrl+滚轮：动作走手势配置（默认放大/缩小）。不带 Ctrl 的滚轮不改缩放。
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
     const onWheel = (event: WheelEvent) => {
       if (!event.ctrlKey) return;
       event.preventDefault();
-      if (event.deltaY < 0) zoomIn();
-      else zoomOut();
+      const map = gesturesRef.current;
+      runAction(event.deltaY < 0 ? map.ctrlWheelUp : map.ctrlWheelDown);
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
-  }, [zoomIn, zoomOut]);
+  }, [runAction]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -1112,20 +1303,6 @@ const archiveEpochRef = useRef(0);
         return;
       }
 
-      // 换本键放在 !info 之前：本子打不开时也该能跳去下一本。
-      if (onSwitchArchive && event.key === "[") {
-        event.preventDefault();
-        pausePlayback();
-        onSwitchArchive(-1);
-        return;
-      }
-      if (onSwitchArchive && event.key === "]") {
-        event.preventDefault();
-        pausePlayback();
-        onSwitchArchive(1);
-        return;
-      }
-
       if (!info) return;
 
       // 空格是结构键：按状态切换「下一页 / 播放暂停」，Shift+空格反向翻页。
@@ -1145,70 +1322,11 @@ const archiveEpochRef = useRef(0);
         return;
       }
 
-      // 其余动作键走用户绑定表（设置 → 快捷键 可改）。
+      // 其余动作键走用户绑定表（设置 → 快捷键 可改），统一由 runAction 执行。
       const action = matchShortcut(event, shortcutsRef.current);
       if (!action) return;
       event.preventDefault();
-
-      switch (action) {
-        case "nextPage":
-          pausePlayback();
-          goNext();
-          break;
-        case "prevPage":
-          pausePlayback();
-          goPrev();
-          break;
-        case "firstPage":
-          pausePlayback();
-          goTo(0);
-          break;
-        case "lastPage":
-          pausePlayback();
-          goTo(info.pageCount - 1);
-          break;
-        case "zoomIn":
-          pausePlayback();
-          zoomIn();
-          break;
-        case "zoomOut":
-          pausePlayback();
-          zoomOut();
-          break;
-        case "fitPage":
-          setZoomMode("fit");
-          break;
-        case "fitWidth":
-          setZoomMode("width");
-          break;
-        case "toggleSpread":
-          toggleSpread();
-          break;
-        case "toggleImmersive":
-          setImmersive(!immersive);
-          break;
-        case "togglePlayback":
-          togglePlayback();
-          break;
-        case "toggleBookmark":
-          void toggleBookmark();
-          break;
-        case "openBookmarks":
-          setBookmarksOpen(true);
-          break;
-        case "openDetail":
-          onOpenDetail?.();
-          break;
-        case "copyPage":
-          copyCurrentPage();
-          break;
-        case "revealArchive":
-          revealArchive();
-          break;
-        case "toggleThumbs":
-          setThumbsOpen((value) => !value);
-          break;
-      }
+      runAction(action);
     };
 
     window.addEventListener("keydown", handleKey);
@@ -1406,6 +1524,7 @@ const archiveEpochRef = useRef(0);
       return;
     }
     pausePlayback();
+    dragMovedRef.current = false;
     panRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -1421,8 +1540,80 @@ const archiveEpochRef = useRef(0);
     const stage = stageRef.current;
     const pan = panRef.current;
     if (!stage || !pan || pan.pointerId !== event.pointerId) return;
+    if (
+      Math.abs(event.clientX - pan.startX) > 4 ||
+      Math.abs(event.clientY - pan.startY) > 4
+    ) {
+      dragMovedRef.current = true;
+    }
     stage.scrollLeft = pan.left - (event.clientX - pan.startX);
     stage.scrollTop = pan.top - (event.clientY - pan.startY);
+  };
+
+  /** 单击分区：按边界比例判断落在左/中/右，延后 220ms 给双击让路。 */
+  const handleStageClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (dragMovedRef.current) {
+      dragMovedRef.current = false;
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = (event.clientX - rect.left) / rect.width;
+    const { left, right } = zonesRef.current;
+    const slot: GestureSlot =
+      ratio < left ? "clickLeft" : ratio > right ? "clickRight" : "clickCenter";
+    if (pendingClickRef.current !== null) {
+      window.clearTimeout(pendingClickRef.current);
+    }
+    pendingClickRef.current = window.setTimeout(() => {
+      pendingClickRef.current = null;
+      runAction(gesturesRef.current[slot]);
+    }, 220);
+  };
+
+  /** 双击：按手势配置执行（默认切沉浸），并取消待触发的单击。 */
+  const handleStageDoubleClick = () => {
+    if (pendingClickRef.current !== null) {
+      window.clearTimeout(pendingClickRef.current);
+      pendingClickRef.current = null;
+    }
+    runAction(gesturesRef.current.doubleClick);
+  };
+
+  /** 拖动分区边界：按指针 x 比例改写 left/right 并持久化。 */
+  const startZoneDrag = (
+    edge: "left" | "right",
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setZoneDragging(edge);
+    const stage = stageRef.current;
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+
+    const move = (moveEvent: PointerEvent) => {
+      const ratio = Math.min(
+        0.94,
+        Math.max(0.06, (moveEvent.clientX - rect.left) / rect.width),
+      );
+      setZones((current) => {
+        const next =
+          edge === "left"
+            ? { left: Math.min(ratio, current.right - 0.08), right: current.right }
+            : { left: current.left, right: Math.max(ratio, current.left + 0.08) };
+        zonesRef.current = next;
+        return next;
+      });
+    };
+    const up = () => {
+      setZoneDragging(null);
+      saveZones(zonesRef.current);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1512,7 +1703,29 @@ const archiveEpochRef = useRef(0);
     },
     { label: currentBookmark ? "移除书签" : "添加书签", hint: "B", onClick: () => void toggleBookmark() },
     { label: "书签列表", hint: "L", onClick: () => setBookmarksOpen(true) },
-    { label: "复制当前页到剪贴板", hint: "Ctrl+C", dividerBefore: true, onClick: copyCurrentPage },
+    spread
+      ? {
+          label: "收藏左页到散图夹",
+          hint: "[",
+          dividerBefore: true,
+          onClick: () => void quickFavorite("left"),
+        }
+      : {
+          label: "收藏当前页到散图夹",
+          hint: "P",
+          dividerBefore: true,
+          onClick: () => void quickFavorite("page"),
+        },
+    ...(spread
+      ? [
+          {
+            label: "收藏右页到散图夹",
+            hint: "]",
+            onClick: () => void quickFavorite("right"),
+          } as ReaderMenuEntry,
+        ]
+      : []),
+    { label: "复制当前页到剪贴板", hint: "Ctrl+C", onClick: copyCurrentPage },
     { label: "在资源管理器中显示", hint: "Ctrl+Enter", onClick: revealArchive },
     { label: "设为桌面壁纸", onClick: wallpaperCurrentPage },
     { label: "退出阅读", hint: "Esc", dividerBefore: true, onClick: onClose },
@@ -1611,6 +1824,44 @@ const archiveEpochRef = useRef(0);
             >
               <StarIcon width={16} height={16} />
             </button>
+            {/* 收藏键跟随单双页：单页一个；双页左/右各一个（11-23 需求）。 */}
+            {spread ? (
+              <>
+                <button
+                  type="button"
+                  className="icon-button is-fav-split"
+                  onClick={() => void quickFavorite("left")}
+                  disabled={pageCount === 0 || looseBusy}
+                  aria-label="收藏左页到散图夹"
+                  title="收藏左页到散图夹 ( [ )"
+                >
+                  <HeartIcon width={16} height={16} />
+                  <span className="fav-side">左</span>
+                </button>
+                <button
+                  type="button"
+                  className="icon-button is-fav-split"
+                  onClick={() => void quickFavorite("right")}
+                  disabled={pageCount === 0 || looseBusy}
+                  aria-label="收藏右页到散图夹"
+                  title="收藏右页到散图夹 ( ] )"
+                >
+                  <HeartIcon width={16} height={16} />
+                  <span className="fav-side">右</span>
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => void quickFavorite("page")}
+                disabled={pageCount === 0 || looseBusy}
+                aria-label="收藏当前页到散图夹"
+                title="收藏当前页到散图夹 ( P )"
+              >
+                <HeartIcon width={16} height={16} />
+              </button>
+            )}
             <div style={{ position: "relative" }}>
               <button
                 type="button"
@@ -1628,11 +1879,25 @@ const archiveEpochRef = useRef(0);
                   <select
                     value={looseTarget}
                     aria-label="选择散图区"
-                    onChange={(event) =>
-                      setLooseTarget(
-                        event.target.value ? Number(event.target.value) : "",
-                      )
-                    }
+                    onChange={(event) => {
+                      const next = event.target.value
+                        ? Number(event.target.value)
+                        : "";
+                      setLooseTarget(next);
+                      // 记住选择：之后按 P / [ / ] 直接收藏，不再弹面板。
+                      try {
+                        if (next === "") {
+                          window.localStorage.removeItem("huaxia.reader.looseTarget");
+                        } else {
+                          window.localStorage.setItem(
+                            "huaxia.reader.looseTarget",
+                            String(next),
+                          );
+                        }
+                      } catch {
+                        // 存不了就只在本次会话生效
+                      }
+                    }}
                   >
                     <option value="">选择散图区…</option>
                     {looseCollections.map((collection) => (
@@ -1819,15 +2084,22 @@ const archiveEpochRef = useRef(0);
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
-          onDoubleClick={() => {
-            if (zoomMode === "fit") {
-              setZoomMode("actual");
-              setZoom(1);
-            } else {
-              setZoomMode("fit");
-            }
-          }}
+          onClick={handleStageClick}
+          onDoubleClick={handleStageDoubleClick}
         >
+          {/* 分区边界：两条可拖动的竖线，平时几乎看不见，悬停变亮。 */}
+          <div
+            className={`reader-zone-handle is-left${zoneDragging === "left" ? " is-dragging" : ""}`}
+            style={{ left: `${zones.left * 100}%` }}
+            onPointerDown={(event) => startZoneDrag("left", event)}
+            title="拖动调整「上一页区」边界"
+          />
+          <div
+            className={`reader-zone-handle is-right${zoneDragging === "right" ? " is-dragging" : ""}`}
+            style={{ left: `${zones.right * 100}%` }}
+            onPointerDown={(event) => startZoneDrag("right", event)}
+            title="拖动调整「下一页区」边界"
+          />
           {pageData && mainSrc &&
             (spread ? (
               <div className="reader-spread">

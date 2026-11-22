@@ -250,6 +250,7 @@ fn scan_once(
                 inspection.cover_key.as_deref(),
                 inspection.error.as_deref(),
                 fsutil::now_ms(),
+                None,
             ) {
                 Ok(_) => added += 1,
                 Err(error) => errors.push(format!("写入索引失败 {}: {error}", file_name)),

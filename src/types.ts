@@ -347,6 +347,8 @@ export interface ImportOptions {
   tags?: TagDraft[];
   /** 按文件单独指定的标签：命中的文件用自己这份，否则回落到 `tags`。 */
   pathTags?: { path: string; tags: TagDraft[] }[];
+  /** 加密压缩包密码：一行一个；单行 = 所有加密包共用。 */
+  passwords?: string[];
 }
 
 /** 导入面板里的一行：拖进来之后、点确认之前的状态。 */

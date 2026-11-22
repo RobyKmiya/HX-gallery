@@ -81,6 +81,7 @@ function ArchiveCard({
 
   return (
     <article
+      data-card-id={card.id}
       className={`archive-card${card.missing ? " is-missing" : ""}${
         selectionMode ? " is-selecting" : ""
       }${selected ? " is-selected" : ""}`}

@@ -24,7 +24,12 @@ export type ShortcutAction =
   | "openDetail"
   | "copyPage"
   | "revealArchive"
-  | "toggleThumbs";
+  | "toggleThumbs"
+  | "prevArchive"
+  | "nextArchive"
+  | "favoritePage"
+  | "favoriteLeft"
+  | "favoriteRight";
 
 export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   nextPage: "下一页",
@@ -44,6 +49,11 @@ export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   copyPage: "复制当前页",
   revealArchive: "资源管理器定位",
   toggleThumbs: "缩略图栏",
+  prevArchive: "上一本画集",
+  nextArchive: "下一本画集",
+  favoritePage: "收藏当前页到散图夹",
+  favoriteLeft: "收藏左页到散图夹",
+  favoriteRight: "收藏右页到散图夹",
 };
 
 export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
@@ -57,13 +67,18 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
   fitWidth: "",
   toggleSpread: "D",
   toggleImmersive: "F",
-  togglePlayback: "P",
+  togglePlayback: "Shift+P",
   toggleBookmark: "B",
   openBookmarks: "L",
   openDetail: "I",
   copyPage: "Ctrl+C",
   revealArchive: "Ctrl+Enter",
   toggleThumbs: "T",
+  prevArchive: "Alt+ArrowLeft",
+  nextArchive: "Alt+ArrowRight",
+  favoritePage: "P",
+  favoriteLeft: "[",
+  favoriteRight: "]",
 };
 
 const STORAGE_KEY = "huaxia.shortcuts";

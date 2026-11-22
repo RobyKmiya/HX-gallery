@@ -384,6 +384,7 @@ fn run(cli: Cli) -> Result<Value, String> {
                     preserve_structure: None,
                     tags: Vec::new(),
                     path_tags: Vec::new(),
+                passwords: Vec::new(),
                 },
                 |_| {},
             );

@@ -181,7 +181,17 @@ pub fn file_version(path: &Path) -> String {
 /// `pin` 表示这一页正显示在屏幕上：缓存会为它保留位置。预算已按整包（2GB）
 /// 设计，典型包内不会互相挤掉；只有特大包超预算时才可能触发 LRU 淘汰。
 pub fn read_page(path: &Path, page_index: i64, pin: bool) -> Result<ReaderPage, String> {
-    let payload = page_payload(path, page_index, pin)?;
+    read_page_with_password(path, page_index, pin, None)
+}
+
+/// 带解压密码的 read_page（加密 ZIP/CBZ 用；7z/RAR 会给出明确不支持提示）。
+pub fn read_page_with_password(
+    path: &Path,
+    page_index: i64,
+    pin: bool,
+    password: Option<&str>,
+) -> Result<ReaderPage, String> {
+    let payload = page_payload_with_password(path, page_index, pin, password)?;
     Ok(ReaderPage {
         index: page_index,
         name: payload.name.clone(),
@@ -192,7 +202,24 @@ pub fn read_page(path: &Path, page_index: i64, pin: bool) -> Result<ReaderPage, 
 
 /// 取页面字节：命中缓存直接返回，未命中则解压 + 解码 + 转码后写回缓存。
 pub fn page_payload(path: &Path, page_index: i64, pin: bool) -> Result<Cached, String> {
-    let key = cache_key("page", path, page_index, "")?;
+    page_payload_with_password(path, page_index, pin, None)
+}
+
+pub fn page_payload_with_password(
+    path: &Path,
+    page_index: i64,
+    pin: bool,
+    password: Option<&str>,
+) -> Result<Cached, String> {
+    // 密码参与缓存键：换密码/去掉密码时不会命中上一把密码解出来的旧字节。
+    let suffix = password
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let hash = blake3::hash(value.as_bytes());
+            format!("pw:{}", &hash.to_hex()[..12])
+        })
+        .unwrap_or_default();
+    let key = cache_key("page", path, page_index, &suffix)?;
 
     if let Ok(mut cache) = page_cache().lock()
         && let Some(hit) = cache.get(&key)
@@ -203,7 +230,7 @@ pub fn page_payload(path: &Path, page_index: i64, pin: bool) -> Result<Cached, S
         return Ok(hit);
     }
 
-    let payload = extract_page(path, page_index)?;
+    let payload = extract_page(path, page_index, password)?;
 
     if let Ok(mut cache) = page_cache().lock() {
         cache.insert(key.clone(), payload.clone());
@@ -221,8 +248,12 @@ pub fn cached_page(path: &Path, page_index: i64) -> Option<Cached> {
     page_cache().lock().ok()?.get(&key)
 }
 
-fn extract_page(path: &Path, page_index: i64) -> Result<Cached, String> {
-    let (name, bytes) = read_page_bytes(path, page_index)?;
+fn extract_page(
+    path: &Path,
+    page_index: i64,
+    password: Option<&str>,
+) -> Result<Cached, String> {
+    let (name, bytes) = read_page_bytes_with_password(path, page_index, password)?;
     let extension = extension_of(&name);
 
     if matches!(extension.as_str(), "tif" | "tiff") {
@@ -245,8 +276,24 @@ pub fn read_thumbnail(
     page_index: i64,
     max_edge: Option<u32>,
 ) -> Result<ReaderThumb, String> {
+    read_thumbnail_with_password(path, page_index, max_edge, None)
+}
+
+pub fn read_thumbnail_with_password(
+    path: &Path,
+    page_index: i64,
+    max_edge: Option<u32>,
+    password: Option<&str>,
+) -> Result<ReaderThumb, String> {
     let edge = max_edge.unwrap_or(180).clamp(64, 512);
-    let key = cache_key("thumb", path, page_index, &edge.to_string())?;
+    let suffix = password
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let hash = blake3::hash(value.as_bytes());
+            format!("{}|pw:{}", edge, &hash.to_hex()[..12])
+        })
+        .unwrap_or_else(|| edge.to_string());
+    let key = cache_key("thumb", path, page_index, &suffix)?;
 
     if let Ok(mut cache) = thumb_cache().lock()
         && let Some(hit) = cache.get(&key)
@@ -258,7 +305,7 @@ pub fn read_thumbnail(
         });
     }
 
-    let (name, bytes) = read_page_bytes(path, page_index)?;
+    let (name, bytes) = read_page_bytes_with_password(path, page_index, password)?;
     let image = decode_image(&bytes, THUMB_DECODE_ALLOC)?;
     let thumbnail = image.thumbnail(edge, edge);
 
@@ -295,6 +342,14 @@ pub(crate) fn page_bytes_for_decode(
 }
 
 pub(crate) fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, Vec<u8>), String> {
+    read_page_bytes_with_password(path, page_index, None)
+}
+
+pub(crate) fn read_page_bytes_with_password(
+    path: &Path,
+    page_index: i64,
+    password: Option<&str>,
+) -> Result<(String, Vec<u8>), String> {
     if page_index < 0 {
         return Err("页码不能为负数".to_string());
     }
@@ -313,7 +368,7 @@ pub(crate) fn read_page_bytes(path: &Path, page_index: i64) -> Result<(String, V
         ));
     }
 
-    let bytes = container::read_entry(path, entry.raw_index)?;
+    let bytes = container::read_entry_with_password(path, entry.raw_index, password)?;
     if bytes.len() as u64 > MAX_PAGE_BYTES {
         return Err(format!(
             "页面图片超过 {} MB，暂不支持在阅读器中打开",

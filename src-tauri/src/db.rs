@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::translate;
 
-pub(crate) const SCHEMA_VERSION: i64 = 12;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
 
 /// 待看目录默认放几本。
 pub const DEFAULT_QUEUE_SIZE: i64 = 10;
@@ -456,6 +456,8 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
             last_page INTEGER NOT NULL DEFAULT 0,
             read_count INTEGER NOT NULL DEFAULT 0,
             missing INTEGER NOT NULL DEFAULT 0,
+            -- v13：加密压缩包的解压密码（ZIP/CBZ 支持）
+            password TEXT,
             tag_text TEXT NOT NULL DEFAULT '',
             deleted_at INTEGER,
             error TEXT
@@ -826,6 +828,10 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("创建散图收藏夹表失败: {e}"))?;
 
+    // v13：加密压缩包的解压密码。局域网/本机使用的离线工具，密码只用于解包；
+    // 库里存明文（没有主密码体系），介意的话请自行加密磁盘。
+    add_column_if_missing(conn, "archives", "password", "TEXT")?;
+
     // v12：收藏夹自定义图标与颜色（侧栏纯填充色块展示）。
     add_column_if_missing(conn, "collections", "icon", "TEXT NOT NULL DEFAULT 'heart'")?;
     add_column_if_missing(
@@ -1103,6 +1109,7 @@ pub fn insert_archive(
     cover_key: Option<&str>,
     error: Option<&str>,
     added_at: i64,
+    password: Option<&str>,
 ) -> Result<i64, String> {
     let title = Path::new(file_name)
         .file_stem()
@@ -1113,8 +1120,8 @@ pub fn insert_archive(
     conn.execute(
         "INSERT INTO archives(
             rel_path, file_name, ext, file_size, file_mtime, page_count, title,
-            rating, cover_key, content_hash, added_at, error
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 60, ?8, ?9, ?10, ?11)",
+            rating, cover_key, content_hash, added_at, error, password
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 60, ?8, ?9, ?10, ?11, ?12)",
         params![
             rel_path,
             file_name,
@@ -1126,12 +1133,25 @@ pub fn insert_archive(
             cover_key,
             content_hash,
             added_at,
-            error
+            error,
+            password
         ],
     )
     .map_err(|e| format!("写入画集记录失败: {e}"))?;
 
     Ok(conn.last_insert_rowid())
+}
+
+/// 取某个画集的解压密码（阅读器打开加密包时用）。
+pub fn archive_password(conn: &Connection, archive_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT password FROM archives WHERE id = ?1",
+        [archive_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .filter(|value| !value.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]

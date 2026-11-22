@@ -1952,6 +1952,7 @@ fn import_stage_preview_and_tags_on_import() {
             add_to_collection: None,
             preserve_structure: None,
             path_tags: Vec::new(),
+                passwords: Vec::new(),
             tags: vec![
                 TagDraft {
                     name: "胡桃".into(),

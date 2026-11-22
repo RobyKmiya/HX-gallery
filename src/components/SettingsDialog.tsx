@@ -11,9 +11,17 @@ import {
   saveShortcuts,
   type ShortcutAction,
 } from "../shortcuts";
+import {
+  DEFAULT_GESTURES,
+  GESTURE_LABELS,
+  loadGestures,
+  saveGestures,
+  type GestureAction,
+  type GestureSlot,
+} from "../gestures";
 import { AlertIcon, BookIcon, CloseIcon, FolderIcon, RefreshIcon, TagIcon } from "./Icons";
 
-type SettingsTab = "general" | "keys" | "storage" | "guide" | "more";
+type SettingsTab = "general" | "keys" | "gestures" | "storage" | "guide" | "more";
 
 interface SettingsDialogProps {
   library: LibraryState;
@@ -30,6 +38,7 @@ interface SettingsDialogProps {
 const TABS: { key: SettingsTab; label: string }[] = [
   { key: "general", label: "通用" },
   { key: "keys", label: "快捷键" },
+  { key: "gestures", label: "鼠标手势" },
   { key: "storage", label: "存储" },
   { key: "guide", label: "新手教程" },
   { key: "more", label: "更多入口" },
@@ -63,6 +72,7 @@ export default function SettingsDialog({
 }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
   const [bindings, setBindings] = useState(() => loadShortcuts());
+  const [gestures, setGestures] = useState(() => loadGestures());
   /** 正在录制的动作；null = 不在录制。 */
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
   const [keyHint, setKeyHint] = useState("");
@@ -234,6 +244,55 @@ export default function SettingsDialog({
               </>
             )}
 
+            {tab === "gestures" && (
+              <>
+                <h3>鼠标手势（阅读器内生效）</h3>
+                <div className="keys-editor">
+                  {(Object.keys(GESTURE_LABELS) as GestureSlot[]).map((slot) => (
+                    <div className="keys-row" key={slot}>
+                      <span className="keys-row-label">{GESTURE_LABELS[slot]}</span>
+                      <select
+                        className="keys-select"
+                        value={gestures[slot]}
+                        onChange={(event) => {
+                          const next = {
+                            ...gestures,
+                            [slot]: event.target.value as GestureAction,
+                          };
+                          setGestures(next);
+                          saveGestures(next);
+                        }}
+                      >
+                        <option value="none">不做任何事</option>
+                        {(Object.keys(SHORTCUT_LABELS) as ShortcutAction[]).map(
+                          (action) => (
+                            <option key={action} value={action}>
+                              {SHORTCUT_LABELS[action]}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => {
+                    const next = { ...DEFAULT_GESTURES };
+                    setGestures(next);
+                    saveGestures(next);
+                  }}
+                >
+                  恢复默认手势
+                </button>
+                <p className="settings-hint">
+                  点击分区（左/中/右）在阅读器里直接拖动两条竖线调整宽度；缩放只走
+                  Ctrl+滚轮，普通滚轮不再改缩放。
+                </p>
+              </>
+            )}
+
             {tab === "storage" && (
               <>
                 <h3>当前库</h3>
@@ -296,10 +355,12 @@ export default function SettingsDialog({
                 <h3>阅读器速查</h3>
                 <ul className="guide-list">
                   <li>翻页：方向键 / 空格 / PgUp、PgDn；首末页 Home、End</li>
-                  <li>缩放：<code>+</code> <code>-</code> <code>0</code>，或 Ctrl+滚轮</li>
-                  <li><code>D</code> 双页 ｜ <code>F</code> 沉浸 ｜ <code>T</code> 缩略图栏</li>
-                  <li><code>P</code> GIF 播放（动图播完再翻）｜ <code>Ctrl+1~9</code> 幻灯每 N 秒一页</li>
-                  <li><code>B</code> 书签 ｜ <code>L</code> 书签列表 ｜ <code>[</code> <code>]</code> 上下本</li>
+                  <li>缩放：<code>+</code> <code>-</code> <code>0</code>，鼠标侧只认 <code>Ctrl+滚轮</code></li>
+                  <li><code>D</code> 双页 ｜ <code>F</code> 沉浸（双击画面也行）｜ <code>T</code> 缩略图栏</li>
+                  <li><code>Shift+P</code> GIF 播放（动图播完再翻页）｜ <code>Ctrl+1~9</code> 幻灯每 N 秒一页</li>
+                  <li><code>B</code> 书签 ｜ <code>L</code> 书签列表 ｜ <code>Alt+←/→</code> 上下本</li>
+                  <li><strong>收藏页</strong>：<code>P</code> 单页收藏；双页时 <code>[</code> 收藏左页、<code>]</code> 收藏右页</li>
+                  <li>点击画面：左区上一页、中区开目录、右区下一页（边界可拖动，见「鼠标手势」）</li>
                   <li><code>Ctrl+C</code> 复制当前页 ｜ <code>Ctrl+Enter</code> 资源管理器定位</li>
                   <li><code>Ctrl+H</code> 老板键藏窗 ｜ <code>Ctrl+Shift+H</code> 呼回</li>
                   <li>鼠标后退侧键：沉浸态先退沉浸，再按退出阅读</li>

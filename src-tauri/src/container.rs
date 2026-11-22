@@ -90,10 +90,32 @@ pub(crate) fn list_entries(path: &Path) -> Result<Vec<ContainerEntry>, String> {
 
 /// 按 `list_entries` 输出的条目序号读出整条字节。调用方负责大小/资源上限。
 pub(crate) fn read_entry(path: &Path, raw_index: usize) -> Result<Vec<u8>, String> {
+    read_entry_with_password(path, raw_index, None)
+}
+
+/// 同 `read_entry`，带解压密码。
+///
+/// 加密支持范围（11-23）：**ZIP/CBZ 全支持**（ZipCrypto 与 AES 都由 zip crate 处理）；
+/// 7z / RAR 加密暂不支持，给出明确提示而不是笼统的「损坏」。
+pub(crate) fn read_entry_with_password(
+    path: &Path,
+    raw_index: usize,
+    password: Option<&str>,
+) -> Result<Vec<u8>, String> {
     match kind_for(path) {
-        Some(ContainerKind::Zip) => read_zip(path, raw_index),
-        Some(ContainerKind::SevenZ) => read_sevenz(path, raw_index),
-        Some(ContainerKind::Rar) => read_rar(path, raw_index),
+        Some(ContainerKind::Zip) => read_zip(path, raw_index, password),
+        Some(ContainerKind::SevenZ) => {
+            if password.map(|value| !value.is_empty()).unwrap_or(false) {
+                return Err("7z 加密暂不支持：请先解压后重新打包成 ZIP/CBZ".to_string());
+            }
+            read_sevenz(path, raw_index)
+        }
+        Some(ContainerKind::Rar) => {
+            if password.map(|value| !value.is_empty()).unwrap_or(false) {
+                return Err("RAR 加密暂不支持：请先解压后重新打包成 ZIP/CBZ".to_string());
+            }
+            read_rar(path, raw_index)
+        }
         None => Err("不支持的压缩包格式".to_string()),
     }
 }
@@ -119,9 +141,10 @@ fn list_zip(path: &Path) -> Result<Vec<ContainerEntry>, String> {
     Ok(entries)
 }
 
-fn read_zip(path: &Path, raw_index: usize) -> Result<Vec<u8>, String> {
+fn read_zip(path: &Path, raw_index: usize, password: Option<&str>) -> Result<Vec<u8>, String> {
     let file = File::open(path).map_err(|error| format!("无法打开压缩包: {error}"))?;
     let mut archive = ZipArchive::new(file).map_err(|error| open_error("ZIP", error))?;
+    let secret = password.filter(|value| !value.is_empty());
 
     let mut seen = 0usize;
     for index in 0..archive.len() {
@@ -129,6 +152,24 @@ fn read_zip(path: &Path, raw_index: usize) -> Result<Vec<u8>, String> {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        if entry.is_dir() {
+            continue;
+        }
+        if seen == raw_index && entry.encrypted() {
+            // 加密条目：用给定密码重开一次（by_index 拿到的是未解密句柄）。
+            drop(entry);
+            let Some(secret) = secret else {
+                return Err("加密压缩包：请在导入时填写密码".to_string());
+            };
+            let mut decrypted = archive
+                .by_index_decrypt(index, secret.as_bytes())
+                .map_err(|_| "密码不正确（或该包不是 ZIP 加密格式）".to_string())?;
+            let mut bytes = Vec::new();
+            decrypted
+                .read_to_end(&mut bytes)
+                .map_err(|_| "密码不正确（数据校验失败）".to_string())?;
+            return Ok(bytes);
+        }
         if entry.is_dir() {
             continue;
         }

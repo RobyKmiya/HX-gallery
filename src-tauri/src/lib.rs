@@ -1066,7 +1066,11 @@ async fn read_reader_page(
     tauri::async_runtime::spawn_blocking(move || {
         let path = archive_file_path(&state, archive_id)?;
         reader::remember_archive(archive_id, &path);
-        reader::read_page(&path, index, pin)
+        let password = with_library(&state, |library| {
+            Ok(db::archive_password(&library.conn, archive_id))
+        })
+        .unwrap_or(None);
+        reader::read_page_with_password(&path, index, pin, password.as_deref())
     })
     .await
     .map_err(|error| format!("读取页面异常结束: {error}"))?
@@ -1099,7 +1103,11 @@ async fn read_reader_thumbnail(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let path = archive_file_path(&state, archive_id)?;
-        reader::read_thumbnail(&path, index, max_edge)
+        let password = with_library(&state, |library| {
+            Ok(db::archive_password(&library.conn, archive_id))
+        })
+        .unwrap_or(None);
+        reader::read_thumbnail_with_password(&path, index, max_edge, password.as_deref())
     })
     .await
     .map_err(|error| format!("读取缩略图异常结束: {error}"))?
@@ -1386,7 +1394,12 @@ fn copy_reader_page(
 
     let path = reader::remembered_archive(archive_id)
         .ok_or_else(|| "找不到画集文件（刚启动的话先翻一页再试）".to_string())?;
-    let (_name, bytes) = reader::read_page_bytes(&path, page_index)?;
+    let password = with_library(&app.state::<AppState>(), |library| {
+        Ok(db::archive_password(&library.conn, archive_id))
+    })
+    .unwrap_or(None);
+    let (_name, bytes) =
+        reader::read_page_bytes_with_password(&path, page_index, password.as_deref())?;
     let img = image::load_from_memory(&bytes).map_err(|e| format!("解码当前页失败: {e}"))?;
     let rgba = img.to_rgba8();
     let clipboard_image = tauri::image::Image::new(rgba.as_raw(), rgba.width(), rgba.height());
@@ -1424,7 +1437,12 @@ fn set_desktop_wallpaper(
 
     let path = reader::remembered_archive(archive_id)
         .ok_or_else(|| "找不到画集文件（刚启动的话先翻一页再试）".to_string())?;
-    let (_name, bytes) = reader::read_page_bytes(&path, page_index)?;
+    let password = with_library(&app.state::<AppState>(), |library| {
+        Ok(db::archive_password(&library.conn, archive_id))
+    })
+    .unwrap_or(None);
+    let (_name, bytes) =
+        reader::read_page_bytes_with_password(&path, page_index, password.as_deref())?;
     let img = image::load_from_memory(&bytes).map_err(|e| format!("解码当前页失败: {e}"))?;
 
     // PNG 落到库目录的 .gallery 下（和封面缓存一个屋檐，不污染画廊）。

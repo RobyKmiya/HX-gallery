@@ -63,6 +63,7 @@ struct ArchiveInsert<'a> {
     page_count: i64,
     cover_key: Option<&'a str>,
     inspection_error: Option<&'a str>,
+    password: Option<&'a str>,
 }
 
 pub fn import_blocking(
@@ -153,6 +154,16 @@ where
 
     for (index, candidate) in candidates.iter().enumerate() {
         let current = index + 1 + collected_failures;
+        // 密码规则（管理员 11-23）：只填一行 = 所有加密包共用；多行 = 按候选顺序一行对一个。
+        let resolved_password = match options.passwords.len() {
+            0 => None,
+            1 => Some(options.passwords[0].clone()),
+            _ => options
+                .passwords
+                .get(index)
+                .filter(|value| !value.is_empty())
+                .cloned(),
+        };
         let display_name = candidate
             .source
             .file_name()
@@ -391,7 +402,12 @@ where
             }
         };
 
-        let inspection = archive::inspect_archive(&target, covers_dir, &content_hash);
+        let inspection = archive::inspect_archive_with_password(
+            &target,
+            covers_dir,
+            &content_hash,
+            resolved_password.as_deref(),
+        );
         let file_name = target
             .file_name()
             .map(|value| value.to_string_lossy().to_string())
@@ -402,6 +418,7 @@ where
             .unwrap_or_default();
 
         let insert = ArchiveInsert {
+            password: resolved_password.as_deref(),
             rel_path: &relative_path,
             file_name: &file_name,
             extension: &extension,
@@ -517,6 +534,7 @@ fn insert_archive_atomic(
         insert.cover_key,
         insert.inspection_error,
         fsutil::now_ms(),
+        insert.password,
     )?;
 
     if let Some(collection_id) = collection_id {

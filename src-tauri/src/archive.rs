@@ -126,6 +126,16 @@ pub fn inspect_archive(
     covers_dir: &Path,
     content_hash: &str,
 ) -> ArchiveInspection {
+    inspect_archive_with_password(archive_path, covers_dir, content_hash, None)
+}
+
+/// 带解压密码的检查（加密 ZIP 抽封面时用）。
+pub fn inspect_archive_with_password(
+    archive_path: &Path,
+    covers_dir: &Path,
+    content_hash: &str,
+    password: Option<&str>,
+) -> ArchiveInspection {
     let entries = match container::list_entries(archive_path) {
         Ok(entries) => entries,
         Err(error) => return inspection_error(error),
@@ -169,8 +179,12 @@ pub fn inspect_archive(
     if !cover_ready() {
         if let Err(create_error) = fs::create_dir_all(covers_dir) {
             error = Some(format!("无法创建封面缓存目录: {create_error}"));
-        } else if let Err(write_error) = write_cover(archive_path, &images[cover_position], &cover_path)
-        {
+        } else if let Err(write_error) = write_cover(
+            archive_path,
+            &images[cover_position],
+            &cover_path,
+            password,
+        ) {
             error = Some(write_error);
         }
     }
@@ -182,13 +196,18 @@ pub fn inspect_archive(
     }
 }
 
-fn write_cover(path: &Path, entry: &ContainerEntry, destination: &Path) -> Result<(), String> {
+fn write_cover(
+    path: &Path,
+    entry: &ContainerEntry,
+    destination: &Path,
+    password: Option<&str>,
+) -> Result<(), String> {
     // 大小在列表阶段就已知，超限直接放弃，不把整条读进内存。
     if entry.size > MAX_IMAGE_BYTES {
         return Err("封面图片过大，已跳过".to_string());
     }
 
-    let bytes = container::read_entry(path, entry.raw_index)
+    let bytes = container::read_entry_with_password(path, entry.raw_index, password)
         .map_err(|error| format!("读取封面图片失败: {error}"))?;
 
     let image = decode_image(&bytes, THUMB_DECODE_ALLOC)?;

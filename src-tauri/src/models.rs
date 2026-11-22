@@ -190,6 +190,10 @@ pub struct ImportOptions {
     /// 一次导入多个压缩包、每本标签不同时用这个。
     #[serde(default)]
     pub path_tags: Vec<PathTags>,
+    /// 加密压缩包的密码：只填一行 = 所有加密包共用；多行 = 按顺序对应每个加密包。
+    /// 只在 ZIP/CBZ 上生效（7z/RAR 加密会给出明确提示）。
+    #[serde(default)]
+    pub passwords: Vec<String>,
 }
 
 /// 「这个文件挂这些标签」。路径按前端回传的原样比对（含分隔符差异会先归一）。

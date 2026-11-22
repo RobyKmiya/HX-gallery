@@ -7407,3 +7407,146 @@ body.is-splitting {
 .welcome-steps-sep {
   color: var(--faint);
 }
+
+/* ---------- 阅读器点击分区与收藏键形态（11-23） ---------- */
+
+/* 分区边界：平时极淡，悬停/拖动时亮起来；只占 10px，不挡图。 */
+.reader-zone-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  margin-left: -5px;
+  cursor: col-resize;
+  z-index: 12;
+  background: transparent;
+  touch-action: none;
+}
+
+.reader-zone-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: rgba(232, 163, 92, 0);
+  transition: background 0.15s ease;
+}
+
+.reader-zone-handle:hover::after,
+.reader-zone-handle.is-dragging::after {
+  background: rgba(232, 163, 92, 0.55);
+}
+
+/* 双页收藏：两个键各自带「左 / 右」角标 */
+.icon-button.is-fav-split {
+  position: relative;
+}
+
+.fav-side {
+  position: absolute;
+  bottom: -1px;
+  right: -2px;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--accent-strong);
+  background: rgba(14, 16, 20, 0.9);
+  border-radius: 3px;
+  padding: 1px 2px;
+}
+
+.keys-select {
+  min-width: 150px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 11px;
+}
+
+/* 详情浮层：标题栏可拖（越中线换边），内边缘把手调宽 */
+.drawer-header.is-draggable {
+  cursor: grab;
+  user-select: none;
+}
+
+.detail-drawer.is-docked .drawer-header.is-draggable {
+  cursor: default;
+}
+
+.drawer-width-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 3;
+}
+
+.detail-drawer.is-snap-right .drawer-width-handle {
+  left: -4px;
+}
+
+.detail-drawer.is-snap-left .drawer-width-handle {
+  right: -4px;
+}
+
+.detail-drawer.is-snap-right .drawer-width-handle:hover,
+.detail-drawer.is-snap-left .drawer-width-handle:hover {
+  background: rgba(232, 163, 92, 0.25);
+}
+
+/* 浮层贴左时，边框与阴影镜像 */
+.detail-drawer.is-snap-left {
+  border-left: none;
+  border-right: 1px solid var(--border-strong);
+  box-shadow: 30px 0 80px -30px rgba(0, 0, 0, 0.9);
+}
+
+.detail-drawer {
+  position: relative;
+}
+
+/* 导入对话框：大类快选 + 密码区（11-23） */
+.category-quick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.category-quick-label {
+  font-size: 11px;
+  color: var(--faint);
+  margin-right: 2px;
+}
+
+.category-chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--accent-strong);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.category-chip:hover {
+  border-color: var(--accent-strong);
+  background: rgba(232, 163, 92, 0.12);
+}
+
+.import-section-title {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.import-password-input {
+  font-family: "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.02em;
+}

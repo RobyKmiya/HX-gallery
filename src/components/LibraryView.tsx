@@ -409,6 +409,44 @@ export default function LibraryView({
    */
   const [activeQueue, setActiveQueue] = useState<Queue | null>(null);
 
+  // 画廊里按 I：给鼠标悬停的那张卡片呼出详情浮层（管理员 11-23）。
+  // 用 elementFromPoint 命中，省得给上千张卡片逐个挂焦点逻辑。
+  const pointerPosRef = useRef({ x: 0, y: 0 });
+  useEffect(() => {
+    const onMove = (event: MouseEvent) => {
+      pointerPosRef.current = { x: event.clientX, y: event.clientY };
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (event.key.toLowerCase() !== "i") return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const hovered = document
+        .elementFromPoint(pointerPosRef.current.x, pointerPosRef.current.y)
+        ?.closest("[data-card-id]") as HTMLElement | null;
+      const id = Number(hovered?.dataset.cardId ?? "");
+      if (!Number.isFinite(id) || id <= 0) return;
+      const found = items.find((entry) => entry.id === id);
+      if (!found) return;
+      event.preventDefault();
+      setOpenSeries(null);
+      setSelected(found);
+    };
+    window.addEventListener("mousemove", onMove, { passive: true });
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [items]);
+
   // 换了收藏夹、切了视图、或打开了别的面板：合集详情自动收起（管理员 11-22：
   // 「点了合集再点画廊不会关」）。
   useEffect(() => {
@@ -1143,6 +1181,7 @@ export default function LibraryView({
           preserveStructure: payload.preserveStructure,
           tags: payload.tags,
           pathTags: payload.pathTags,
+          passwords: payload.passwords,
         });
         setImportOpen(false);
         setImportSeedPaths([]);
