@@ -6807,6 +6807,10 @@ body.is-splitting {
   overflow-y: auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  /* 关键：网格默认 align-content:stretch，只有一个行时整行被撑到容器满高，
+     卡片全变成几百像素的空壳（管理员截图实锤）。行高必须贴合内容。 */
+  align-content: start;
+  align-items: start;
   gap: 10px;
   padding: 2px;
 }
