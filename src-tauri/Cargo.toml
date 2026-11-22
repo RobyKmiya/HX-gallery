@@ -1,0 +1,62 @@
+[package]
+name = "archive-gallery"
+version = "1.1.0"
+description = "A local archive gallery for ZIP/CBZ image collections"
+authors = ["Archive Gallery"]
+edition = "2024"
+default-run = "archive-gallery"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "archive_gallery_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "unstable"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tauri-plugin-dialog = "2.8.4"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+zip = { version = "2", features = ["deflate64", "zstd", "bzip2", "aes-crypto", "lzma"] }
+sevenz-rust2 = "0.25"
+unrar-ng = "0.7"
+image = "0.25.10"
+# image 已经传递依赖 image-webp；直接声明以便使用其动画解码 API（帧数/时长/逐帧）
+image-webp = "0.2.4"
+# 读取 gif 帧延迟/帧数时只用块头信息（next_frame_info），不逐帧解像素，避免进页卡顿
+gif = "0.14"
+base64 = "0.23"
+walkdir = "2.5.0"
+natord = "1.0.9"
+blake3 = "1.8.7"
+uuid = { version = "1.29.2", features = ["v4"] }
+
+# 单实例：直接用 Win32 命名互斥体，不引 tauri-plugin-single-instance
+# （该插件目前只有 3.0.0-alpha 预发布版）。其它平台编译时整段被 cfg 掉。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>匣浏览器 · 工具栏</title>
+<style>
+  :root {
+    --bg: #14161b;
+    --bg-raised: #1d2027;
+    --line: #2c313c;
+    --text: #e8eaf0;
+    --muted: #8b93a7;
+    --accent: #7c93ff;
+    --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 12px/1 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    user-select: none;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 5px;
+    height: 100%; padding: 0 8px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #181b21, #14161b);
+  }
+  button {
+    height: 26px; min-width: 28px; padding: 0 7px;
+    border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg-raised); color: var(--text);
+    font: inherit; cursor: pointer; flex: none;
+  }
+  button:hover { background: #272b35; border-color: #3a404d; }
+  button:active { background: #313642; }
+  button.zoom { min-width: 52px; font-variant-numeric: tabular-nums; }
+  .tabs {
+    display: flex; align-items: center; gap: 4px;
+    max-width: 44vw; overflow-x: auto; scrollbar-width: none;
+    padding: 2px; flex: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    display: flex; align-items: center; gap: 6px;
+    height: 26px; padding: 0 6px 0 10px;
+    border: 1px solid transparent; border-radius: 8px;
+    background: transparent; color: var(--muted);
+    cursor: pointer; max-width: 170px; min-width: 0;
+  }
+  .tab:hover { background: var(--bg-raised); color: var(--text); }
+  .tab.active {
+    background: #262a33; color: var(--text);
+    border-color: #3a404d;
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .tab .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab .x {
+    flex: none; width: 16px; height: 16px; line-height: 14px;
+    border-radius: 5px; text-align: center;
+    color: var(--muted); font-size: 12px;
+  }
+  .tab .x:hover { background: #3a2126; color: var(--danger); }
+  .addr-wrap {
+    flex: 1 1 auto; display: flex; align-items: center;
+    height: 26px; padding: 0 8px; gap: 6px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: #0f1116;
+  }
+  .addr-wrap:focus-within { border-color: var(--accent); }
+  .addr-wrap .lock { color: var(--muted); flex: none; font-size: 11px; }
+  #addr {
+    flex: 1; min-width: 60px; border: 0; outline: 0; background: transparent;
+    color: var(--text); font: 12px "Cascadia Mono", Consolas, monospace;
+    user-select: text;
+  }
+  .sep { width: 1px; height: 20px; background: var(--line); flex: none; }
+  .hint { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="back" title="后退">←</button>
+  <button id="forward" title="前进">→</button>
+  <button id="reload" title="刷新">⟳</button>
+  <button id="home" title="回到主页">⌂</button>
+  <div class="tabs" id="tabs"></div>
+  <button id="newtab" title="新建标签">+</button>
+  <div class="sep"></div>
+  <div class="addr-wrap">
+    <span class="lock" id="lock">◉</span>
+    <input id="addr" spellcheck="false" autocomplete="off" />
+  </div>
+  <button id="zoomOut" title="缩小">−</button>
+  <button id="zoom" class="zoom" title="重置 100%">100%</button>
+  <button id="zoomIn" title="放大">+</button>
+</div>
+
+<script>
+(function () {
+  var state = null;
+  var lastStateJson = "";
+  var addrFocused = false;
+  var zoomPct = 100;
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function req(action, extra) {
+    var payload = Object.assign({ action: action }, extra || {});
+    window.__xkReq = payload;
+  }
+
+  function render() {
+    if (!state) return;
+    // 标签条
+    var tabs = $("tabs");
+    tabs.textContent = "";
+    (state.tabs || []).forEach(function (tab) {
+      var chip = document.createElement("div");
+      chip.className = "tab" + (tab.active ? " active" : "");
+      chip.title = tab.url;
+      var label = document.createElement("span");
+      label.className = "t";
+      label.textContent = tab.title || tab.url || "空白页";
+      chip.appendChild(label);
+      var x = document.createElement("span");
+      x.className = "x";
+      x.textContent = "×";
+      x.title = "关闭标签";
+      x.addEventListener("click", function (e) {
+        e.stopPropagation();
+        req("close", { tabId: tab.id });
+      });
+      chip.appendChild(x);
+      chip.addEventListener("click", function () {
+        req("switch", { tabId: tab.id });
+      });
+      tabs.appendChild(chip);
+    });
+    // 地址栏：聚焦时不打断输入
+    if (!addrFocused && $("addr") !== document.activeElement) {
+      $("addr").value = state.activeUrl || "";
+      $("lock").textContent = /^https:/i.test(state.activeUrl || "") ? "🔒" : "◉";
+    }
+  }
+
+  function tick() {
+    var raw = window.__xkState;
+    if (raw && typeof raw === "string") {
+      if (raw !== lastStateJson) {
+        lastStateJson = raw;
+        try { state = JSON.parse(raw); } catch (e) { state = null; }
+        render();
+      }
+    }
+    window.requestAnimationFrame(function () { setTimeout(tick, 120); });
+  }
+  setTimeout(tick, 120);
+
+  $("back").addEventListener("click", function () { req("back"); });
+  $("forward").addEventListener("click", function () { req("forward"); });
+  $("reload").addEventListener("click", function () { req("reload"); });
+  $("home").addEventListener("click", function () { req("home"); });
+  $("newtab").addEventListener("click", function () {
+    req("new", { url: (state && state.activeUrl) || "https://e-hentai.org/" });
+  });
+  $("zoomIn").addEventListener("click", function () {
+    zoomPct = Math.min(400, zoomPct + 10);
+    $("zoom").textContent = zoomPct + "%";
+    req("zoomIn");
+  });
+  $("zoomOut").addEventListener("click", function () {
+    zoomPct = Math.max(25, zoomPct - 10);
+    $("zoom").textContent = zoomPct + "%";
+    req("zoomOut");
+  });
+  $("zoom").addEventListener("click", function () {
+    zoomPct = 100;
+    $("zoom").textContent = "100%";
+    req("zoomReset");
+  });
+
+  var addr = $("addr");
+  addr.addEventListener("focus", function () {
+    addrFocused = true;
+    addr.value = (state && state.activeUrl) || "";
+    setTimeout(function () { addr.select(); }, 0);
+  });
+  addr.addEventListener("blur", function () {
+    addrFocused = false;
+    addr.value = (state && state.activeUrl) || "";
+  });
+  addr.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      var v = addr.value.trim();
+      if (!v) return;
+      if (!/^https?:\/\//i.test(v)) v = "https://" + v;
+      addrFocused = false;
+      req("nav", { url: v });
+      addr.blur();
+    } else if (e.key === "Escape") {
+      addrFocused = false;
+      addr.value = (state && state.activeUrl) || "";
+      addr.blur();
+    }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
