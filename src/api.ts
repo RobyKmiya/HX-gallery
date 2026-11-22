@@ -300,6 +300,9 @@ export const api = {
   setWindowDecorations: (decorated: boolean) =>
     invoke<void>("set_window_decorations", { decorated }),
 
+  /** 老板键第一步：把主窗藏起来。呼回用全局热键 Ctrl+Shift+H。 */
+  hideMainWindow: () => invoke<void>("hide_main_window"),
+
   // ---------- 合集（连载盒子） ----------
   listSeries: () => invoke<SeriesSummary[]>("list_series"),
   createSeries: (name: string, archiveIds: number[]) =>

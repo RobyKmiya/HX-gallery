@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri::{AppHandle, Manager, State};
 
 use models::{
@@ -1357,6 +1358,50 @@ fn set_window_decorations(window: tauri::WebviewWindow, decorated: bool) -> Resu
     Ok(())
 }
 
+/// 老板键第一步：把主窗整个藏起来（恢复走全局热键 Ctrl+Shift+H）。
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
+}
+
+/// 窗口几何节流落盘（管理员 11-22：重启保持窗口大小/位置）。
+/// Moved/Resized 一秒能触发上百次，直接写盘会卡 UI；用原子门 + 延迟线程，
+/// 900ms 内只有第一笔真正排上，落的是停稳之后的最新几何。
+static GEOMETRY_SAVE_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn persist_window_geometry_debounced(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if GEOMETRY_SAVE_PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        GEOMETRY_SAVE_PENDING.store(false, Ordering::SeqCst);
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        let Ok(config_dir) = app.path().app_config_dir() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&config_dir);
+        let maximized = window.is_maximized().unwrap_or(false);
+        let mut value = serde_json::json!({ "maximized": maximized });
+        if !maximized {
+            if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                value["x"] = position.x.into();
+                value["y"] = position.y.into();
+                value["width"] = size.width.into();
+                value["height"] = size.height.into();
+            }
+        }
+        let _ = std::fs::write(config_dir.join("window.json"), value.to_string());
+    });
+}
+
 // ---------- 合集（连载盒子） ----------
 
 #[tauri::command]
@@ -1556,6 +1601,26 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // 老板键呼回：Ctrl+Shift+H 全局切换主窗显隐。窗口藏起来之后应用内
+        // 按键收不到，必须用系统级热键才能唤回。
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let visible = window.is_visible().unwrap_or(false);
+                            if visible {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(),
+        )
         .register_uri_scheme_protocol("gallery", asset_protocol::serve)
         .register_uri_scheme_protocol("loose", move |context, request| {
             crate::loose_images::serve(context.app_handle(), request)
@@ -1563,6 +1628,34 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .setup(move |app| {
             // 上次发布成功后补记基线：之后关窗不会再无脑抬版本
             release::settle_baseline_after_success(app.handle());
+            // 注册老板键呼回（Ctrl+Shift+H）：失败不拦启动，只记日志。
+            if let Err(error) = app
+                .global_shortcut()
+                .register("ctrl+shift+h")
+            {
+                release::log_close_timing(app.handle(), &format!("注册老板键失败: {error}"), std::time::Duration::ZERO);
+            }
+            // 恢复上次窗口几何（管理员 11-22：窗口大小要灵活，重启保持）
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(config_dir) = app.path().app_config_dir() {
+                    if let Ok(text) = std::fs::read_to_string(config_dir.join("window.json")) {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if value["maximized"].as_bool().unwrap_or(false) {
+                                let _ = window.maximize();
+                            } else if let (Some(w), Some(h)) =
+                                (value["width"].as_f64(), value["height"].as_f64())
+                            {
+                                let _ = window.set_size(tauri::LogicalSize::new(w, h));
+                                if let (Some(x), Some(y)) =
+                                    (value["x"].as_f64(), value["y"].as_f64())
+                                {
+                                    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let state = AppState::new(app.handle());
             app.manage(state);
             // 守卫交给 Tauri 托管，活到进程结束；提前 drop 会立刻放开互斥体。
@@ -1571,6 +1664,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         })
         .invoke_handler(tauri::generate_handler![            get_library_state,
             set_window_decorations,
+            hide_main_window,
             list_series,
             create_series,
             update_series,
@@ -1671,6 +1765,12 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             cancel_release
         ])
         .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+            ) && window.label() == "main" {
+                persist_window_geometry_debounced(window.app_handle().clone());
+            }
             // 关闭窗口时，如果用户开着「退出后自动发布」，就在这里把脚本排好并拉起。
             // 放在窗口事件而不是 ExitRequested：后者在 app.exit() 时也会触发，
             // 容易和「面板里点更新」那条路径重复安排。

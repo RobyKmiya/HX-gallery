@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "画匣",
-  "version": "1.0.59",
+  "version": "1.0.60",
   "identifier": "com.archivegallery.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -16,8 +16,8 @@
         "title": "画匣 · 本地画廊",
         "width": 1280,
         "height": 820,
-        "minWidth": 980,
-        "minHeight": 640,
+        "minWidth": 640,
+        "minHeight": 460,
         "center": true
       }
     ],

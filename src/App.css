@@ -6741,3 +6741,33 @@ body.is-splitting {
   outline: none;
   border-color: var(--accent-strong, #e8a35c);
 }
+
+/* ---------- 缩放修复与播放增强（管理员 11-22 反馈） ---------- */
+
+/* 双页 fit 放不全的根因：两张图各自 max-width:100%，合起来必然溢出；
+   且 .reader-spread 高度是 auto，img 的 max-height:100% 解析不到基准。
+   显式给满高、每张限半宽，双页才能整幅收进视口。 */
+.reader-stage.is-fit .reader-spread {
+  width: 100%;
+  height: 100%;
+}
+
+.reader-stage.is-fit .reader-spread img {
+  max-width: calc(50% - 1px);
+  max-height: 100%;
+}
+
+/* 缩放顺滑：改尺寸时给 150ms 过渡（fit/width 模式不涉及，无需加）。 */
+.reader-stage.is-actual img {
+  transition: width 0.15s ease-out, height 0.15s ease-out;
+}
+
+/* 无边框时的顶部拖动热区：只在沉浸模式渲染。 */
+.reader-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 26px;
+  z-index: 7;
+}

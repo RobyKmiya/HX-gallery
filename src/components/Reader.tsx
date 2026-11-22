@@ -72,9 +72,10 @@ const RETRY_BACKOFF_BASE_MS = 500;
 const RETRY_BACKOFF_MAX_MS = 8000;
 /** 预解码等待上限；超时说明这张图太大，交给 <img> 自己解码。 */
 const PAGE_DECODE_TIMEOUT = 6000;
-const ZOOM_MIN = 0.5;
+// 缩放下限 0.1：管理员反馈 0.5 时大图缩不全（「放不全」），放宽到能缩到一成。
+const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 4;
-const ZOOM_STEP = 0.25;
+const ZOOM_STEP = 0.1;
 const SPREAD_STORAGE_KEY = "archive-gallery:reader-spread";
 const PLAYBACK_STORAGE_KEY = "archive-gallery:reader-playback";
 /** 播放模式下静态页的停留时长。 */
@@ -275,6 +276,10 @@ export default function Reader({
   });
   /** 播放是否正在进行（模式开着也可以用空格暂停）。 */
   const [playing, setPlaying] = useState(false);
+  /** 幻灯播放：不看动图帧数，定时翻页。Ctrl+1~9 设每页秒数，Ctrl+0 关闭。 */
+  const [slideshow, setSlideshow] = useState(false);
+  const [slideSeconds, setSlideSeconds] = useState(3);
+  const [slidePaused, setSlidePaused] = useState(false);
   /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
   /** 收藏到散图夹的弹层与目标区（null = 关闭）。 */
@@ -735,6 +740,37 @@ const archiveEpochRef = useRef(0);
     onNotify,
   ]);
 
+  // 幻灯播放：每 slideSeconds 秒翻一页，不看动图帧数。读完换下一本/下一话
+  // （与 GIF 播放同一条路，走 onSwitchArchive，所以合集连读在幻灯下也生效）。
+  useEffect(() => {
+    if (!slideshow || slidePaused) return;
+    const timer = window.setTimeout(() => {
+      const count = info?.pageCount ?? 0;
+      const nextIndex = page + (spread ? 2 : 1);
+      if (nextIndex < count) {
+        setPage(Math.min(nextIndex, count - 1));
+        return;
+      }
+      if (onSwitchArchive && hasNextArchive) {
+        onSwitchArchive(1);
+        return;
+      }
+      setSlideshow(false);
+      onNotify("已经到最后一页，幻灯播放结束", "info");
+    }, Math.max(1, slideSeconds) * 1000);
+    return () => window.clearTimeout(timer);
+  }, [
+    slideshow,
+    slidePaused,
+    slideSeconds,
+    info,
+    page,
+    spread,
+    hasNextArchive,
+    onSwitchArchive,
+    onNotify,
+  ]);
+
   useEffect(() => {
     if (!info) return;
     const timer = window.setTimeout(() => {
@@ -798,7 +834,16 @@ const archiveEpochRef = useRef(0);
   }, []);
 
   const togglePlayback = useCallback(() => {
+    // 两种播放互斥：开 GIF 播放就关幻灯，反之亦然。
+    setSlideshow(false);
+    setSlidePaused(false);
     setPlayback((value) => !value);
+  }, []);
+
+  const toggleSlideshow = useCallback(() => {
+    setPlaying(false);
+    setSlidePaused(false);
+    setSlideshow((value) => !value);
   }, []);
 
   const toggleSpread = useCallback(() => {
@@ -918,6 +963,20 @@ const archiveEpochRef = useRef(0);
     );
   }, [zoomMode]);
 
+  // Ctrl+滚轮缩放：不随翻页滚轮走，preventDefault 阻止浏览器页缩放。
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      if (event.deltaY < 0) zoomIn();
+      else zoomOut();
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    return () => stage.removeEventListener("wheel", onWheel);
+  }, [zoomIn, zoomOut]);
+
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       // 详情浮层开着时按键全部让给浮层（它自己处理 Esc 关闭）。
@@ -926,6 +985,40 @@ const archiveEpochRef = useRef(0);
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
+        return;
+      }
+
+      // Ctrl+数字 = 幻灯播放速度（Ctrl+N = 每 N 秒一页，Ctrl+0 = 关闭）。
+      // Ctrl+H = 老板键：整窗隐藏，Ctrl+Shift+H 全局呼回（Rust 侧注册）。
+      if (
+        event.ctrlKey &&
+        !event.shiftKey &&
+        !event.altKey &&
+        /^[0-9]$/.test(event.key)
+      ) {
+        event.preventDefault();
+        if (event.key === "0") {
+          setSlideshow(false);
+          onNotify("幻灯播放已关闭", "info");
+        } else {
+          const seconds = Number(event.key);
+          setPlaying(false);
+          setSlideSeconds(seconds);
+          setSlidePaused(false);
+          setSlideshow(true);
+          onNotify(`幻灯播放：每 ${seconds} 秒翻一页（Ctrl+0 关闭）`, "info");
+        }
+        return;
+      }
+      if (
+        event.ctrlKey &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "h"
+      ) {
+        event.preventDefault();
+        void api.hideMainWindow();
+        onNotify("窗口已隐藏（Ctrl+Shift+H 呼回）", "info");
         return;
       }
 
@@ -973,9 +1066,10 @@ const archiveEpochRef = useRef(0);
         event.key === "PageDown" ||
         (event.key === " " && !event.shiftKey)
       ) {
-        if (event.key === " " && playback) {
+        if (event.key === " " && (playback || slideshow)) {
           // 播放模式下空格 = 暂停/继续，不再当翻页键。
-          setPlaying((value) => !value);
+          if (playback) setPlaying((value) => !value);
+          else setSlidePaused((value) => !value);
         } else {
           pausePlayback();
           goNext();
@@ -1848,14 +1942,27 @@ const archiveEpochRef = useRef(0);
               type="button"
               className={playback ? "is-active" : ""}
               onClick={togglePlayback}
-              title="播放阅读模式 (P)：动图播完自动翻页，翻完换下一本；空格暂停/继续"
+              title="GIF 播放 (P)：动图播完整段再翻页，翻完换下一本；空格暂停/继续"
             >
               {playback && playing ? (
                 <PauseIcon width={11} height={11} />
               ) : (
                 <PlayIcon width={11} height={11} />
               )}
-              播放
+              GIF播放
+            </button>
+            <button
+              type="button"
+              className={slideshow ? "is-active" : ""}
+              onClick={toggleSlideshow}
+              title="幻灯播放：定时翻页不看动图帧数。Ctrl+1~9 设每页秒数，Ctrl+0 关闭，空格暂停/继续"
+            >
+              {slideshow && !slidePaused ? (
+                <PauseIcon width={11} height={11} />
+              ) : (
+                <PlayIcon width={11} height={11} />
+              )}
+              幻灯{slideshow ? `·${slideSeconds}s` : ""}
             </button>
           </div>
         </div>
@@ -1870,6 +1977,12 @@ const archiveEpochRef = useRef(0);
           <div className="reader-immersive-bar" aria-hidden="true">
             <span style={{ width: `${progress}%` }} />
           </div>
+          {/* 无边框时的拖动热区：顶部 26px 拿来挪窗口（双击=最大化/还原）。 */}
+          <div
+            className="reader-drag-strip"
+            data-tauri-drag-region
+            title="拖动窗口"
+          />
         </>
       )}
 
