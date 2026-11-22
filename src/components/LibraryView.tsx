@@ -1985,8 +1985,8 @@ export default function LibraryView({
     >
       <aside
         className={`sidebar${sidebarCollapsed ? " is-collapsed" : ""}${
-          !sidebarCollapsed && sidebarWidth < 150 ? " is-compact" : ""
-        }`}
+          !sidebarCollapsed && sidebarWidth < 224 ? " is-tight" : ""
+        }${!sidebarCollapsed && sidebarWidth < 150 ? " is-compact" : ""}`}
       >
         <div className="sidebar-brand">
           <span className="brand-mark">
@@ -2378,7 +2378,7 @@ export default function LibraryView({
       <Splitter
         label="侧栏"
         value={sidebarWidth}
-        min={190}
+        min={62}
         max={420}
         onChange={(next) => {
           setSidebarWidth(next);

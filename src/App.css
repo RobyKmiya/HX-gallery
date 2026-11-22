@@ -7172,3 +7172,61 @@ body.is-splitting {
   border-color: #f4f6fb;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
 }
+
+/* ---------- 侧栏三档自适应（管理员 22:11：宽度不足先收按钮，再收文字） ---------- */
+
+/* 窄一点（<224）：收藏夹行内的 样式/上移/下移/改名/删除 全部收起，
+   只留名字和计数——原来这些按钮会挤进计数徽标，压在名字上。 */
+.sidebar.is-tight .nav-row-actions {
+  display: none;
+}
+
+.sidebar.is-tight .nav-item {
+  gap: 8px;
+}
+
+/* 更窄（<150）：与折叠态同一套规则——只留图标，文字/计数/操作全隐藏。 */
+.sidebar.is-compact {
+  padding: 12px 8px;
+  gap: 12px;
+  overflow-x: hidden;
+}
+
+.sidebar.is-compact .sidebar-brand {
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+}
+
+.sidebar.is-compact .sidebar-brand > div,
+.sidebar.is-compact .library-card,
+.sidebar.is-compact .nav-label,
+.sidebar.is-compact .nav-count,
+.sidebar.is-compact .nav-caret,
+.sidebar.is-compact .nav-row-actions,
+.sidebar.is-compact .nav-divider,
+.sidebar.is-compact .sidebar-footer {
+  display: none;
+}
+
+.sidebar.is-compact .nav-item {
+  justify-content: center;
+  padding: 9px 0;
+  gap: 0;
+}
+
+.sidebar.is-compact .nav-row {
+  display: block;
+}
+
+/* 底部四个动作按钮收成纯图标（文字是裸文本节点，font-size:0 收掉）。 */
+.sidebar.is-compact .sidebar-actions .btn {
+  font-size: 0;
+  padding: 9px 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.sidebar.is-compact .sidebar-actions .btn svg {
+  font-size: 12px;
+}
