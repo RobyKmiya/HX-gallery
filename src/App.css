@@ -4554,39 +4554,45 @@ body.is-splitting {
 }
 
 /* ---------- 沉浸（无框）阅读 ---------- */
-/* 顶栏与进度条脱离文档流、浮在画面之上：翻页时看不到边框，鼠标一动才浮现。 */
-.reader.is-immersive .reader-head {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 4;
-  opacity: 0;
-  transform: translateY(-100%);
-  transition: transform 0.18s ease, opacity 0.18s ease;
-  background: linear-gradient(180deg, rgba(8, 9, 13, 0.94), rgba(8, 9, 13, 0.62));
-  backdrop-filter: blur(10px);
-}
-
-.reader.is-immersive.is-chrome-visible .reader-head {
-  opacity: 1;
-  transform: translateY(0);
-}
-
+/* 顶栏 / 底栏 / 进度条全部移除：不是浮层淡出，而是彻底不占位、不随鼠标冒头。
+   只在右下角留一颗几乎看不见的小点还原工具栏（热区 64×64）。 */
+.reader.is-immersive .reader-head,
+.reader.is-immersive .reader-bar,
 .reader.is-immersive .reader-progress {
-  position: absolute;
-  left: 0;
+  display: none;
+}
+
+/* 角落还原点 */
+.reader-corner-toggle {
+  position: fixed;
   right: 0;
   bottom: 0;
-  z-index: 4;
-  height: 3px;
-  opacity: 0;
-  transition: opacity 0.18s ease, height 0.18s ease;
+  z-index: 6;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 14px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.16;
+  transition: opacity 0.2s ease;
 }
 
-.reader.is-immersive.is-chrome-visible .reader-progress {
-  opacity: 1;
-  height: 5px;
+.reader-corner-toggle span {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.reader-corner-toggle:hover,
+.reader-corner-toggle:focus-visible {
+  opacity: 0.85;
+  outline: none;
 }
 
 /* 无框：舞台不留内边距，图片贴边 */

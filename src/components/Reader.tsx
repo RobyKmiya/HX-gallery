@@ -246,38 +246,8 @@ export default function Reader({
   const [secondData, setSecondData] = useState<ReaderPage | null>(null);
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
-  /** 沉浸（无框）阅读：隐藏顶栏/进度条，鼠标一动才浮出来。默认开，记在本机。 */
+  /** 沉浸（无框）阅读：顶栏 / 底栏 / 进度条一律不占位、不自动冒头，只留角落一颗淡点还原。 */
   const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
-  const [chromeVisible, setChromeVisible] = useState(true);
-  const chromeTimerRef = useRef<number | null>(null);
-
-  /** 鼠标一动就把顶栏/进度条浮出来，停 2.2 秒再自动藏回去。 */
-  const revealChrome = useCallback(() => {
-    setChromeVisible(true);
-    if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
-    chromeTimerRef.current = window.setTimeout(() => {
-      setChromeVisible(false);
-      chromeTimerRef.current = null;
-    }, 2200);
-  }, []);
-
-  useEffect(() => {
-    if (!immersive) {
-      if (chromeTimerRef.current !== null) {
-        window.clearTimeout(chromeTimerRef.current);
-        chromeTimerRef.current = null;
-      }
-      setChromeVisible(true);
-      return;
-    }
-    revealChrome();
-    return () => {
-      if (chromeTimerRef.current !== null) {
-        window.clearTimeout(chromeTimerRef.current);
-        chromeTimerRef.current = null;
-      }
-    };
-  }, [immersive, revealChrome]);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
   /** 播放阅读模式（持久化）：开着的书播完自动翻页、翻完自动换下一本。 */
@@ -1268,14 +1238,10 @@ const archiveEpochRef = useRef(0);
 
   return (
     <div
-      className={`reader${immersive ? " is-immersive" : ""}${
-        immersive && chromeVisible ? " is-chrome-visible" : ""
-      }`}
+      className={`reader${immersive ? " is-immersive" : ""}`}
       role="dialog"
       aria-modal="true"
       aria-label={`阅读 ${card.title}`}
-      onPointerMove={immersive ? revealChrome : undefined}
-      onPointerDown={immersive ? revealChrome : undefined}
     >
       <header className="reader-head">
         <div className="reader-head-title">
@@ -1855,6 +1821,22 @@ const archiveEpochRef = useRef(0);
           </div>
         </div>
       </footer>
+
+      {immersive && (
+        // 角落还原点：视觉上是个几乎看不见的小圆点，热区 64×64，碰到才明显。
+        <button
+          type="button"
+          className="reader-corner-toggle"
+          onClick={(event) => {
+            event.stopPropagation();
+            setImmersive(false);
+          }}
+          title="显示工具栏 (F)"
+          aria-label="显示工具栏"
+        >
+          <span />
+        </button>
+      )}
     </div>
   );
 }
