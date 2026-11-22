@@ -6806,8 +6806,8 @@ body.is-splitting {
   min-height: 0;
   overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 10px;
   padding: 2px;
 }
 
@@ -6815,8 +6815,8 @@ body.is-splitting {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 3px;
-  padding: 0 0 8px;
+  gap: 0;
+  padding: 0;
   text-align: left;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border);
@@ -6864,8 +6864,9 @@ body.is-splitting {
 }
 
 .series-grid-label {
-  padding: 6px 10px 0;
-  font-size: 12px;
+  padding: 5px 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
   font-weight: 650;
   color: var(--accent-strong);
   overflow: hidden;
@@ -6874,8 +6875,8 @@ body.is-splitting {
 }
 
 .series-grid-title {
-  padding: 0 10px;
-  font-size: 11px;
+  padding: 1px 8px 0;
+  font-size: 10px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
