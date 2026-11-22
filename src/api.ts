@@ -303,6 +303,18 @@ export const api = {
   /** 老板键第一步：把主窗藏起来。呼回用全局热键 Ctrl+Shift+H。 */
   hideMainWindow: () => invoke<void>("hide_main_window"),
 
+  /** 当前阅读页解码后写入系统剪贴板（动图取第一帧）。 */
+  copyReaderPage: (archiveId: number, pageIndex: number) =>
+    invoke<void>("copy_reader_page", { archiveId, pageIndex }),
+
+  /** 在资源管理器中定位并选中画集文件。 */
+  revealInExplorer: (path: string) =>
+    invoke<void>("reveal_in_explorer", { path }),
+
+  /** 当前阅读页导出 PNG 并设为桌面壁纸。 */
+  setDesktopWallpaper: (archiveId: number, pageIndex: number) =>
+    invoke<void>("set_desktop_wallpaper", { archiveId, pageIndex }),
+
   // ---------- 合集（连载盒子） ----------
   listSeries: () => invoke<SeriesSummary[]>("list_series"),
   createSeries: (name: string, archiveIds: number[]) =>

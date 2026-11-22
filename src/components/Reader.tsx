@@ -8,6 +8,7 @@ import {
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
 import { api, readerPageUrl } from "../api";
+import ReaderMenu, { type ReaderMenuEntry } from "./ReaderMenu";
 import { usePersistentFlag } from "../layout";
 import type {
   AnimMeta,
@@ -280,6 +281,8 @@ export default function Reader({
   const [slideshow, setSlideshow] = useState(false);
   const [slideSeconds, setSlideSeconds] = useState(3);
   const [slidePaused, setSlidePaused] = useState(false);
+  /** 右键菜单：光标位置；null = 关闭。 */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
   /** 收藏到散图夹的弹层与目标区（null = 关闭）。 */
@@ -846,6 +849,26 @@ const archiveEpochRef = useRef(0);
     setSlideshow((value) => !value);
   }, []);
 
+  const copyCurrentPage = useCallback(() => {
+    void api
+      .copyReaderPage(card.id, page)
+      .then(() => onNotify("当前页已复制到剪贴板", "success"))
+      .catch((error) => onNotify(`复制失败：${String(error)}`, "error"));
+  }, [card.id, page, onNotify]);
+
+  const revealArchive = useCallback(() => {
+    void api
+      .revealInExplorer(card.filePath)
+      .catch((error) => onNotify(`定位失败：${String(error)}`, "error"));
+  }, [card.filePath, onNotify]);
+
+  const wallpaperCurrentPage = useCallback(() => {
+    void api
+      .setDesktopWallpaper(card.id, page)
+      .then(() => onNotify("已设为桌面壁纸", "success"))
+      .catch((error) => onNotify(`设置壁纸失败：${String(error)}`, "error"));
+  }, [card.id, page, onNotify]);
+
   const toggleSpread = useCallback(() => {
     setSpread((value) => !value);
   }, []);
@@ -985,6 +1008,28 @@ const archiveEpochRef = useRef(0);
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
+        return;
+      }
+
+      // Ctrl+C = 复制当前页；Ctrl+Enter = 资源管理器定位画集。
+      if (
+        event.ctrlKey &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "c"
+      ) {
+        event.preventDefault();
+        copyCurrentPage();
+        return;
+      }
+      if (
+        event.ctrlKey &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key === "Enter"
+      ) {
+        event.preventDefault();
+        revealArchive();
         return;
       }
 
@@ -1133,6 +1178,8 @@ const archiveEpochRef = useRef(0);
     onOpenDetail,
     immersive,
     setImmersive,
+    copyCurrentPage,
+    revealArchive,
   ]);
 
   useEffect(() => {
@@ -1369,12 +1416,62 @@ const archiveEpochRef = useRef(0);
       : undefined;
   };
 
+  // 右键菜单条目：经典看图器风格分组（翻页/缩放/视图/播放/图片操作/退出）。
+  const menuEntries: ReaderMenuEntry[] = [
+    { label: "上一页", hint: "←", onClick: () => { pausePlayback(); goPrev(); }, disabled: page <= 0 },
+    {
+      label: "下一页",
+      hint: "→",
+      onClick: () => { pausePlayback(); goNext(); },
+      disabled: (info?.pageCount ?? 0) > 0 && page + step >= (info?.pageCount ?? 0),
+    },
+    { label: "第一页", hint: "Home", onClick: () => { pausePlayback(); goTo(0); }, disabled: page <= 0 },
+    {
+      label: "最后一页",
+      hint: "End",
+      onClick: () => { pausePlayback(); goTo((info?.pageCount ?? 1) - 1); },
+      disabled: (info?.pageCount ?? 0) <= 0 || page >= (info?.pageCount ?? 1) - 1,
+    },
+    { label: "放大", hint: "+", dividerBefore: true, onClick: () => { pausePlayback(); zoomIn(); } },
+    { label: "缩小", hint: "-", onClick: () => { pausePlayback(); zoomOut(); } },
+    { label: "适应页面", hint: "0", onClick: () => setZoomMode("fit") },
+    { label: "适应宽度", onClick: () => setZoomMode("width") },
+    { label: "原始大小", onClick: () => { setZoomMode("actual"); setZoom(1); } },
+    {
+      label: playback ? "关闭 GIF 播放" : "GIF 播放",
+      hint: "P",
+      dividerBefore: true,
+      onClick: togglePlayback,
+    },
+    {
+      label: slideshow ? "关闭幻灯播放" : `幻灯播放（每 ${slideSeconds}s）`,
+      hint: "Ctrl+1~9",
+      onClick: toggleSlideshow,
+    },
+    { label: spread ? "关闭双页" : "双页", hint: "D", dividerBefore: true, onClick: toggleSpread },
+    {
+      label: immersive ? "退出沉浸模式" : "沉浸模式",
+      hint: "F",
+      onClick: () => setImmersive(!immersive),
+    },
+    { label: currentBookmark ? "移除书签" : "添加书签", hint: "B", onClick: () => void toggleBookmark() },
+    { label: "书签列表", hint: "L", onClick: () => setBookmarksOpen(true) },
+    { label: "复制当前页到剪贴板", hint: "Ctrl+C", dividerBefore: true, onClick: copyCurrentPage },
+    { label: "在资源管理器中显示", hint: "Ctrl+Enter", onClick: revealArchive },
+    { label: "设为桌面壁纸", onClick: wallpaperCurrentPage },
+    { label: "退出阅读", hint: "Esc", dividerBefore: true, onClick: onClose },
+  ];
+
   return (
     <div
       className={`reader${immersive ? " is-immersive" : ""}`}
       role="dialog"
       aria-modal="true"
       aria-label={`阅读 ${card.title}`}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
     >
       <header className="reader-head">
         <div className="reader-head-title">
@@ -2000,6 +2097,15 @@ const archiveEpochRef = useRef(0);
         >
           <span />
         </button>
+      )}
+
+      {menu && (
+        <ReaderMenu
+          x={menu.x}
+          y={menu.y}
+          entries={menuEntries}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   );

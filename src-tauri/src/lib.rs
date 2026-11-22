@@ -1358,6 +1358,84 @@ fn set_window_decorations(window: tauri::WebviewWindow, decorated: bool) -> Resu
     Ok(())
 }
 
+/// 把阅读器当前页解码成 RGBA 写进系统剪贴板（管理员 11-22 右键菜单需求）。
+/// 页面在压缩包里，先取字节再解码；动图取第一帧。
+#[tauri::command]
+fn copy_reader_page(
+    app: tauri::AppHandle,
+    archive_id: i64,
+    page_index: i64,
+) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let path = reader::remembered_archive(archive_id)
+        .ok_or_else(|| "找不到画集文件（刚启动的话先翻一页再试）".to_string())?;
+    let (_name, bytes) = reader::read_page_bytes(&path, page_index)?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("解码当前页失败: {e}"))?;
+    let rgba = img.to_rgba8();
+    let clipboard_image = tauri::image::Image::new(rgba.as_raw(), rgba.width(), rgba.height());
+    app.clipboard()
+        .write_image(&clipboard_image)
+        .map_err(|e| format!("写入剪贴板失败: {e}"))
+}
+
+/// 在资源管理器里定位画集文件（选中它）。
+#[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    if !std::path::Path::new(&path).exists() {
+        return Err("画集文件不存在（可能已被移动或删除）".to_string());
+    }
+    // explorer 的 /select, 参数逗号后直接跟路径，整段当一个 raw arg 传，
+    // 带空格的路径用引号包住；explorer 退出码 1 是常态，不当作失败。
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{}\"", path))
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|e| format!("打开资源管理器失败: {e}"))?;
+    Ok(())
+}
+
+/// 当前页导出成 PNG 并设为桌面壁纸（SPI_SETDESKWALLPAPER，fWinIni=3 立即生效）。
+/// 页面在压缩包里，先解出 PNG 落到库目录，再把路径交给系统。
+#[tauri::command]
+fn set_desktop_wallpaper(
+    app: tauri::AppHandle,
+    archive_id: i64,
+    page_index: i64,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let path = reader::remembered_archive(archive_id)
+        .ok_or_else(|| "找不到画集文件（刚启动的话先翻一页再试）".to_string())?;
+    let (_name, bytes) = reader::read_page_bytes(&path, page_index)?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("解码当前页失败: {e}"))?;
+
+    // PNG 落到库目录的 .gallery 下（和封面缓存一个屋檐，不污染画廊）。
+    let library_root = with_library(&app.state::<AppState>(), |library| {
+        Ok(library.root.clone())
+    })?;
+    let wallpaper_dir = library_root.join(".gallery").join("wallpaper");
+    std::fs::create_dir_all(&wallpaper_dir).map_err(|e| format!("建壁纸目录失败: {e}"))?;
+    let png_path = wallpaper_dir.join("wallpaper.png");
+    img.save_with_format(&png_path, image::ImageFormat::Png)
+        .map_err(|e| format!("导出 PNG 失败: {e}"))?;
+
+    let script = format!(
+        "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern int SystemParametersInfo(int uAction, int uParam, string lpParam, int fWinIni);' -Name W -Namespace N; [N.W]::SystemParametersInfo(20, 0, '{}', 3)",
+        png_path.to_string_lossy().replace('\'', "''")
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000)
+        .status()
+        .map_err(|e| format!("启动系统脚本失败: {e}"))?;
+    if !status.success() {
+        return Err("设置壁纸失败（系统脚本非零退出）".to_string());
+    }
+    Ok(())
+}
+
 /// 老板键第一步：把主窗整个藏起来（恢复走全局热键 Ctrl+Shift+H）。
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -1615,6 +1693,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // 老板键呼回：Ctrl+Shift+H 全局切换主窗显隐。窗口藏起来之后应用内
         // 按键收不到，必须用系统级热键才能唤回。
         .plugin(
@@ -1689,6 +1768,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .invoke_handler(tauri::generate_handler![            get_library_state,
             set_window_decorations,
             hide_main_window,
+            copy_reader_page,
+            reveal_in_explorer,
+            set_desktop_wallpaper,
             list_series,
             create_series,
             update_series,
