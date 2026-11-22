@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::translate;
 
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 
 /// 待看目录默认放几本。
 pub const DEFAULT_QUEUE_SIZE: i64 = 10;
@@ -529,6 +529,28 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_image_records_archive
             ON image_records(archive_id);
 
+        -- v11：合集（连载盒子）。成员只在 series_items 里记关系，不复制文件；
+        -- 软删合集（deleted_at）即「拆散」，成员自动回到主网格。
+        CREATE TABLE IF NOT EXISTS series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            note TEXT,
+            cover_archive_id INTEGER REFERENCES archives(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL,
+            deleted_at INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS series_items (
+            series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+            archive_id INTEGER NOT NULL REFERENCES archives(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            label TEXT,
+            PRIMARY KEY (series_id, archive_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_series_items_archive
+            ON series_items(archive_id);
+
         CREATE TABLE IF NOT EXISTS tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -801,6 +823,28 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
             ON image_records(archive_id);"
     )
     .map_err(|e| format!("创建散图收藏夹表失败: {e}"))?;
+
+    // v11：合集（连载盒子）。与 create_schema 同一段 SQL，重复执行安全。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            note TEXT,
+            cover_archive_id INTEGER REFERENCES archives(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL,
+            deleted_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS series_items (
+            series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+            archive_id INTEGER NOT NULL REFERENCES archives(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            label TEXT,
+            PRIMARY KEY (series_id, archive_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_series_items_archive
+            ON series_items(archive_id);",
+    )
+    .map_err(|e| format!("创建合集表失败: {e}"))?;
 
     conn.execute(
         "UPDATE tags SET original_name = name

@@ -16,6 +16,7 @@ mod paths;
 pub mod queue;
 mod reader;
 mod release;
+pub mod series;
 pub mod translate;
 pub mod userscripts;
 
@@ -29,8 +30,8 @@ use tauri::{AppHandle, Manager, State};
 use models::{
     ArchivePage, ArchiveQuery, BulkTagReport, Collection, ImportOptions, ImportReport, LibraryState,
     Queue, QueueFillOptions, QueueFillReport, ReaderBookmark, ReaderInfo, ReaderPage, ReaderThumb,
-    ScanReport, StageItem, StageReport, Tag, TagCategory, TagDraft, TagGraph, TagTranslationInput,
-    TrashedArchive,
+    ScanReport, SeriesSummary, StageItem, StageReport, Tag, TagCategory, TagDraft, TagGraph,
+    TagTranslationInput, TrashedArchive,
 };
 
 /// 一次导入最多接受多少个入口路径，避免单次 IPC 传入超大数组。
@@ -1356,6 +1357,133 @@ fn set_window_decorations(window: tauri::WebviewWindow, decorated: bool) -> Resu
     Ok(())
 }
 
+// ---------- 合集（连载盒子） ----------
+
+#[tauri::command]
+async fn list_series(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<SeriesSummary>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let covers_dir = paths::covers_dir(&app, &library.library_id)?;
+            series::list_series(&library.conn, &covers_dir)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn create_series(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    archive_ids: Vec<i64>,
+) -> Result<i64, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let id = series::create_series(&library.conn, &name, &archive_ids)?;
+            let _ = paths::covers_dir(&app, &library.library_id);
+            Ok(id)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn update_series(
+    state: State<'_, AppState>,
+    series_id: i64,
+    name: String,
+    note: Option<String>,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            series::update_series(&library.conn, series_id, &name, note.as_deref())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn dissolve_series(state: State<'_, AppState>, series_id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| series::dissolve_series(&library.conn, series_id))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn series_set_cover(
+    state: State<'_, AppState>,
+    series_id: i64,
+    archive_id: Option<i64>,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            series::set_cover(&library.conn, series_id, archive_id)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn series_reorder(
+    state: State<'_, AppState>,
+    series_id: i64,
+    archive_ids: Vec<i64>,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            series::reorder(&library.conn, series_id, &archive_ids)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn series_set_label(
+    state: State<'_, AppState>,
+    series_id: i64,
+    archive_id: i64,
+    label: Option<String>,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            series::set_label(&library.conn, series_id, archive_id, label.as_deref())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn series_add_archives(
+    state: State<'_, AppState>,
+    series_id: i64,
+    archive_ids: Vec<i64>,
+) -> Result<usize, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            series::add_archives(&library.conn, series_id, &archive_ids)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn series_remove_archive(
+    state: State<'_, AppState>,
+    series_id: i64,
+    archive_id: i64,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            series::remove_archive(&library.conn, series_id, archive_id)
+        })
+    })
+    .await
+}
+
 /// 取消已经排好的发布（还没退出时可用）。
 #[tauri::command]
 fn cancel_release(app: AppHandle) -> Result<(), String> {
@@ -1443,6 +1571,15 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         })
         .invoke_handler(tauri::generate_handler![            get_library_state,
             set_window_decorations,
+            list_series,
+            create_series,
+            update_series,
+            dissolve_series,
+            series_set_cover,
+            series_reorder,
+            series_set_label,
+            series_add_archives,
+            series_remove_archive,
             open_library,
             import_paths,
             stage_import_paths,

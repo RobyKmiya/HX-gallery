@@ -431,6 +431,19 @@ pub fn query_archives(
         ));
     }
 
+    if let Some(ids) = query.archive_ids.as_ref() {
+        let list = ids
+            .iter()
+            .filter(|id| **id > 0)
+            .take(MAX_TAG_FILTERS)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !list.is_empty() {
+            conditions.push(format!("a.id IN ({list})"));
+        }
+    }
+
     let mut tag_ids: Vec<i64> = Vec::new();
     if let Some(ids) = query.tag_ids.as_ref() {
         for id in ids {
@@ -443,6 +456,32 @@ pub fn query_archives(
                 }
             }
         }
+    }
+
+    // 合集（连载盒子）只在「纯浏览」时接管成员：把成员从网格拿掉，改由合集卡代表。
+    // 一旦进入搜索 / 标签 / 收藏夹 / 待看 / 筛选 / 指定 id，就按普通画集显示——
+    // 否则筛出来一片空白，用户会以为东西丢了。
+    let plain_browse = query.collection_id.is_none()
+        && query.queue_id.is_none()
+        && query.archive_ids.is_none()
+        && tag_ids.is_empty()
+        && query.rating_buckets.as_ref().map_or(true, |v| v.is_empty())
+        && query.read_statuses.as_ref().map_or(true, |v| v.is_empty())
+        && query.missing_only != Some(true)
+        && query.group.is_none()
+        && query
+            .search
+            .as_ref()
+            .map_or(true, |value| value.trim().is_empty());
+    if plain_browse {
+        conditions.push(
+            "NOT EXISTS (
+                SELECT 1 FROM series_items si
+                JOIN series s ON s.id = si.series_id
+                WHERE si.archive_id = a.id AND s.deleted_at IS NULL
+            )"
+            .to_string(),
+        );
     }
 
     if !tag_ids.is_empty() {
@@ -887,11 +926,18 @@ pub fn query_archives(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("读取画集行失败: {error}"))?;
 
+    let series = if plain_browse && page == 1 {
+        Some(crate::series::list_series(connection, covers_dir)?)
+    } else {
+        None
+    };
+
     Ok(ArchivePage {
         items,
         total,
         page,
         page_size,
         groups,
+        series,
     })
 }

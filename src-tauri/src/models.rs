@@ -71,6 +71,35 @@ pub struct ArchivePage {
     pub page_size: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<ArchiveGroup>>,
+    /// 合集卡：只在「纯浏览」的第 1 页返回，前端置于网格最前。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<Vec<SeriesSummary>>,
+}
+
+/// 合集里的一本：集数标签、封面、页数都随成员走。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesItem {
+    pub archive_id: i64,
+    pub position: i64,
+    pub label: Option<String>,
+    pub title: String,
+    pub cover_path: Option<String>,
+    pub page_count: i64,
+    pub missing: bool,
+}
+
+/// 合集（连载盒子）：挂在多本画集之上的一层分组，不持有文件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesSummary {
+    pub id: i64,
+    pub name: String,
+    pub note: Option<String>,
+    /// 指定封面用哪一本；None 表示按顺序取第一本。
+    pub cover_archive_id: Option<i64>,
+    pub item_count: i64,
+    pub items: Vec<SeriesItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +171,8 @@ pub struct ArchiveQuery {
     pub missing_only: Option<bool>,
     pub search: Option<String>,
     pub group: Option<String>,
+    /// 只取这几本（合集详情按 id 取单本、深链等场景）。
+    pub archive_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

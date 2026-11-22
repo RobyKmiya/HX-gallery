@@ -20,6 +20,7 @@ import type {
   ReaderThumb,
   ReleaseState,
   ScanReport,
+  SeriesSummary,
   StageReport,
   Tag,
   TagCategory,
@@ -298,6 +299,25 @@ export const api = {
   /** 沉浸阅读：连系统标题栏一起收掉（false = 无边框），退出阅读时记得还原。 */
   setWindowDecorations: (decorated: boolean) =>
     invoke<void>("set_window_decorations", { decorated }),
+
+  // ---------- 合集（连载盒子） ----------
+  listSeries: () => invoke<SeriesSummary[]>("list_series"),
+  createSeries: (name: string, archiveIds: number[]) =>
+    invoke<number>("create_series", { name, archiveIds }),
+  updateSeries: (seriesId: number, name: string, note: string | null) =>
+    invoke<void>("update_series", { seriesId, name, note }),
+  dissolveSeries: (seriesId: number) =>
+    invoke<void>("dissolve_series", { seriesId }),
+  seriesSetCover: (seriesId: number, archiveId: number | null) =>
+    invoke<void>("series_set_cover", { seriesId, archiveId }),
+  seriesReorder: (seriesId: number, archiveIds: number[]) =>
+    invoke<void>("series_reorder", { seriesId, archiveIds }),
+  seriesSetLabel: (seriesId: number, archiveId: number, label: string | null) =>
+    invoke<void>("series_set_label", { seriesId, archiveId, label }),
+  seriesAddArchives: (seriesId: number, archiveIds: number[]) =>
+    invoke<number>("series_add_archives", { seriesId, archiveIds }),
+  seriesRemoveArchive: (seriesId: number, archiveId: number) =>
+    invoke<void>("series_remove_archive", { seriesId, archiveId }),
 
   saveReleaseSettings: (
     sourceDir: string | null,

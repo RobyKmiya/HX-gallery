@@ -25,6 +25,7 @@ import type {
   LibraryState,
   Queue,
   ReadStatus,
+  SeriesSummary,
   SortDirection,
   SortKey,
   Tag,
@@ -42,6 +43,8 @@ import ImportDialog, {
 import ImportResultDialog from "./ImportResultDialog";
 import LoosePanel from "./LoosePanel";
 import QueuePanel from "./QueuePanel";
+import SeriesCard from "./SeriesCard";
+import SeriesDrawer from "./SeriesDrawer";
 import Reader from "./Reader";
 import Splitter from "./Splitter";
 import ReleasePanel from "./ReleasePanel";
@@ -219,6 +222,11 @@ export default function LibraryView({
   onSwitchLibrary,
 }: LibraryViewProps) {
   const [items, setItems] = useState<ArchiveCardData[]>([]);
+  /** 合集卡：只在纯浏览第 1 页有值，其余情况为空数组。 */
+  const [seriesList, setSeriesList] = useState<SeriesSummary[]>([]);
+  const [openSeries, setOpenSeries] = useState<SeriesSummary | null>(null);
+  const [seriesCreateOpen, setSeriesCreateOpen] = useState(false);
+  const [seriesBusy, setSeriesBusy] = useState(false);
   const [warmCovers, setWarmCovers] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -820,6 +828,7 @@ export default function LibraryView({
           : null,
       );
       setItems(result.items);
+      setSeriesList(result.series ?? []);
       setTotal(result.total);
       setPage(targetPage);
       refreshWarmCovers(targetPage);
@@ -1329,6 +1338,27 @@ export default function LibraryView({
     setBatchQueueId("");
     setBatchDeleteConfirm(false);
   }, []);
+
+  /** 把当前多选的画集合成一个合集：主网格从此只留一张轮换封面的卡。 */
+  const createSeriesFromSelection = useCallback(
+    async (name: string) => {
+      if (selectedIds.length < 2) return;
+      setSeriesBusy(true);
+      try {
+        await api.createSeries(name, selectedIds);
+        notify(`已合成合集「${name}」`, "success");
+        setSeriesCreateOpen(false);
+        exitSelection();
+        setSeriesList(await api.listSeries());
+        void loadPage(1, true, true);
+      } catch (error) {
+        notify(`合成合集失败：${String(error)}`, "error");
+      } finally {
+        setSeriesBusy(false);
+      }
+    },
+    [selectedIds, notify, exitSelection, loadPage],
+  );
 
   // 多选模式一开就把待看目录拉过来：批量「加入待看」的下拉要用。
   const refreshQueues = useCallback(async () => {
@@ -2977,6 +3007,23 @@ export default function LibraryView({
             </div>
           ) : (
             <>
+              {seriesList.length > 0 && page === 1 && !selectionMode && (
+                <section className="series-strip" aria-label="合集">
+                  <header className="series-strip-head">
+                    <span className="eyebrow">SERIES</span>
+                    <strong>合集 · {seriesList.length}</strong>
+                  </header>
+                  <div className="series-strip-grid">
+                    {seriesList.map((entry) => (
+                      <SeriesCard
+                        key={entry.id}
+                        series={entry}
+                        onOpen={setOpenSeries}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
               <div className="archive-grid">
                 {groupedItems.map((group, groupIndex) => (
                   <Fragment
@@ -3199,6 +3246,16 @@ export default function LibraryView({
                   </button>
                   <button
                     type="button"
+                    className="btn btn-ghost btn-compact"
+                    disabled={selectedIds.length < 2 || batchBusy}
+                    onClick={() => setSeriesCreateOpen(true)}
+                    title="把选中的画集合成一个合集：主网格只留一张轮换封面的卡，详情里可调顺序与集数"
+                  >
+                    <BookIcon width={14} height={14} />
+                    合成合集
+                  </button>
+                  <button
+                    type="button"
                     className={`btn btn-compact${
                       batchDeleteConfirm ? " btn-danger" : " btn-quiet"
                     }`}
@@ -3321,6 +3378,60 @@ export default function LibraryView({
           onNoteChange={updateNote}
           onTagsChanged={loadTags}
           onDelete={removeArchive}
+        />
+      )}
+
+      {seriesCreateOpen && (
+        <CollectionNameDialog
+          title="新建合集"
+          noun="合集"
+          placeholder="合集名，例如「入り浸りギャル」"
+          presets={[]}
+          busy={seriesBusy}
+          existingNames={seriesList.map((entry) => entry.name)}
+          onCreate={(name) => void createSeriesFromSelection(name)}
+          onClose={() => setSeriesCreateOpen(false)}
+        />
+      )}
+
+      {openSeries && (
+        <SeriesDrawer
+          series={openSeries}
+          onClose={() => setOpenSeries(null)}
+          onChanged={() => {
+            void (async () => {
+              try {
+                const list = await api.listSeries();
+                setSeriesList(list);
+                setOpenSeries(
+                  list.find((entry) => entry.id === openSeries.id) ?? null,
+                );
+              } catch {
+                // 拉不到就保持原样，下次操作会再试
+              }
+              void loadPage(page, true, true);
+            })();
+          }}
+          onReadArchive={(archiveId) => {
+            void (async () => {
+              try {
+                const result = await api.queryArchives({
+                  archiveIds: [archiveId],
+                  pageSize: 12,
+                });
+                const card = result.items[0];
+                if (!card) {
+                  notify("这一话已经不在库里了", "error");
+                  return;
+                }
+                setReaderCard(card);
+                setOpenSeries(null);
+              } catch (error) {
+                notify(`打开失败：${String(error)}`, "error");
+              }
+            })();
+          }}
+          onNotify={notify}
         />
       )}
 

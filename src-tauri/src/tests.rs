@@ -2100,6 +2100,76 @@ fn chinese_fixed_tags_unify_to_canonical_english() {
     );
 }
 
+/// 合集：建好后成员从主网格消失、由合集卡代表；拆散后成员回到网格。
+#[test]
+fn series_hides_members_and_dissolves_back() {
+    let fixture = Fixture::new();
+    let a = fixture.source.join("第一话.cbz");
+    let b = fixture.source.join("第二话.cbz");
+    let c = fixture.source.join("番外.cbz");
+    write_zip(&a, &["001.png", "002.png"], 12);
+    write_zip(&b, &["001.png", "002.png", "003.png"], 22);
+    write_zip(&c, &["001.png"], 32);
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![a, b, c],
+        ImportOptions::default(),
+        |_| {},
+    );
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 3);
+    assert!(page.series.as_ref().map_or(true, |list| list.is_empty()));
+
+    let ids: Vec<i64> = page.items.iter().map(|item| item.id).collect();
+    let series_id = crate::series::create_series(&context.conn, "测试连载", &[ids[0], ids[1]])
+        .expect("建合集应成功");
+
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 1, "成员应从主网格拿掉，只剩未入合集的那本");
+    let series_list = page.series.expect("第 1 页应带回合集");
+    assert_eq!(series_list.len(), 1);
+    assert_eq!(series_list[0].item_count, 2);
+    assert_eq!(series_list[0].items[0].archive_id, ids[0], "顺序按入合集时给的来");
+
+    // 改集数标签 + 调序
+    crate::series::set_label(&context.conn, series_id, ids[0], Some("第一话")).unwrap();
+    crate::series::reorder(&context.conn, series_id, &[ids[1], ids[0]]).unwrap();
+    let items = crate::series::list_items(&context.conn, &fixture.covers, series_id).unwrap();
+    assert_eq!(items[0].archive_id, ids[1]);
+    assert_eq!(items[1].label.as_deref(), Some("第一话"));
+
+    // 同一本不能进第二个合集
+    let again = crate::series::create_series(&context.conn, "另一个", &[ids[0]]);
+    assert!(again.is_err(), "已在合集里的画集应被拒绝");
+
+    // 拆散后成员回到网格
+    crate::series::dissolve_series(&context.conn, series_id).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 3);
+    assert!(page.series.as_ref().map_or(true, |list| list.is_empty()));
+}
+
 /// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。#[test]
 fn zero_weight_tag_excludes_archive_entirely() {
     let fixture = Fixture::new();

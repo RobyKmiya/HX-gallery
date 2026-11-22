@@ -102,6 +102,29 @@ export interface ArchivePage {
   page: number;
   pageSize: number;
   groups?: ArchiveGroupData[];
+  /** 合集卡：只在「纯浏览」的第 1 页返回。 */
+  series?: SeriesSummary[];
+}
+
+/** 合集里的一本。 */
+export interface SeriesItem {
+  archiveId: number;
+  position: number;
+  label: string | null;
+  title: string;
+  coverPath: string | null;
+  pageCount: number;
+  missing: boolean;
+}
+
+/** 合集（连载盒子）：只记关系，不复制文件。 */
+export interface SeriesSummary {
+  id: number;
+  name: string;
+  note: string | null;
+  coverArchiveId: number | null;
+  itemCount: number;
+  items: SeriesItem[];
 }
 
 export interface Tag {
@@ -301,6 +324,8 @@ export interface ArchiveQuery {
   missingOnly?: boolean;
   search?: string;
   group?: GroupMode;
+  /** 只取这几本（合集详情里按 id 取单本用）。 */
+  archiveIds?: number[];
 }
 
 export interface TagTranslationInput {

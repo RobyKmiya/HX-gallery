@@ -9,6 +9,11 @@ interface CollectionNameDialogProps {
   existingNames: string[];
   onCreate: (name: string) => void;
   onClose: () => void;
+  /** 常用名快捷片；合集这类不用预设就传空数组。 */
+  presets?: string[];
+  placeholder?: string;
+  /** 重名提示里的名词，默认「收藏夹」。 */
+  noun?: string;
 }
 
 export default function CollectionNameDialog({
@@ -17,6 +22,9 @@ export default function CollectionNameDialog({
   existingNames,
   onCreate,
   onClose,
+  presets = COLLECTION_NAME_PRESETS,
+  placeholder = "收藏夹名称",
+  noun = "收藏夹",
 }: CollectionNameDialogProps) {
   const [name, setName] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -75,14 +83,15 @@ export default function CollectionNameDialog({
           ref={inputRef}
           value={name}
           maxLength={24}
-          placeholder="收藏夹名称"
+          placeholder={placeholder}
           disabled={busy}
           onChange={(event) => setName(event.target.value)}
         />
 
+        {presets.length > 0 && (
         <div className="name-dialog-presets">
           <span>常用</span>
-          {COLLECTION_NAME_PRESETS.map((preset) => (
+          {presets.map((preset) => (
             <button
               key={preset}
               type="button"
@@ -94,10 +103,11 @@ export default function CollectionNameDialog({
             </button>
           ))}
         </div>
+        )}
 
         {duplicate && !busy && (
           <p className="name-dialog-error" role="alert">
-            已存在同名收藏夹，请换一个名称。
+            已存在同名{noun}，请换一个名称。
           </p>
         )}
 
