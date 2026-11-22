@@ -383,6 +383,7 @@ fn run(cli: Cli) -> Result<Value, String> {
                     add_to_collection: collection_id,
                     preserve_structure: None,
                     tags: Vec::new(),
+                    path_tags: Vec::new(),
                 },
                 |_| {},
             );

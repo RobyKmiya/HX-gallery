@@ -33,9 +33,14 @@ import type { ToastKind } from "./Toast";
 /** 点「导入」时交给上层去执行的内容。 */
 export interface ImportSubmit {
   paths: string[];
+  /** 全局标签：每行没单独填时用它。 */
   tags: TagDraft[];
+  /** 每行单独填的标签（只带非空的行）。 */
+  pathTags: { path: string; tags: TagDraft[] }[];
   collectionId: number | null;
   preserveStructure: boolean;
+  /** 导入完成后把这批新画集合成一个合集（名字）；null 表示不合成。 */
+  seriesName: string | null;
 }
 
 export interface ImportDialogHandle {
@@ -83,6 +88,10 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
     const [tagText, setTagText] = useState("");
     const [collectionId, setCollectionId] = useState<number | "">("");
     const [preserveStructure, setPreserveStructure] = useState(false);
+    /** 每行单独的标签文本（按 path 存）。空字符串＝这行用全局标签。 */
+    const [rowTagText, setRowTagText] = useState<Record<string, string>>({});
+    const [makeSeries, setMakeSeries] = useState(false);
+    const [seriesName, setSeriesName] = useState("");
 
     const stage = useCallback(
       async (paths: string[]) => {
@@ -163,6 +172,14 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
       0,
     );
 
+    // 类型识别：压缩包走画廊，图片走散图，其余原样提示（阶段报告里会有 issue）。
+    const ARCHIVE_EXTS = new Set(["zip", "cbz", "rar", "7z", "cbr"]);
+    const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"]);
+    const extOf = (item: StageItem) => item.extension.toLowerCase().replace(/^[.]/, "");
+    const archives = importable.filter((item) => ARCHIVE_EXTS.has(extOf(item)));
+    const images = importable.filter((item) => IMAGE_EXTS.has(extOf(item)));
+    const others = importable.length - archives.length - images.length;
+
     const busy = staging || importing;
     const percent =
       progress && progress.total > 0
@@ -171,15 +188,43 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
 
     const removeItem = useCallback((path: string) => {
       setItems((previous) => previous.filter((item) => item.path !== path));
+      // 行标签也一并清掉，避免换一批同名路径时残留上一次的输入。
+      setRowTagText((previous) => {
+        if (!(path in previous)) return previous;
+        const next = { ...previous };
+        delete next[path];
+        return next;
+      });
     }, []);
 
     const submit = useCallback(() => {
       if (busy || importable.length === 0) return;
+      // 每行单独填的标签：只把填了内容的行传上去，空行由后端回落到全局标签。
+      const pathTags = importable
+        .map((item) => {
+          const text = (rowTagText[item.path] ?? "").trim();
+          if (!text) return null;
+          const rowParsed = parseTagInput(text);
+          return {
+            path: item.path,
+            tags: rowParsed.tags.map((tag) => ({
+              name: tag.name,
+              category: tag.category,
+            })),
+          };
+        })
+        .filter((entry): entry is { path: string; tags: TagDraft[] } => entry !== null);
+
       onSubmit({
         paths: importable.map((item) => item.path),
         tags: draftTags,
+        pathTags,
         collectionId: collectionId === "" ? null : collectionId,
         preserveStructure,
+        seriesName:
+          makeSeries && archives.length >= 2
+            ? seriesName.trim() || archives[0].stem
+            : null,
       });
     }, [
       busy,
@@ -188,6 +233,10 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
       draftTags,
       collectionId,
       preserveStructure,
+      rowTagText,
+      makeSeries,
+      seriesName,
+      archives,
     ]);
 
     const requestClose = useCallback(() => {
@@ -302,6 +351,24 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
                   <small>画集会复制进库目录，源文件保持不动。</small>
                 </button>
               ) : (
+                <>
+                  <div className="import-type-summary">
+                    {archives.length > 0 && (
+                      <span className="import-type-chip">
+                        压缩包 {archives.length} · 画廊
+                      </span>
+                    )}
+                    {images.length > 0 && (
+                      <span className="import-type-chip is-image">
+                        图片 {images.length} · 散图（走散图收藏夹）
+                      </span>
+                    )}
+                    {others > 0 && (
+                      <span className="import-type-chip is-other">
+                        其他 {others} · 可能无法导入
+                      </span>
+                    )}
+                  </div>
                 <ul className="import-file-list">
                   {items.map((item) => (
                     <li
@@ -338,6 +405,20 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
                             </span>
                           )}
                         </div>
+                        {!item.issue && (
+                          <input
+                            className="import-row-tags"
+                            value={rowTagText[item.path] ?? ""}
+                            placeholder="这本单独的标签（留空＝用右侧那套）"
+                            disabled={busy}
+                            onChange={(event) =>
+                              setRowTagText((previous) => ({
+                                ...previous,
+                                [item.path]: event.target.value,
+                              }))
+                            }
+                          />
+                        )}
                       </div>
                       <button
                         type="button"
@@ -351,6 +432,7 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
                     </li>
                   ))}
                 </ul>
+                </>
               )}
 
               {stageErrors.length > 0 && (
@@ -465,6 +547,30 @@ const ImportDialog = forwardRef<ImportDialogHandle, ImportDialogProps>(
           </div>
 
           <footer className="import-dialog-foot">
+            {!importing && archives.length >= 2 && (
+              <div className="import-series-box">
+                <label className="import-series-toggle">
+                  <input
+                    type="checkbox"
+                    checked={makeSeries}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setMakeSeries(event.target.checked)
+                    }
+                  />
+                  导入后按上面的顺序合成合集（主网格只留一张轮换封面的卡）
+                </label>
+                {makeSeries && (
+                  <input
+                    className="import-series-name"
+                    value={seriesName}
+                    placeholder={`合集名（默认「${archives[0].stem}」）`}
+                    disabled={busy}
+                    onChange={(event) => setSeriesName(event.target.value)}
+                  />
+                )}
+              </div>
+            )}
             {importing ? (
               <div className="import-progress">
                 <div className="import-progress-text">

@@ -1092,11 +1092,25 @@ export default function LibraryView({
           addToCollection: payload.collectionId ?? undefined,
           preserveStructure: payload.preserveStructure,
           tags: payload.tags,
+          pathTags: payload.pathTags,
         });
         setImportOpen(false);
         setImportSeedPaths([]);
         notify(report.message, report.failed > 0 ? "error" : "success");
         if (report.errors.length > 0) setImportReport(report);
+        // 导入面板里勾了「合成合集」：把这次真正入库的画集按顺序合成。
+        const importedIds = report.archiveIds ?? [];
+        if (payload.seriesName && importedIds.length >= 2) {
+          try {
+            await api.createSeries(payload.seriesName, importedIds);
+            notify(
+              `已合成合集「${payload.seriesName}」（${importedIds.length} 本）`,
+              "success",
+            );
+          } catch (error) {
+            notify(`导入成功，但合成合集失败：${String(error)}`, "error");
+          }
+        }
         await onLibraryChanged();
         await loadCollections();
         await loadTags();

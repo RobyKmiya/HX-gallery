@@ -339,6 +339,8 @@ export interface ImportOptions {
   preserveStructure?: boolean;
   /** 导入成功后挂到每一本新画集上的标签。 */
   tags?: TagDraft[];
+  /** 按文件单独指定的标签：命中的文件用自己这份，否则回落到 `tags`。 */
+  pathTags?: { path: string; tags: TagDraft[] }[];
 }
 
 /** 导入面板里的一行：拖进来之后、点确认之前的状态。 */
@@ -387,6 +389,8 @@ export interface ImportReport {
   failed: number;
   errors: ImportErrorItem[];
   message: string;
+  /** 本次真正入库的画集 id（按导入顺序），供「导入后合成合集」用。 */
+  archiveIds?: number[];
 }
 
 /** D2 M1：一次受控 WebView 抓取并入库的结果。 */

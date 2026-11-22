@@ -130,12 +130,14 @@ where
                 message: error.to_string(),
             }],
             message: format!("无法创建导入临时目录：{error}"),
+            archive_ids: Vec::new(),
         };
     }
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
     let mut failed = collected_failures;
+    let mut archive_ids: Vec<i64> = Vec::new();
     let preserve_structure = options.preserve_structure.unwrap_or(false);
 
     emit_progress(
@@ -261,8 +263,9 @@ where
                 }
                 // 重复的那本虽然不复制，但用户在导入面板里填的标签是有意义的：
                 // 直接丢掉会让人以为「填了标签却没生效」。这里补到已有记录上。
-                if !options.tags.is_empty() {
-                    match db::add_tags_bulk(connection, existing_id, &options.tags) {
+                let path_tags = options.tags_for(&candidate.source);
+                if !path_tags.is_empty() {
+                    match db::add_tags_bulk(connection, existing_id, path_tags) {
                         Ok(report) => {
                             for failure in report.failed {
                                 errors.push(ImportErrorItem {
@@ -416,9 +419,10 @@ where
             connection,
             &insert,
             options.add_to_collection,
-            &options.tags,
+            options.tags_for(&candidate.source),
         ) {
-            Ok((_, tag_report)) => {
+            Ok((new_id, tag_report)) => {
+                archive_ids.push(new_id);
                 // 单条标签失败不影响这本画集的导入，但必须如实报出来。
                 for failure in tag_report.failed {
                     errors.push(ImportErrorItem {
@@ -476,6 +480,7 @@ where
         failed,
         errors,
         message,
+        archive_ids,
     }
 }
 
@@ -489,6 +494,7 @@ fn import_failure(root: &Path, error: String) -> ImportReport {
             message: error.clone(),
         }],
         message: format!("无法打开库：{error}"),
+        archive_ids: Vec::new(),
     }
 }
 

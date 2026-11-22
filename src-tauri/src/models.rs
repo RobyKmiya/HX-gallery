@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,6 +186,37 @@ pub struct ImportOptions {
     /// 语义：分类不存在就建、已有分类不覆盖。
     #[serde(default)]
     pub tags: Vec<TagDraft>,
+    /// 按文件单独指定的标签。命中的文件用自己这份（非空时），否则回落到 `tags`。
+    /// 一次导入多个压缩包、每本标签不同时用这个。
+    #[serde(default)]
+    pub path_tags: Vec<PathTags>,
+}
+
+/// 「这个文件挂这些标签」。路径按前端回传的原样比对（含分隔符差异会先归一）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PathTags {
+    pub path: String,
+    #[serde(default)]
+    pub tags: Vec<TagDraft>,
+}
+
+impl ImportOptions {
+    /// 取这个文件该用的标签：单独指定且非空就用它，否则用全局那份。
+    pub fn tags_for(&self, path: &Path) -> &[TagDraft] {
+        if self.path_tags.is_empty() {
+            return &self.tags;
+        }
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        for entry in &self.path_tags {
+            if !entry.tags.is_empty()
+                && entry.path.replace('\\', "/").eq_ignore_ascii_case(&normalized)
+            {
+                return &entry.tags;
+            }
+        }
+        &self.tags
+    }
 }
 
 /// 导入面板里的一行：拖进来（或选中）之后、点确认之前的状态。
@@ -242,6 +275,9 @@ pub struct ImportReport {
     pub failed: usize,
     pub errors: Vec<ImportErrorItem>,
     pub message: String,
+    /// 本次真正入库的画集 id（按导入顺序）。导入面板用它串「导入后合成合集」。
+    #[serde(default)]
+    pub archive_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

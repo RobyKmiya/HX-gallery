@@ -607,6 +607,7 @@ fn fetch_flow(
         add_to_collection: None,
         preserve_structure: None,
         tags: tag_drafts(&meta.tags),
+        path_tags: Vec::new(),
     };
     let import_report = importer::import_blocking(
         app,

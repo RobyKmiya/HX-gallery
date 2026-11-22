@@ -1932,6 +1932,7 @@ fn import_stage_preview_and_tags_on_import() {
         ImportOptions {
             add_to_collection: None,
             preserve_structure: None,
+            path_tags: Vec::new(),
             tags: vec![
                 TagDraft {
                     name: "胡桃".into(),
@@ -2168,6 +2169,76 @@ fn series_hides_members_and_dissolves_back() {
     .unwrap();
     assert_eq!(page.total, 3);
     assert!(page.series.as_ref().map_or(true, |list| list.is_empty()));
+}
+
+/// 每个文件单独的标签要落在自己头上，没单独填的回落到全局那份。
+#[test]
+fn path_tags_apply_per_file() {
+    let fixture = Fixture::new();
+    let a = fixture.source.join("甲本.cbz");
+    let b = fixture.source.join("乙本.cbz");
+    write_zip(&a, &["001.png"], 7);
+    write_zip(&b, &["001.png", "002.png"], 17);
+    let options = ImportOptions {
+        tags: vec![TagDraft {
+            name: "全局标签".into(),
+            category: None,
+        }],
+        path_tags: vec![
+            crate::models::PathTags {
+                path: a.to_string_lossy().to_string(),
+                tags: vec![TagDraft {
+                    name: "甲的专属".into(),
+                    category: None,
+                }],
+            },
+            crate::models::PathTags {
+                path: b.to_string_lossy().to_string(),
+                tags: vec![TagDraft {
+                    name: "乙的专属".into(),
+                    category: None,
+                }],
+            },
+        ],
+        ..Default::default()
+    };
+    importer::import_with_progress(
+        &fixture.library,
+        &fixture.covers,
+        vec![a, b],
+        options,
+        |_| {},
+    );
+
+    let context = db::open_library(&fixture.library).unwrap();
+    let page = library::query_archives(
+        &context.conn,
+        &fixture.library,
+        &fixture.covers,
+        &ArchiveQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 2);
+    let names_of = |file_name: &str| {
+        let card = page
+            .items
+            .iter()
+            .find(|card| card.file_name == file_name)
+            .unwrap();
+        db::archive_tags(&context.conn, card.id)
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect::<Vec<_>>()
+    };
+    let a_tags = names_of("甲本.cbz");
+    let b_tags = names_of("乙本.cbz");
+    assert!(a_tags.contains(&"甲的专属".to_string()), "甲: {a_tags:?}");
+    assert!(b_tags.contains(&"乙的专属".to_string()), "乙: {b_tags:?}");
+    assert!(
+        !a_tags.contains(&"乙的专属".to_string()),
+        "甲不该拿到乙的标签"
+    );
 }
 
 /// 权重为 0 的标签必须把整本画集排除出候选，而不是只把它的权重算 0。#[test]
