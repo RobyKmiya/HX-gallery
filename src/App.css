@@ -491,6 +491,9 @@ body.is-splitting {
   border-right: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(20, 22, 27, 0.9), rgba(13, 14, 18, 0.95));
   min-height: 0;
+  /* 允许被拖窄到 62px：内容不许撑宽（否则 grid 列会被内容顶回去）。 */
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -7229,4 +7232,12 @@ body.is-splitting {
 
 .sidebar.is-compact .sidebar-actions .btn svg {
   font-size: 12px;
+}
+
+/* 侧栏文字统一省略，避免长名字把行撑宽顶回 grid 列 */
+.sidebar .nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

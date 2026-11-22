@@ -357,10 +357,12 @@ export default function LibraryView({
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
   /** 布局尺寸：侧栏宽度与停靠详情宽度，拖动分界线改、存在本机。 */
+  // min 必须跟 Splitter 的 min 一致（62 = 纯图标条宽度）。之前的 190 会把
+  // 拖动结果夹回去，导致 is-tight/is-compact 永远不触发（22:11 反馈的真凶）。
   const [sidebarWidth, setSidebarWidth, resetSidebarWidth] = usePersistentSize(
     "huaxia.layout.sidebar",
     262,
-    190,
+    62,
     420,
   );
   const [drawerWidth, setDrawerWidth, resetDrawerWidth] = usePersistentSize(
