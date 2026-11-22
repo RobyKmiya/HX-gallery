@@ -467,8 +467,7 @@ pub fn release_readiness(app: &AppHandle, settings: &ReleaseSettings) -> serde_j
 ///
 /// 1. 旧形态是一个含 `taskkill` 裸文本的 `.cmd` 批处理——在本机被杀软
 ///    （火绒的行为检测）静默删除：脚本写出去几秒内就消失，vbs 指着不存在的
-///    文件，关窗自动发布整条链静默失败（2026-11-20 管理员机器实锤两例，
-///    取证存档 agent-dispatch/logs/vibe/release-on-exit-调查-20261120.md）。
+///    文件，关窗自动发布整条链静默失败（本机实测两例，取证已归档）。
 ///    改为 **wscript 直接调 node 跑本编排脚本**：链路里不再有 `.cmd` 文件；
 ///    结束进程只是最后一道保险，正常关窗流程应用几百毫秒内自己就退了。
 /// 2. node 读 UTF-8 源码，中文路径/文案不需要任何编码垫付；

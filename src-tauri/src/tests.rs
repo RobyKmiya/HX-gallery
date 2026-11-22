@@ -2940,10 +2940,10 @@ fn gif_anim_meta_reads_frame_count_and_duration() {
 #[test]
 #[ignore]
 fn real_pack_anim_meta_diagnostics() {
-    let path = std::path::Path::new(
-        r"F:\Hthings\BENZI\[HajiMi] Amiya [Animated WEBP] [AI Generated].zip",
-    );
-    if !path.exists() {
+    // 需要真实包的诊断：路径从环境变量取，公开仓库里不带个人库路径。
+    let real_zip = std::env::var("HUAXIA_DIAG_ZIP").unwrap_or_default();
+    let path = std::path::Path::new(&real_zip);
+    if real_zip.is_empty() || !path.exists() {
         eprintln!("[diag] 真实包不存在，跳过");
         return;
     }
@@ -2957,8 +2957,9 @@ fn real_pack_anim_meta_diagnostics() {
         }
     }
 
-    let ttako = std::path::Path::new(r"F:\Hthings\BENZI\TTAKO 26.09 GIF [AI Generated].zip");
-    if ttako.exists() {
+    let ttako_raw = std::env::var("HUAXIA_DIAG_ZIP2").unwrap_or_default();
+    let ttako = std::path::Path::new(&ttako_raw);
+    if !ttako_raw.is_empty() && ttako.exists() {
         let started = std::time::Instant::now();
         match crate::anim::anim_meta(ttako, 0) {
             Ok(meta) => eprintln!(
@@ -2979,13 +2980,17 @@ fn real_pack_anim_meta_diagnostics() {
 fn real_pack_page_read_diagnostics() {
     use std::time::Instant;
 
+    // 需要真实包的诊断：路径从环境变量取，公开仓库里不带个人库路径。
     let packs = [
-        r"F:\Hthings\BENZI\[HajiMi] Amiya [Animated WEBP] [AI Generated].zip",
-        r"F:\Hthings\BENZI\TTAKO 26.09 GIF [AI Generated].zip",
-    ];
+        std::env::var("HUAXIA_DIAG_ZIP").unwrap_or_default(),
+        std::env::var("HUAXIA_DIAG_ZIP2").unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter(|pack| !pack.is_empty())
+    .collect::<Vec<String>>();
 
     for pack in packs {
-        let path = std::path::Path::new(pack);
+        let path = std::path::Path::new(&pack);
         if !path.exists() {
             eprintln!("[diag] 真实包不存在，跳过: {pack}");
             continue;

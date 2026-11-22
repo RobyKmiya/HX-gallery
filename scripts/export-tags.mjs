@@ -3,7 +3,7 @@
  * 从真实库导出已翻译标签到 docs/tag-translations.json，作为库文件之外的可重建源。
  *
  * 用法：
- *   node scripts/export-tags.mjs                 # 默认库 F:/Hthings/BENZI
+ *   node scripts/export-tags.mjs                 # 默认库取 HUAXIA_LIBRARY 环境变量
  *   node scripts/export-tags.mjs --library <dir>
  *
  * 数据源：galleryctl tags list --status translated（分页游标取全量）。
@@ -16,7 +16,7 @@ import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const DOCS_OUT = path.join(ROOT, 'docs', 'tag-translations.json');
-const DEFAULT_LIBRARY = 'F:/Hthings/BENZI';
+const DEFAULT_LIBRARY = process.env.HUAXIA_LIBRARY || '';
 
 const argv = process.argv.slice(2);
 const libraryIndex = argv.indexOf('--library');
