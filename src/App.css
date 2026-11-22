@@ -6571,8 +6571,8 @@ body.is-splitting {
 }
 
 .series-item-thumb {
-  width: 44px;
-  height: 60px;
+  width: 64px;
+  height: 88px;
   flex-shrink: 0;
   padding: 0;
   overflow: hidden;
@@ -6770,4 +6770,120 @@ body.is-splitting {
   right: 0;
   height: 26px;
   z-index: 7;
+}
+
+/* ---------- 合集详情：视图切换 / 排序 / 封面墙（管理员 11-22 反馈） ---------- */
+
+.series-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.series-toolbar-group {
+  display: flex;
+  gap: 6px;
+}
+
+.series-toolbar select {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.series-toolbar select:focus {
+  outline: none;
+  border-color: var(--accent-strong);
+}
+
+/* 封面墙：大封面 + 简明信息，点图直接读 */
+.series-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+  padding: 2px;
+}
+
+.series-grid-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 0 0 8px;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  color: inherit;
+}
+
+.series-grid-card:hover {
+  border-color: var(--accent-strong);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.series-grid-cover {
+  position: relative;
+  display: block;
+  aspect-ratio: 2 / 3;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--faint);
+}
+
+.series-grid-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.series-grid-cover-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #1a1206;
+  background: rgba(232, 163, 92, 0.92);
+}
+
+.series-grid-cover-badge.is-missing {
+  color: #fff;
+  background: rgba(201, 80, 80, 0.9);
+}
+
+.series-grid-label {
+  padding: 6px 10px 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.series-grid-title {
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.series-grid-meta {
+  padding: 0 10px;
+  font-size: 10px;
+  color: var(--faint);
 }

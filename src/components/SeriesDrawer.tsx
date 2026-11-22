@@ -38,6 +38,20 @@ export default function SeriesDrawer({
   const [name, setName] = useState(series.name);
   const [note, setNote] = useState(series.note ?? "");
   const [busy, setBusy] = useState(false);
+  /** 详情 = 看信息改信息；封面墙 = 大封面简明信息，点图直接读。 */
+  const [view, setView] = useState<"detail" | "grid">("detail");
+  /** 排序只是视图层面：只有「集数顺序」是真实存储顺序，其他排序下隐藏调序按钮。 */
+  const [sortBy, setSortBy] = useState<"position" | "title" | "pages">(
+    "position",
+  );
+  const sortedItems =
+    sortBy === "position"
+      ? items
+      : [...items].sort((a, b) =>
+          sortBy === "title"
+            ? a.title.localeCompare(b.title, "zh-Hans-CN")
+            : b.pageCount - a.pageCount,
+        );
 
   useEffect(() => {
     setItems(series.items);
@@ -164,8 +178,82 @@ export default function SeriesDrawer({
         onBlur={() => void saveName()}
       />
 
+      <div className="series-toolbar">
+        <div className="series-toolbar-group" role="tablist" aria-label="查看方式">
+          <button
+            type="button"
+            className={`filter-chip${view === "detail" ? " is-active" : ""}`}
+            onClick={() => setView("detail")}
+          >
+            详情
+          </button>
+          <button
+            type="button"
+            className={`filter-chip${view === "grid" ? " is-active" : ""}`}
+            onClick={() => setView("grid")}
+          >
+            封面墙
+          </button>
+        </div>
+        <select
+          value={sortBy}
+          aria-label="排序方式"
+          onChange={(event) =>
+            setSortBy(event.target.value as "position" | "title" | "pages")
+          }
+        >
+          <option value="position">按集数顺序</option>
+          <option value="title">按标题</option>
+          <option value="pages">按页数</option>
+        </select>
+      </div>
+
+      {view === "grid" ? (
+        <div className="series-grid">
+          {sortedItems.map((item) => {
+            const realIndex = items.findIndex(
+              (entry) => entry.archiveId === item.archiveId,
+            );
+            return (
+              <button
+                key={item.archiveId}
+                type="button"
+                className="series-grid-card"
+                onClick={() => onReadArchive(item.archiveId)}
+                title={`阅读 ${item.title}`}
+                aria-label={`阅读 ${item.title}`}
+              >
+                <span className="series-grid-cover">
+                  {item.coverPath ? (
+                    <img src={assetUrl(item.coverPath)} alt="" loading="lazy" />
+                  ) : (
+                    <BookIcon width={26} height={26} />
+                  )}
+                  {item.archiveId === series.coverArchiveId && (
+                    <span className="series-grid-cover-badge">封面</span>
+                  )}
+                  {item.missing && (
+                    <span className="series-grid-cover-badge is-missing">缺失</span>
+                  )}
+                </span>
+                <span className="series-grid-label">
+                  {item.label ?? `第 ${realIndex + 1} 话`}
+                </span>
+                <span className="series-grid-title" title={item.title}>
+                  {item.title}
+                </span>
+                <span className="series-grid-meta">{item.pageCount} 页</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
       <div className="series-items">
-        {items.map((item, index) => (
+        {sortedItems.map((item) => {
+          const index = items.findIndex(
+            (entry) => entry.archiveId === item.archiveId,
+          );
+          return (
           <div
             className={`series-item${item.archiveId === series.coverArchiveId ? " is-cover" : ""}`}
             key={item.archiveId}
@@ -218,8 +306,8 @@ export default function SeriesDrawer({
                 type="button"
                 className="icon-button"
                 onClick={() => void move(index, -1)}
-                disabled={index === 0}
-                title="上移"
+                disabled={sortBy !== "position" || index === 0}
+                title={sortBy === "position" ? "上移" : "切回「按集数顺序」才能调序"}
                 aria-label="上移"
               >
                 <ChevronUpIcon width={13} height={13} />
@@ -228,8 +316,8 @@ export default function SeriesDrawer({
                 type="button"
                 className="icon-button"
                 onClick={() => void move(index, 1)}
-                disabled={index === items.length - 1}
-                title="下移"
+                disabled={sortBy !== "position" || index === items.length - 1}
+                title={sortBy === "position" ? "下移" : "切回「按集数顺序」才能调序"}
                 aria-label="下移"
               >
                 <ChevronDownIcon width={13} height={13} />
@@ -255,8 +343,10 @@ export default function SeriesDrawer({
               </button>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
+      )}
 
       <footer className="series-drawer-foot">
         <span>{items.length} 话 · 封面轮换</span>
