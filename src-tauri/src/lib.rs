@@ -1771,48 +1771,23 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             ) && window.label() == "main" {
                 persist_window_geometry_debounced(window.app_handle().clone());
             }
-            // 关闭窗口时，如果用户开着「退出后自动发布」，就在这里把脚本排好并拉起。
-            // 放在窗口事件而不是 ExitRequested：后者在 app.exit() 时也会触发，
-            // 容易和「面板里点更新」那条路径重复安排。
+            // 关窗 = 直接退出。原「退出后自动发布」（auto_on_exit）已按管理员
+            // 2026-11-22 要求撤掉：发版只由施工 agent 手动跑 release.mjs——
+            // 自动发布与手动发版抢 cargo 构建锁 + 版本号竞争，一天内坑了两次。
             //
-            // 性能纪律（管理员 2026-11-19 反馈「窗口停几秒才消失」）：
-            // 这段代码跑完，窗口才会真正消失。所以这里只允许做「读内存 + 写几个小文件」：
-            //   1. 先把窗口藏掉（后面无论多慢，用户都已经看到关掉了）；
-            //   2. 有没有更新读后台缓存（`release::cached_has_changes`），绝不现跑 git；
-            //   3. 拉起脚本走 wscript 直出，不再用 explorer（shell 激活会卡好几秒）。
+            // 性能纪律不变：这段代码跑完窗口才会真正消失，只允许
+            // 「读内存 + 写几个小文件」，先藏窗再退进程。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() != "main" {
                     return;
                 }
-                // 接管关闭：不再依赖「窗口一关 Tauri 就退进程」这套默认行为。
-                // 只要还有子窗（D2 浏览器）活着，默认行为就是进程不退、单实例锁
-                // 不释放，下次点快捷方式只会把旧窗口唤起来——用户看到的还是旧版。
+                // 接管关闭：只要还有子窗（D2 浏览器）活着，默认行为就是进程不退、
+                // 单实例锁不释放，下次点快捷方式只会把旧窗口唤起来。
                 // 这里显式接管，保证「关主窗 = 整个画匣退出」。
                 api.prevent_close();
-                let started = std::time::Instant::now();
-                let app = window.app_handle().clone();
-                let settings = release::load_settings(&app);
-                let should_release = settings.auto_on_exit && settings.source_dir.is_some();
-
-                // 先把窗口藏掉：之后无论排发布、退进程多慢，用户都已经看到关掉了。
                 let _ = window.hide();
-                release::log_close_timing(&app, "窗口已隐藏", started.elapsed());
-
-                // 排发布 + 退进程都放后台线程：git / 起脚本不卡事件循环。
-                let handle = app.clone();
+                let handle = window.app_handle().clone();
                 std::thread::spawn(move || {
-                    if should_release {
-                        match release::cached_has_changes() {
-                            Some(true) => release::schedule_release_now(&handle, &settings),
-                            Some(false) => {}
-                            // 缓存还没算出来（刚启动就关）：退回现算，此时窗口已藏，卡也看不见。
-                            None => release::run_exit_release(&handle, &settings),
-                        }
-                        // 给脚本一点启动时间，然后再断开进程。
-                        std::thread::sleep(std::time::Duration::from_millis(400));
-                    }
-                    // 彻底退出：exit 会关掉 D2 浏览器等所有子窗，进程真正结束、
-                    // 单实例锁随之释放，下次启动才是新装的版本。
                     let _ = handle.exit(0);
                 });
             }

@@ -193,60 +193,6 @@ export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
               </section>
 
               <section className="release-section">
-                <label className="release-toggle">
-                  <input
-                    type="checkbox"
-                    checked={state.autoOnExit}
-                    disabled={busy}
-                    onChange={(event) =>
-                      void persist({
-                        sourceDir: state.sourceDir,
-                        autoOnExit: event.target.checked,
-                        relaunchAfter: state.relaunchAfter,
-                      })
-                    }
-                  />
-                  <span>
-                    <strong>源码有更新时，关闭画匣自动安装</strong>
-                    <span className="queue-hint">
-                      只有源码相对上次发布有实质变化（新提交或未提交改动）才会构建安装；没变化就是普通关闭，不抬版本、不打包。
-                    </span>
-                  </span>
-                </label>
-
-                {state.autoOnExit && state.readiness && (
-                  <div
-                    className={`queue-hint release-readiness ${state.readiness.hasChanges ? "ready" : "idle"}`}
-                    title={state.readiness.reason}
-                  >
-                    <strong>{state.readiness.hasChanges ? "下次关闭将更新" : "下次关闭不会更新"}</strong>
-                    <span>{state.readiness.reason}</span>
-                  </div>
-                )}
-
-                <label className="release-toggle">
-                  <input
-                    type="checkbox"
-                    checked={state.relaunchAfter}
-                    disabled={busy || !state.autoOnExit}
-                    onChange={(event) =>
-                      void persist({
-                        sourceDir: state.sourceDir,
-                        autoOnExit: state.autoOnExit,
-                        relaunchAfter: event.target.checked,
-                      })
-                    }
-                  />
-                  <span>
-                    <strong>更新完成后自动重新打开画匣</strong>
-                    <span className="queue-hint">
-                      默认不勾——更新完就彻底关闭，需要时你自己打开。只有勾选后才会在装好后自动重开。
-                    </span>
-                  </span>
-                </label>
-              </section>
-
-              <section className="release-section">
                 <button
                   type="button"
                   className="btn btn-primary"
