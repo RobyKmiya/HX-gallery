@@ -295,6 +295,10 @@ export const api = {
 
   getReleaseState: () => invoke<ReleaseState>("get_release_state"),
 
+  /** 沉浸阅读：连系统标题栏一起收掉（false = 无边框），退出阅读时记得还原。 */
+  setWindowDecorations: (decorated: boolean) =>
+    invoke<void>("set_window_decorations", { decorated }),
+
   saveReleaseSettings: (
     sourceDir: string | null,
     autoOnExit: boolean,

@@ -248,6 +248,18 @@ export default function Reader({
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   /** 沉浸（无框）阅读：顶栏 / 底栏 / 进度条一律不占位、不自动冒头，只留角落一颗淡点还原。 */
   const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
+
+  // 沉浸时连系统标题栏一起收掉（真无边框）；切回带框或退出阅读时恢复。
+  // 卸载时再兜一次：万一读着读着被别处关掉，标题栏不会留在「没有」的状态。
+  useEffect(() => {
+    void api.setWindowDecorations(!immersive).catch(() => {});
+  }, [immersive]);
+  useEffect(
+    () => () => {
+      void api.setWindowDecorations(true).catch(() => {});
+    },
+    [],
+  );
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
   /** 播放阅读模式（持久化）：开着的书播完自动翻页、翻完自动换下一本。 */

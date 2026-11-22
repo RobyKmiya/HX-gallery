@@ -1337,6 +1337,25 @@ fn quit_for_release(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 阅读器沉浸模式：连系统标题栏一起去掉（真无边框），退出阅读时再恢复。
+///
+/// 最大化状态下直接切装饰会让客户区尺寸对不上（内容会跑到屏幕外一截），
+/// 所以先取消最大化、切装饰、再最大化一次让系统重新算布局。
+#[tauri::command]
+fn set_window_decorations(window: tauri::WebviewWindow, decorated: bool) -> Result<(), String> {
+    let maximized = window.is_maximized().unwrap_or(false);
+    if maximized {
+        let _ = window.unmaximize();
+    }
+    window
+        .set_decorations(decorated)
+        .map_err(|e| format!("切换窗口边框失败: {e}"))?;
+    if maximized {
+        let _ = window.maximize();
+    }
+    Ok(())
+}
+
 /// 取消已经排好的发布（还没退出时可用）。
 #[tauri::command]
 fn cancel_release(app: AppHandle) -> Result<(), String> {
@@ -1423,6 +1442,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![            get_library_state,
+            set_window_decorations,
             open_library,
             import_paths,
             stage_import_paths,
