@@ -3072,7 +3072,7 @@ fn generate_progress_hud_preview() {
     let hud = dir.join("release-progress.ps1");
     let source = crate::release::progress_hud_source(
         &dir.join("progress.json").to_string_lossy().to_string(),
-        r"C:\Users\Administrator\AppData\Local\画匣\archive-gallery.exe",
+        &dir.join("archive-gallery.exe").to_string_lossy().to_string(),
     );
     let mut bytes: Vec<u8> = vec![0xEF, 0xBB, 0xBF];
     bytes.extend(source.as_bytes());
