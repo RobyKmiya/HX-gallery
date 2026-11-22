@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "archive-gallery"
-version = "1.0.75"
+version = "1.0.76"
 dependencies = [
  "base64 0.23.1",
  "blake3",
