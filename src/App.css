@@ -7355,3 +7355,55 @@ body.is-splitting {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 新手教程页与欢迎页三步提示 */
+.guide-steps,
+.guide-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.guide-steps li::marker,
+.guide-list li::marker {
+  color: var(--accent-strong);
+}
+
+.guide-steps code,
+.guide-list code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  font-size: 11px;
+}
+
+.welcome-steps {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.welcome-steps b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: rgba(232, 163, 92, 0.16);
+  color: var(--accent-strong);
+  font-size: 10px;
+}
+
+.welcome-steps-sep {
+  color: var(--faint);
+}

@@ -82,8 +82,16 @@ export default function Welcome({
           {busy ? "正在打开…" : "选择画廊库目录"}
         </button>
 
+        <div className="welcome-steps">
+          <span><b>1</b> 选库目录</span>
+          <span className="welcome-steps-sep">→</span>
+          <span><b>2</b> 拖入压缩包</span>
+          <span className="welcome-steps-sep">→</span>
+          <span><b>3</b> 双击开看</span>
+        </div>
+
         <p className="welcome-foot">
-          完全离线 · 压缩包只读 · 元数据保存在库目录的 .gallery 中
+          完全离线 · 压缩包只读 · 元数据保存在库目录的 .gallery 中 · 详细说明见「设置 → 新手教程」
         </p>
       </main>
     </div>

@@ -13,7 +13,7 @@ import {
 } from "../shortcuts";
 import { AlertIcon, BookIcon, CloseIcon, FolderIcon, RefreshIcon, TagIcon } from "./Icons";
 
-type SettingsTab = "general" | "keys" | "storage" | "more";
+type SettingsTab = "general" | "keys" | "storage" | "guide" | "more";
 
 interface SettingsDialogProps {
   library: LibraryState;
@@ -31,6 +31,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: "general", label: "通用" },
   { key: "keys", label: "快捷键" },
   { key: "storage", label: "存储" },
+  { key: "guide", label: "新手教程" },
   { key: "more", label: "更多入口" },
 ];
 
@@ -270,6 +271,57 @@ export default function SettingsDialog({
                 <p className="settings-hint">
                   更换库目录请用左上角的库选择器；封面缓存与备份都在库目录的 .gallery 下。
                 </p>
+              </>
+            )}
+
+            {tab === "guide" && (
+              <>
+                <h3>三步上手</h3>
+                <ol className="guide-steps">
+                  <li>
+                    <strong>选一个库目录</strong>——建议放在容量够的盘，比如{" "}
+                    <code>D://画匣库</code>。画集压缩包会<strong>复制</strong>进这里（原文件不动），
+                    索引、封面、标签都存在库里的 <code>.gallery</code>。
+                  </li>
+                  <li>
+                    <strong>导入</strong>——点「导入压缩包」选 ZIP/CBZ/7Z/RAR，
+                    或直接把文件拖进窗口；一个压缩包 = 一个画集，同包多图 = 多页。
+                  </li>
+                  <li>
+                    <strong>双击开始看</strong>——阅读里 <code>←</code>/<code>→</code>{" "}
+                    翻页，<code>F</code> 沉浸，<code>右键</code> 出菜单（缩放/播放/复制/壁纸）。
+                  </li>
+                </ol>
+
+                <h3>阅读器速查</h3>
+                <ul className="guide-list">
+                  <li>翻页：方向键 / 空格 / PgUp、PgDn；首末页 Home、End</li>
+                  <li>缩放：<code>+</code> <code>-</code> <code>0</code>，或 Ctrl+滚轮</li>
+                  <li><code>D</code> 双页 ｜ <code>F</code> 沉浸 ｜ <code>T</code> 缩略图栏</li>
+                  <li><code>P</code> GIF 播放（动图播完再翻）｜ <code>Ctrl+1~9</code> 幻灯每 N 秒一页</li>
+                  <li><code>B</code> 书签 ｜ <code>L</code> 书签列表 ｜ <code>[</code> <code>]</code> 上下本</li>
+                  <li><code>Ctrl+C</code> 复制当前页 ｜ <code>Ctrl+Enter</code> 资源管理器定位</li>
+                  <li><code>Ctrl+H</code> 老板键藏窗 ｜ <code>Ctrl+Shift+H</code> 呼回</li>
+                  <li>鼠标后退侧键：沉浸态先退沉浸，再按退出阅读</li>
+                </ul>
+
+                <h3>鼠标右键</h3>
+                <ul className="guide-list">
+                  <li>阅读器里右键：翻页 / 缩放 / 播放 / 复制页 / 设为壁纸</li>
+                  <li>画集卡片右键：加入待看目录 / 移入回收站 / 打开所在位置</li>
+                  <li>画廊空白处右键：导入 / 刷新 / 切视图 / 打开各面板 / 设置</li>
+                </ul>
+
+                <h3>常见问题</h3>
+                <ul className="guide-list">
+                  <li><strong>会不会上传我的图？</strong> 完全离线，不联网，不上传任何文件。</li>
+                  <li><strong>库里存的是什么？</strong> 原始压缩包 + <code>.gallery</code>{" "}
+                    里的索引与封面缓存；删库目录 = 全没了，挪目录请整目录搬。</li>
+                  <li><strong>快捷键能改吗？</strong> 能，「快捷键」页点键位后按新组合即可。</li>
+                  <li><strong>合集怎么建？</strong> 选中几个画集 → 右键「加入合集」/ 新建合集，
+                    详情里能调整集数顺序、改每话名字、设封面。</li>
+                  <li><strong>标签太多怎么办？</strong> 标签中心可批量选中合并、一键保存全部修改。</li>
+                </ul>
               </>
             )}
 
