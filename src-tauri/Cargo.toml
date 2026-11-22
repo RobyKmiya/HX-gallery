@@ -1,6 +1,6 @@
 [package]
 name = "archive-gallery"
-version = "1.0.58"
+version = "1.0.59"
 description = "A local archive gallery for ZIP/CBZ image collections"
 authors = ["Archive Gallery"]
 edition = "2024"
