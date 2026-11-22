@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::translate;
 
-pub(crate) const SCHEMA_VERSION: i64 = 11;
+pub(crate) const SCHEMA_VERSION: i64 = 12;
 
 /// 待看目录默认放几本。
 pub const DEFAULT_QUEUE_SIZE: i64 = 10;
@@ -480,7 +480,9 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
             created_at INTEGER NOT NULL,
             sort_order INTEGER NOT NULL DEFAULT 0,
             cover_archive_id INTEGER REFERENCES archives(id) ON DELETE SET NULL,
-            deleted_at INTEGER
+            deleted_at INTEGER,
+            icon TEXT NOT NULL DEFAULT 'heart',
+            color TEXT NOT NULL DEFAULT '#e8737f'
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_collections_default
@@ -823,6 +825,15 @@ fn upgrade_schema(conn: &Connection) -> Result<(), String> {
             ON image_records(archive_id);"
     )
     .map_err(|e| format!("创建散图收藏夹表失败: {e}"))?;
+
+    // v12：收藏夹自定义图标与颜色（侧栏纯填充色块展示）。
+    add_column_if_missing(conn, "collections", "icon", "TEXT NOT NULL DEFAULT 'heart'")?;
+    add_column_if_missing(
+        conn,
+        "collections",
+        "color",
+        "TEXT NOT NULL DEFAULT '#e8737f'",
+    )?;
 
     // v11：合集（连载盒子）。与 create_schema 同一段 SQL，重复执行安全。
     conn.execute_batch(
@@ -2618,7 +2629,7 @@ pub fn tag_graph(conn: &Connection, min_weight: i64, limit: usize) -> Result<Tag
 }
 
 const COLLECTION_SELECT: &str = "c.id, c.name, c.is_default, COUNT(caa.id),
-     c.sort_order, c.cover_archive_id, a.cover_key, c.deleted_at";
+     c.sort_order, c.cover_archive_id, a.cover_key, c.deleted_at, c.icon, c.color";
 
 fn read_collection(
     row: &rusqlite::Row<'_>,
@@ -2637,9 +2648,39 @@ fn read_collection(
         count: row.get(3)?,
         sort_order: row.get(4)?,
         cover_archive_id: row.get(5)?,
+        icon: row.get(8).unwrap_or_else(|_| "heart".to_string()),
+        color: row
+            .get(9)
+            .unwrap_or_else(|_| "#e8737f".to_string()),
         cover_path,
         deleted_at: row.get(7)?,
     })
+}
+
+/// 更新收藏夹的侧栏图标形状与填充色（管理员 11-22：自定义图标元素）。
+pub fn set_collection_style(
+    conn: &Connection,
+    collection_id: i64,
+    icon: &str,
+    color: &str,
+) -> Result<(), String> {
+    const ALLOWED: [&str; 4] = ["star", "heart", "circle", "square"];
+    if !ALLOWED.contains(&icon) {
+        return Err(format!("不支持的图标形状: {icon}"));
+    }
+    if color.len() != 7 || !color.starts_with('#') {
+        return Err(format!("颜色格式应为 #rrggbb: {color}"));
+    }
+    let changed = conn
+        .execute(
+            "UPDATE collections SET icon = ?1, color = ?2 WHERE id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![icon, color, collection_id],
+        )
+        .map_err(|e| format!("更新收藏夹图标失败: {e}"))?;
+    if changed == 0 {
+        return Err("收藏夹不存在".to_string());
+    }
+    Ok(())
 }
 
 pub fn list_collections(

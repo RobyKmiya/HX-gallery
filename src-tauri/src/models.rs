@@ -381,6 +381,10 @@ pub struct Collection {
     pub cover_archive_id: Option<i64>,
     pub cover_path: Option<String>,
     pub deleted_at: Option<i64>,
+    /// 侧栏图标形状：star / heart / circle / square（纯填充色块）。
+    pub icon: String,
+    /// 图标填充色（#rrggbb）。
+    pub color: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

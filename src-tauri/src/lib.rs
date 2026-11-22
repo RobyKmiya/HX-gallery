@@ -836,6 +836,22 @@ async fn create_collection(
     .await
 }
 
+/// 更新收藏夹的侧栏图标（形状 + 填充色）。
+#[tauri::command]
+async fn update_collection_style(
+    state: State<'_, AppState>,
+    collection_id: i64,
+    icon: String,
+    color: String,
+) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::set_collection_style(&library.conn, collection_id, &icon, &color)
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 async fn list_archive_collections(
     state: State<'_, AppState>,
@@ -1837,6 +1853,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             tag_graph,
             list_collections,
             create_collection,
+            update_collection_style,
             rename_collection,
             delete_collection,
             list_deleted_collections,

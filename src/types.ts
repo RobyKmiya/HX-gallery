@@ -173,6 +173,8 @@ export interface TagGraph {
   edges: TagEdge[];
 }
 
+export type CollectionIcon = "star" | "heart" | "circle" | "square";
+
 export interface Collection {
   id: number;
   name: string;
@@ -182,6 +184,10 @@ export interface Collection {
   coverArchiveId: number | null;
   coverPath: string | null;
   deletedAt: number | null;
+  /** 侧栏图标形状（纯填充色块）。 */
+  icon: CollectionIcon;
+  /** 图标填充色 #rrggbb。 */
+  color: string;
 }
 
 export type SortKey =

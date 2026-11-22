@@ -307,6 +307,10 @@ export const api = {
   copyReaderPage: (archiveId: number, pageIndex: number) =>
     invoke<void>("copy_reader_page", { archiveId, pageIndex }),
 
+  /** 更新收藏夹侧栏图标（形状 + 填充色）。 */
+  updateCollectionStyle: (collectionId: number, icon: string, color: string) =>
+    invoke<void>("update_collection_style", { collectionId, icon, color }),
+
   /** 在资源管理器中定位并选中画集文件。 */
   revealInExplorer: (path: string) =>
     invoke<void>("reveal_in_explorer", { path }),

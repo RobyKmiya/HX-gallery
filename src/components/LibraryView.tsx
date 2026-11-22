@@ -46,7 +46,12 @@ import QueuePanel from "./QueuePanel";
 import SeriesCard from "./SeriesCard";
 import SeriesDrawer from "./SeriesDrawer";
 import SettingsDialog from "./SettingsDialog";
+import CollectionGlyph, {
+  COLLECTION_COLORS,
+  COLLECTION_ICONS,
+} from "./CollectionGlyph";
 import ReaderMenu from "./ReaderMenu";
+import type { CollectionIcon } from "../types";
 import Reader from "./Reader";
 import Splitter from "./Splitter";
 import ReleasePanel from "./ReleasePanel";
@@ -233,6 +238,10 @@ export default function LibraryView({
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 主目录空白处右键菜单。 */
   const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
+  /** 收藏夹样式编辑弹窗（图标形状 + 填充色）。 */
+  const [styleEditing, setStyleEditing] = useState<{ id: number; x: number; y: number } | null>(
+    null,
+  );
   const [warmCovers, setWarmCovers] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -1974,7 +1983,11 @@ export default function LibraryView({
         }px 6px minmax(0, 1fr)`,
       }}
     >
-      <aside className={`sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
+      <aside
+        className={`sidebar${sidebarCollapsed ? " is-collapsed" : ""}${
+          !sidebarCollapsed && sidebarWidth < 150 ? " is-compact" : ""
+        }`}
+      >
         <div className="sidebar-brand">
           <span className="brand-mark">
             <LogoIcon />
@@ -2124,11 +2137,34 @@ export default function LibraryView({
                     setActiveCollectionId(collection.id);
                   }}
                 >
-                  <HeartIcon width={16} height={16} />
+                  <CollectionGlyph
+                    icon={collection.icon}
+                    color={collection.color}
+                  />
                   <span className="nav-label">{displayName}</span>
                   <span className="nav-count">{collection.count}</span>
                 </button>
                 <div className="nav-row-actions">
+                  <button
+                    type="button"
+                    className="nav-mini"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setStyleEditing({
+                        id: collection.id,
+                        x: event.clientX,
+                        y: event.clientY,
+                      });
+                    }}
+                    title="自定义图标与颜色"
+                    aria-label={`自定义 ${collection.name} 的图标`}
+                  >
+                    <CollectionGlyph
+                      icon={collection.icon}
+                      color={collection.color}
+                      size={12}
+                    />
+                  </button>
                   <button
                     type="button"
                     className="nav-mini"
@@ -3559,6 +3595,90 @@ export default function LibraryView({
           ]}
           onClose={() => setBgMenu(null)}
         />
+      )}
+
+      {styleEditing && (
+        <>
+          <div
+            className="style-popover-backdrop"
+            onClick={() => setStyleEditing(null)}
+          />
+          {(() => {
+            const editingCollection = collections.find(
+              (entry) => entry.id === styleEditing.id,
+            );
+            if (!editingCollection) return null;
+            const applyStyle = (icon: CollectionIcon, color: string) => {
+              void api
+                .updateCollectionStyle(editingCollection.id, icon, color)
+                .then(() => {
+                  setCollections((previous) =>
+                    previous.map((entry) =>
+                      entry.id === editingCollection.id
+                        ? { ...entry, icon, color }
+                        : entry,
+                    ),
+                  );
+                })
+                .catch((error) =>
+                  notify(`更新图标失败：${String(error)}`, "error"),
+                );
+            };
+            return (
+              <div
+                className="style-popover"
+                style={{ left: styleEditing.x, top: styleEditing.y }}
+              >
+                <div className="style-popover-row">
+                  {COLLECTION_ICONS.map((icon) => (
+                    <button
+                      key={icon}
+                      type="button"
+                      className={`style-shape${
+                        editingCollection.icon === icon ? " is-active" : ""
+                      }`}
+                      title={
+                        icon === "star"
+                          ? "五角星"
+                          : icon === "heart"
+                            ? "爱心"
+                            : icon === "circle"
+                              ? "圆形"
+                              : "正方形"
+                      }
+                      onClick={() =>
+                        applyStyle(icon, editingCollection.color)
+                      }
+                    >
+                      <CollectionGlyph
+                        icon={icon}
+                        color={editingCollection.color}
+                        size={18}
+                      />
+                    </button>
+                  ))}
+                </div>
+                <div className="style-popover-row">
+                  {COLLECTION_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      className={`style-swatch${
+                        editingCollection.color === color ? " is-active" : ""
+                      }`}
+                      style={{ background: color }}
+                      title={color}
+                      aria-label={`填充色 ${color}`}
+                      onClick={() =>
+                        applyStyle(editingCollection.icon, color)
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </>
       )}
 
       {settingsOpen && (
