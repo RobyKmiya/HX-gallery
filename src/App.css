@@ -4562,8 +4562,48 @@ body.is-splitting {
   display: none;
 }
 
-/* 角落还原点 */
-.reader-corner-toggle {
+/* 无框态常显的页码 / 进度：贴边、极淡、不接事件，不参与布局 */
+.reader-immersive-page {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  z-index: 5;
+  padding: 6px 16px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.72);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  opacity: 0.38;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.reader-immersive-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.reader-immersive-bar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(232, 163, 92, 0.45),
+    rgba(232, 163, 92, 0.9)
+  );
+  transition: width 0.18s ease;
+}
+
+/* 角落还原点 */.reader-corner-toggle {
   position: fixed;
   right: 0;
   bottom: 0;

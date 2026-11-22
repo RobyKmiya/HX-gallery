@@ -1823,6 +1823,18 @@ const archiveEpochRef = useRef(0);
       </footer>
 
       {immersive && (
+        <>
+          {/* 无框态常显：页码在左下、进度是 2px 细线。都极淡且不接事件，不挡翻页与拖动。 */}
+          <div className="reader-immersive-page" aria-hidden="true">
+            {pageLabel}
+          </div>
+          <div className="reader-immersive-bar" aria-hidden="true">
+            <span style={{ width: `${progress}%` }} />
+          </div>
+        </>
+      )}
+
+      {immersive && (
         // 角落还原点：视觉上是个几乎看不见的小圆点，热区 64×64，碰到才明显。
         <button
           type="button"
