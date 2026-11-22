@@ -1388,15 +1388,29 @@ fn persist_window_geometry_debounced(app: tauri::AppHandle) {
             return;
         };
         let _ = std::fs::create_dir_all(&config_dir);
+        // 防护（1.0.67 恶性 bug）：最小化时 Windows 把窗口挪到 (-32000,-32000)
+        // 并缩成 0x0，这些垃圾几何一旦落盘，下次启动就恢复成离屏小窗，
+        // 用户「找不到画匣」。最小化/离屏/零尺寸一律不写，保留上一份好几何。
+        if window.is_minimized().unwrap_or(false) {
+            return;
+        }
         let maximized = window.is_maximized().unwrap_or(false);
         let mut value = serde_json::json!({ "maximized": maximized });
         if !maximized {
-            if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
-                value["x"] = position.x.into();
-                value["y"] = position.y.into();
-                value["width"] = size.width.into();
-                value["height"] = size.height.into();
+            let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else {
+                return;
+            };
+            if position.x < -10000
+                || position.y < -10000
+                || size.width < 400
+                || size.height < 300
+            {
+                return;
             }
+            value["x"] = position.x.into();
+            value["y"] = position.y.into();
+            value["width"] = size.width.into();
+            value["height"] = size.height.into();
         }
         let _ = std::fs::write(config_dir.join("window.json"), value.to_string());
     });
@@ -1645,11 +1659,21 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                             } else if let (Some(w), Some(h)) =
                                 (value["width"].as_f64(), value["height"].as_f64())
                             {
-                                let _ = window.set_size(tauri::LogicalSize::new(w, h));
-                                if let (Some(x), Some(y)) =
-                                    (value["x"].as_f64(), value["y"].as_f64())
-                                {
-                                    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+                                // 恢复也要过安检：离屏坐标 / 零尺寸的垃圾几何直接丢弃，
+                                // 保留 Tauri 默认（居中 1280x820）。
+                                let on_screen = value["x"].as_f64().map_or(true, |x| {
+                                    x > -10000.0 && x < 20000.0
+                                }) && value["y"].as_f64().map_or(true, |y| {
+                                    y > -10000.0 && y < 20000.0
+                                });
+                                if w >= 400.0 && h >= 300.0 && on_screen {
+                                    let _ = window.set_size(tauri::LogicalSize::new(w, h));
+                                    if let (Some(x), Some(y)) =
+                                        (value["x"].as_f64(), value["y"].as_f64())
+                                    {
+                                        let _ = window
+                                            .set_position(tauri::LogicalPosition::new(x, y));
+                                    }
                                 }
                             }
                         }
