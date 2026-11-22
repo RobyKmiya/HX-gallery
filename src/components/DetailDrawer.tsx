@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
+import CopyTitleButton from "./CopyTitleButton";
 import { formatBytes, formatDateTime } from "../format";
 import { parseTagInput, summarizeByCategory, tagsFromHtml, tagsToCopyText } from "../tags";
 import type {
@@ -632,9 +633,21 @@ export default function DetailDrawer({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="drawer-header">
-          <div>
+          <div className="drawer-title-block">
             <p className="eyebrow">ARCHIVE DETAIL</p>
-            <h2>{card.title}</h2>
+            <div className="drawer-title-row">
+              <h2
+                title={`${card.title}（右键复制）`}
+                onContextMenu={(event) => {
+                  // 右键标题也能复制：按钮之外的补充路径（管理员 11-22 二选一方案）。
+                  event.preventDefault();
+                  void navigator.clipboard.writeText(card.title);
+                }}
+              >
+                {card.title}
+              </h2>
+              <CopyTitleButton text={card.title} />
+            </div>
           </div>
           <div className="drawer-header-tools">
             {onDockChange && (

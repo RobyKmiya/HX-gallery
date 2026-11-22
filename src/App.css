@@ -7241,3 +7241,117 @@ body.is-splitting {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 合集详情外的透明遮罩：点画廊任意处即收起（管理员 11-22） */
+.series-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 47;
+  background: transparent;
+}
+
+/* ---------- 快捷键改键 / 复制标题 / 标签批量保存（管理员 11-22） ---------- */
+
+.keys-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.keys-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+}
+
+.keys-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keys-binding {
+  min-width: 92px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.keys-binding:hover {
+  border-color: var(--accent-strong);
+}
+
+.keys-binding.is-recording {
+  border-color: var(--accent-strong);
+  background: rgba(232, 163, 92, 0.18);
+  color: var(--text);
+  animation: keys-recording 1s ease-in-out infinite;
+}
+
+@keyframes keys-recording {
+  50% { opacity: 0.55; }
+}
+
+.keys-hint {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--danger, #e06c6c);
+}
+
+/* 复制标题按钮：常态半透明，hover 才明显，不抢标题的视觉 */
+.copy-title {
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.copy-title:hover,
+.copy-title.is-done {
+  opacity: 1;
+}
+
+.copy-title.is-done {
+  color: #7fc46f;
+}
+
+.drawer-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.drawer-title-row h2 {
+  cursor: text;
+}
+
+.series-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 标签中心「保存全部修改」 */
+.tag-bulk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.tag-bulk-hint {
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

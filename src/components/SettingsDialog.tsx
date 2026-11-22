@@ -1,7 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { LibraryState, ViewMode } from "../types";
 import { formatBytes } from "../format";
+import {
+  DEFAULT_SHORTCUTS,
+  SHORTCUT_LABELS,
+  describeBinding,
+  eventToBinding,
+  loadShortcuts,
+  saveShortcuts,
+  type ShortcutAction,
+} from "../shortcuts";
 import { AlertIcon, BookIcon, CloseIcon, FolderIcon, RefreshIcon, TagIcon } from "./Icons";
 
 type SettingsTab = "general" | "keys" | "storage" | "more";
@@ -26,23 +35,14 @@ const TABS: { key: SettingsTab; label: string }[] = [
 ];
 
 /** 阅读器/全局键位表（只读展示；改键位等有真实需求再做）。 */
-const KEY_ROWS: { keys: string; action: string; group: string }[] = [
-  { keys: "← → ↑ ↓ / 空格 / PgUp PgDn", action: "翻页（空格 = 暂停/继续播放）", group: "阅读器" },
-  { keys: "Home / End", action: "第一页 / 最后一页", group: "阅读器" },
-  { keys: "+ / - / 0 / Ctrl+滚轮", action: "放大 / 缩小 / 适应页面", group: "阅读器" },
-  { keys: "D", action: "双页开合", group: "阅读器" },
-  { keys: "F", action: "沉浸模式（连标题栏一起收掉）", group: "阅读器" },
-  { keys: "P", action: "GIF 播放（动图播完整段再翻页）", group: "阅读器" },
-  { keys: "Ctrl+1~9 / Ctrl+0", action: "幻灯播放每 N 秒一页 / 关闭幻灯", group: "阅读器" },
-  { keys: "B / L / I", action: "加书签 / 书签列表 / 详情浮层", group: "阅读器" },
-  { keys: "[ / ]", action: "上一本 / 下一本", group: "阅读器" },
-  { keys: "Ctrl+C", action: "复制当前页到剪贴板", group: "阅读器" },
-  { keys: "Ctrl+Enter", action: "在资源管理器中定位画集", group: "阅读器" },
-  { keys: "右键", action: "阅读器菜单（翻页/缩放/播放/图片操作）", group: "阅读器" },
-  { keys: "Esc", action: "退出阅读 / 关面板", group: "阅读器" },
-  { keys: "Ctrl+H", action: "老板键：立刻藏起画匣窗口", group: "全局" },
-  { keys: "Ctrl+Shift+H", action: "老板键呼回（全局热键，藏起后也能按）", group: "全局" },
-  { keys: "主目录右键", action: "导入 / 刷新 / 视图 / 设置", group: "画廊" },
+/** 结构键：与布局/播放语义绑定，不参与自定义。 */
+const FIXED_KEYS: { keys: string; action: string }[] = [
+  { keys: "空格", action: "下一页 / 播放中暂停（按状态自动切换）" },
+  { keys: "Ctrl+1~9 · Ctrl+0", action: "幻灯播放每 N 秒一页 / 关闭幻灯" },
+  { keys: "Ctrl+H · Ctrl+Shift+H", action: "老板键藏窗 / 全局呼回" },
+  { keys: "[ · ]", action: "上一本 / 下一本画集" },
+  { keys: "Esc", action: "关菜单 / 退出阅读" },
+  { keys: "右键", action: "阅读器菜单" },
 ];
 
 /**
@@ -61,6 +61,40 @@ export default function SettingsDialog({
   onClose,
 }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
+  const [bindings, setBindings] = useState(() => loadShortcuts());
+  /** 正在录制的动作；null = 不在录制。 */
+  const [recording, setRecording] = useState<ShortcutAction | null>(null);
+  const [keyHint, setKeyHint] = useState("");
+
+  // 录制：按下的第一枚非修饰键直接作为绑定；Esc 取消。
+  useEffect(() => {
+    if (!recording) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setRecording(null);
+        setKeyHint("");
+        return;
+      }
+      const binding = eventToBinding(event);
+      if (!binding) return;
+      const conflict = (
+        Object.keys(bindings) as ShortcutAction[]
+      ).find((action) => action !== recording && bindings[action] === binding);
+      if (conflict) {
+        setKeyHint(`「${binding}」已绑定给「${SHORTCUT_LABELS[conflict]}」，换一个`);
+        return;
+      }
+      const next = { ...bindings, [recording]: binding };
+      setBindings(next);
+      saveShortcuts(next);
+      setRecording(null);
+      setKeyHint("");
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [recording, bindings]);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -133,11 +167,63 @@ export default function SettingsDialog({
 
             {tab === "keys" && (
               <>
-                <h3>快捷键</h3>
+                <h3>阅读器快捷键（点击右侧按钮后按新键）</h3>
+                <div className="keys-editor">
+                  {(Object.keys(SHORTCUT_LABELS) as ShortcutAction[]).map(
+                    (action) => (
+                      <div className="keys-row" key={action}>
+                        <span className="keys-row-label">
+                          {SHORTCUT_LABELS[action]}
+                        </span>
+                        <button
+                          type="button"
+                          className={`keys-binding${
+                            recording === action ? " is-recording" : ""
+                          }`}
+                          onClick={() =>
+                            setRecording(recording === action ? null : action)
+                          }
+                          title="点击后按新的按键组合（Esc 取消）"
+                        >
+                          {recording === action
+                            ? "按新键…"
+                            : describeBinding(bindings[action])}
+                        </button>
+                        <button
+                          type="button"
+                          className="nav-mini"
+                          title="清除绑定"
+                          onClick={() => {
+                            const next = { ...bindings, [action]: "" };
+                            setBindings(next);
+                            saveShortcuts(next);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ),
+                  )}
+                </div>
+                {keyHint && <p className="keys-hint">{keyHint}</p>}
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => {
+                    const next = { ...DEFAULT_SHORTCUTS };
+                    setBindings(next);
+                    saveShortcuts(next);
+                    setKeyHint("已恢复默认键位");
+                  }}
+                >
+                  恢复默认
+                </button>
+
+                <h3>结构键（固定）</h3>
                 <table className="settings-keys">
                   <tbody>
-                    {KEY_ROWS.map((row) => (
-                      <tr key={`${row.group}-${row.keys}`}>
+                    {FIXED_KEYS.map((row) => (
+                      <tr key={row.keys}>
                         <td className="settings-keys-action">{row.action}</td>
                         <td className="settings-keys-keys">{row.keys}</td>
                       </tr>

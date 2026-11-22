@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import CopyTitleButton from "./CopyTitleButton";
 import { api, assetUrl } from "../api";
 import type { SeriesItem, SeriesSummary } from "../types";
 import {
@@ -159,15 +160,18 @@ export default function SeriesDrawer({
             aria-label="合集名字"
           />
         </div>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onClose}
-          aria-label="关闭合集详情"
-          title="关闭 (Esc)"
-        >
-          <CloseIcon width={14} height={14} />
-        </button>
+        <div className="series-head-tools">
+          <CopyTitleButton text={name} />
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label="关闭合集详情"
+            title="关闭 (Esc)"
+          >
+            <CloseIcon width={14} height={14} />
+          </button>
+        </div>
       </header>
 
       <input

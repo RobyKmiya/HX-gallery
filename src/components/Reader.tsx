@@ -9,6 +9,11 @@ import {
 } from "react";
 import { api, readerPageUrl } from "../api";
 import ReaderMenu, { type ReaderMenuEntry } from "./ReaderMenu";
+import {
+  SHORTCUTS_CHANGED_EVENT,
+  loadShortcuts,
+  matchShortcut,
+} from "../shortcuts";
 import { usePersistentFlag } from "../layout";
 import type {
   AnimMeta,
@@ -283,6 +288,30 @@ export default function Reader({
   const [slidePaused, setSlidePaused] = useState(false);
   /** 右键菜单：光标位置；null = 关闭。 */
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** 快捷键绑定（设置页可改，改完通过自定义事件同步过来）。 */
+  const [shortcuts, setShortcuts] = useState(loadShortcuts);
+  const shortcutsRef = useRef(shortcuts);
+  useEffect(() => {
+    shortcutsRef.current = shortcuts;
+  }, [shortcuts]);
+  useEffect(() => {
+    const sync = () => setShortcuts(loadShortcuts());
+    window.addEventListener(SHORTCUTS_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(SHORTCUTS_CHANGED_EVENT, sync);
+  }, []);
+
+  // 鼠标后退侧键：沉浸态先退出沉浸，再按一次才退出阅读（管理员 11-22）。
+  // 事件由 LibraryView 的侧键处理器派发，避免两边抢同一个 mouseup。
+  useEffect(() => {
+    const exitImmersive = () => setImmersive(false);
+    const closeReader = () => onClose();
+    window.addEventListener("huaxia:exit-immersive", exitImmersive);
+    window.addEventListener("huaxia:close-reader", closeReader);
+    return () => {
+      window.removeEventListener("huaxia:exit-immersive", exitImmersive);
+      window.removeEventListener("huaxia:close-reader", closeReader);
+    };
+  }, [onClose]);
   /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
   /** 收藏到散图夹的弹层与目标区（null = 关闭）。 */
@@ -1098,64 +1127,88 @@ const archiveEpochRef = useRef(0);
       }
 
       if (!info) return;
-      const last = info.pageCount - 1;
-      let handled = true;
 
-      if (event.key.toLowerCase() === "p") {
-        togglePlayback();
-      } else if (onOpenDetail && event.key.toLowerCase() === "i") {
-        onOpenDetail();
-      } else if (
-        event.key === "ArrowRight" ||
-        event.key === "ArrowDown" ||
-        event.key === "PageDown" ||
-        (event.key === " " && !event.shiftKey)
-      ) {
-        if (event.key === " " && (playback || slideshow)) {
-          // 播放模式下空格 = 暂停/继续，不再当翻页键。
-          if (playback) setPlaying((value) => !value);
-          else setSlidePaused((value) => !value);
+      // 空格是结构键：按状态切换「下一页 / 播放暂停」，Shift+空格反向翻页。
+      if (event.key === " ") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          pausePlayback();
+          goPrev();
+        } else if (playback) {
+          setPlaying((value) => !value);
+        } else if (slideshow) {
+          setSlidePaused((value) => !value);
         } else {
           pausePlayback();
           goNext();
         }
-      } else if (
-        event.key === "ArrowLeft" ||
-        event.key === "ArrowUp" ||
-        event.key === "PageUp" ||
-        (event.key === " " && event.shiftKey)
-      ) {
-        pausePlayback();
-        goPrev();
-      } else if (event.key === "Home") {
-        pausePlayback();
-        goTo(0);
-      } else if (event.key === "End") {
-        pausePlayback();
-        goTo(last);
-      } else if (event.key === "+" || event.key === "=") {
-        pausePlayback();
-        zoomIn();
-      } else if (event.key === "-") {
-        pausePlayback();
-        zoomOut();
-      } else if (event.key === "0") {
-        setZoomMode("fit");
-      } else if (event.key.toLowerCase() === "d") {
-        toggleSpread();
-      } else if (event.key.toLowerCase() === "b") {
-        void toggleBookmark();
-      } else if (event.key.toLowerCase() === "l") {
-        setBookmarksOpen((value) => !value);
-      } else if (event.key.toLowerCase() === "t") {
-        setThumbsOpen((value) => !value);
-      } else if (event.key.toLowerCase() === "f") {
-        setImmersive(!immersive);
-      } else {
-        handled = false;
+        return;
       }
 
-      if (handled) event.preventDefault();
+      // 其余动作键走用户绑定表（设置 → 快捷键 可改）。
+      const action = matchShortcut(event, shortcutsRef.current);
+      if (!action) return;
+      event.preventDefault();
+
+      switch (action) {
+        case "nextPage":
+          pausePlayback();
+          goNext();
+          break;
+        case "prevPage":
+          pausePlayback();
+          goPrev();
+          break;
+        case "firstPage":
+          pausePlayback();
+          goTo(0);
+          break;
+        case "lastPage":
+          pausePlayback();
+          goTo(info.pageCount - 1);
+          break;
+        case "zoomIn":
+          pausePlayback();
+          zoomIn();
+          break;
+        case "zoomOut":
+          pausePlayback();
+          zoomOut();
+          break;
+        case "fitPage":
+          setZoomMode("fit");
+          break;
+        case "fitWidth":
+          setZoomMode("width");
+          break;
+        case "toggleSpread":
+          toggleSpread();
+          break;
+        case "toggleImmersive":
+          setImmersive(!immersive);
+          break;
+        case "togglePlayback":
+          togglePlayback();
+          break;
+        case "toggleBookmark":
+          void toggleBookmark();
+          break;
+        case "openBookmarks":
+          setBookmarksOpen(true);
+          break;
+        case "openDetail":
+          onOpenDetail?.();
+          break;
+        case "copyPage":
+          copyCurrentPage();
+          break;
+        case "revealArchive":
+          revealArchive();
+          break;
+        case "toggleThumbs":
+          setThumbsOpen((value) => !value);
+          break;
+      }
     };
 
     window.addEventListener("keydown", handleKey);
@@ -1180,6 +1233,9 @@ const archiveEpochRef = useRef(0);
     setImmersive,
     copyCurrentPage,
     revealArchive,
+    slideshow,
+    setBookmarksOpen,
+    setThumbsOpen,
   ]);
 
   useEffect(() => {

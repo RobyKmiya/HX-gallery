@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -51,6 +52,51 @@ export default function TagCenter({
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [mergeTargetId, setMergeTargetId] = useState<number | "">("");
   const [batchBusy, setBatchBusy] = useState(false);
+  /** 各标签行注册的草稿保存闭包（「保存全部修改」用）。 */
+  const pendingSavesRef = useRef(
+    new Map<number, { dirty: boolean; save: () => Promise<boolean> }>(),
+  );
+  const [dirtyCount, setDirtyCount] = useState(0);
+  const [bulkSaveBusy, setBulkSaveBusy] = useState(false);
+
+  const registerSave = useCallback(
+    (
+      tagId: number,
+      entry: { dirty: boolean; save: () => Promise<boolean> } | null,
+    ) => {
+      const map = pendingSavesRef.current;
+      if (entry) map.set(tagId, entry);
+      else map.delete(tagId);
+      setDirtyCount([...map.values()].filter((item) => item.dirty).length);
+    },
+    [],
+  );
+
+  /** 一键保存所有有改动的标签（管理员 11-22：以前只能一个一个存）。 */
+  async function saveAllDrafts() {
+    if (bulkSaveBusy) return;
+    const dirtyEntries = [...pendingSavesRef.current.values()].filter(
+      (entry) => entry.dirty,
+    );
+    if (dirtyEntries.length === 0) {
+      onNotify("没有待保存的修改", "info");
+      return;
+    }
+    setBulkSaveBusy(true);
+    let saved = 0;
+    try {
+      for (const entry of dirtyEntries) {
+        if (await entry.save()) saved += 1;
+      }
+      setDirtyCount(0);
+      onNotify(
+        saved > 0 ? `已保存 ${saved} 个标签的修改` : "没有保存成功的标签",
+        saved > 0 ? "success" : "error",
+      );
+    } finally {
+      setBulkSaveBusy(false);
+    }
+  }
   const [graph, setGraph] = useState<TagGraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphMinWeight, setGraphMinWeight] = useState(1);
@@ -367,6 +413,7 @@ export default function TagCenter({
       onSaved={handleSaved}
       onDeleted={handleDeleted}
       onBrowse={onBrowseTag}
+      onRegisterSave={registerSave}
     />
   );
 
@@ -617,6 +664,21 @@ export default function TagCenter({
           </div>
         )}
 
+        <div className="tag-bulk-row">
+          <button
+            type="button"
+            className="btn btn-primary btn-compact"
+            disabled={bulkSaveBusy || dirtyCount === 0}
+            onClick={() => void saveAllDrafts()}
+            title="把当前所有改过但未保存的标签一次存完"
+          >
+            保存全部修改{dirtyCount > 0 ? `（${dirtyCount}）` : ""}
+          </button>
+          <span className="tag-bulk-hint">
+            改完多个标签不必逐个点保存；名称/译名/分类会一起提交
+          </span>
+        </div>
+
         <div className="tag-center-list">
           {loading ? (
             <p className="tag-center-hint">正在读取标签…</p>
@@ -707,6 +769,11 @@ interface TagRowProps {
   onSaved: (tag: Tag) => Promise<void>;
   onDeleted: () => Promise<void>;
   onBrowse: (tagId: number) => void;
+  /** 注册「保存本行草稿」的闭包，供「保存全部」批量调用。 */
+  onRegisterSave?: (
+    tagId: number,
+    entry: { dirty: boolean; save: () => Promise<boolean> } | null,
+  ) => void;
 }
 
 function TagRow({
@@ -718,6 +785,7 @@ function TagRow({
   onSaved,
   onDeleted,
   onBrowse,
+  onRegisterSave,
 }: TagRowProps) {
   const [name, setName] = useState(tag.name);
   const [translatedName, setTranslatedName] = useState(tag.translatedName ?? "");
@@ -787,11 +855,17 @@ function TagRow({
   const categoryDirty = category !== (tag.category ?? "");
   const dirty = fieldsDirty || categoryDirty;
 
-  async function save() {
-    if (busy || !dirty) return;
+  // 把「有没有脏草稿 + 怎么保存」交回给父组件，供「保存全部」一次刷完。
+  useEffect(() => {
+    onRegisterSave?.(tag.id, { dirty, save: () => save(true) });
+    return () => onRegisterSave?.(tag.id, null);
+  }, [dirty, onRegisterSave, tag.id, name, translatedName, category]);
+
+  async function save(silent = false): Promise<boolean> {
+    if (busy || !dirty) return false;
     if (!name.trim()) {
-      onNotify("标签名称不能为空", "error");
-      return;
+      if (!silent) onNotify("标签名称不能为空", "error");
+      return false;
     }
 
     setBusy(true);
@@ -808,9 +882,11 @@ function TagRow({
         updated = await api.setTagCategory(tag.id, category.trim() || null);
       }
       await onSaved(updated);
-      onNotify(`已更新标签「${updated.name}」`, "success");
+      if (!silent) onNotify(`已更新标签「${updated.name}」`, "success");
+      return true;
     } catch (error) {
-      onNotify(`保存标签失败：${String(error)}`, "error");
+      if (!silent) onNotify(`保存标签失败：${String(error)}`, "error");
+      return false;
     } finally {
       setBusy(false);
     }

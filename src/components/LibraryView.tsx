@@ -409,6 +409,21 @@ export default function LibraryView({
    */
   const [activeQueue, setActiveQueue] = useState<Queue | null>(null);
 
+  // 换了收藏夹、切了视图、或打开了别的面板：合集详情自动收起（管理员 11-22：
+  // 「点了合集再点画廊不会关」）。
+  useEffect(() => {
+    setOpenSeries(null);
+  }, [
+    activeCollectionId,
+    activeQueue?.id,
+    looseView,
+    tagCenterOpen,
+    queuePanelOpen,
+    trashOpen,
+    settingsOpen,
+    viewMode,
+  ]);
+
   /** 打开待看目录：切到它的成员列表，并退出收藏夹视图。 */
   const openQueue = useCallback((queue: Queue) => {
     setActiveCollectionId(null);
@@ -534,6 +549,20 @@ export default function LibraryView({
       const now = Date.now();
       if (now - lastSideNavAtRef.current < 250) return;
       lastSideNavAtRef.current = now;
+
+      // 阅读器开着时侧键归阅读器：沉浸态先退出沉浸，非沉浸才退出阅读。
+      // 用自定义事件派发，避免 LibraryView 与 Reader 争抢同一个 mouseup。
+      const readerEl = document.querySelector(".reader");
+      if (readerEl) {
+        window.dispatchEvent(
+          new CustomEvent(
+            readerEl.classList.contains("is-immersive")
+              ? "huaxia:exit-immersive"
+              : "huaxia:close-reader",
+          ),
+        );
+        return;
+      }
 
       if (event.button === 3) goBack();
       else goForward();
@@ -3141,7 +3170,11 @@ export default function LibraryView({
                       <SeriesCard
                         key={entry.id}
                         series={entry}
-                        onOpen={setOpenSeries}
+                        onOpen={(next) => {
+                          // 合集详情与画廊详情是两块独立浮层，打开一个就收另一个。
+                          setSelected(null);
+                          setOpenSeries(next);
+                        }}
                       />
                     ))}
                   </div>
@@ -3514,6 +3547,14 @@ export default function LibraryView({
           existingNames={seriesList.map((entry) => entry.name)}
           onCreate={(name) => void createSeriesFromSelection(name)}
           onClose={() => setSeriesCreateOpen(false)}
+        />
+      )}
+
+      {openSeries && (
+        <div
+          className="series-drawer-backdrop"
+          onClick={() => setOpenSeries(null)}
+          aria-hidden="true"
         />
       )}
 
