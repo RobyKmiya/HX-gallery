@@ -1799,6 +1799,7 @@ fn concurrent_writes_wait_for_the_lock_instead_of_failing() {
     let fixture = Fixture::new();
     let holder_path = fixture.library.clone();
     let (locked_tx, locked_rx) = mpsc::channel();
+    let (commit_tx, commit_rx) = mpsc::channel::<Instant>();
 
     // 另一条连接先拿走写锁并持有 700ms。
     // 用 channel 握手而不是 sleep 固定时长：机器负载高时（并行跑测试、后台在编译）
@@ -1816,23 +1817,41 @@ fn concurrent_writes_wait_for_the_lock_instead_of_failing() {
             .unwrap();
         locked_tx.send(()).unwrap();
         std::thread::sleep(Duration::from_millis(700));
+        let commit_at = Instant::now();
         transaction.commit().unwrap();
+        commit_tx.send(commit_at).unwrap();
     });
 
     locked_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("占锁线程没能及时拿到写锁");
+
+    // 计时断言（waited >= 300ms）在构建高负载下会误判：主线程从收到信号到
+    // 开始抢锁本身可能延迟几百毫秒，等出来的时长就被压到阈值以下。
+    // 改成验证真正的性质——主线程拿到锁的时刻必须晚于占锁线程 commit 的时刻。
+    // 为保证「确实在持锁窗口内发起过抢锁」，把抢锁放并行线程立刻启动。
     let other = db::open_worker_connection(&fixture.library).unwrap();
-    let started = Instant::now();
-    let transaction =
-        db::begin_write(&other).expect("应当等待写锁，而不是立刻报 database is locked");
-    let waited = started.elapsed();
-    transaction.rollback().unwrap();
+    let attempt = std::thread::spawn(move || {
+        let started = Instant::now();
+        let transaction = db::begin_write(&other)
+            .expect("应当等待写锁，而不是立刻报 database is locked");
+        let acquired_at = Instant::now();
+        let waited = started.elapsed();
+        transaction.rollback().unwrap();
+        (waited, acquired_at)
+    });
+
+    let (waited, acquired_at) = attempt.join().unwrap();
+    let commit_at = commit_rx.recv().expect("占锁线程没有报告提交时刻");
     holder.join().unwrap();
 
     assert!(
-        waited >= Duration::from_millis(300),
-        "没有发生等待，说明写锁没有被真正持有过：{waited:?}"
+        acquired_at >= commit_at,
+        "主线程在占锁线程提交之前就拿到了写锁，等待形同虚设：等了 {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(50),
+        "抢锁几乎瞬间成功，说明测试时序本身不对：{waited:?}"
     );
 }
 
