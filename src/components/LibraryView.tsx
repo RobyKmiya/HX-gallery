@@ -269,6 +269,10 @@ export default function LibraryView({
   const importDialogRef = useRef<ImportDialogHandle>(null);
   const [selected, setSelected] = useState<ArchiveCardData | null>(null);
   const [readerCard, setReaderCard] = useState<ArchiveCardData | null>(null);
+  /** 合集连读：正在读的合集成员顺序（archiveId 列表）。从合集面板打开时设置。 */
+  const [readerSeriesIds, setReaderSeriesIds] = useState<number[] | null>(
+    null,
+  );
   /** 详情面板形态：dock = 停靠在画廊旁（外拓），float = 悬浮遮罩。 */
   const [detailDock, setDetailDock] = useState<"dock" | "float">(
     savedPrefs.detailDock === "float" ? "float" : "dock",
@@ -1277,9 +1281,44 @@ export default function LibraryView({
     [items, readerCard],
   );
 
+  /** 合集连读：当前本子所属合集的成员顺序；不在合集里（或本子不在其中）时为 null。 */
+  const readerSeriesNav = useMemo(() => {
+    if (!readerCard || !readerSeriesIds) return null;
+    if (!readerSeriesIds.includes(readerCard.id)) return null;
+    const index = readerSeriesIds.indexOf(readerCard.id);
+    return {
+      prev: index > 0 ? readerSeriesIds[index - 1] : null,
+      next:
+        index < readerSeriesIds.length - 1 ? readerSeriesIds[index + 1] : null,
+    };
+  }, [readerCard, readerSeriesIds]);
+
   const switchReaderArchive = useCallback(
     (direction: -1 | 1) => {
       if (!readerCard) return;
+      // 合集连读：按合集的集数顺序切，不按画廊网格顺序。
+      if (readerSeriesNav) {
+        const targetId =
+          direction === 1 ? readerSeriesNav.next : readerSeriesNav.prev;
+        if (targetId == null) return;
+        if (switchingReaderRef.current) return;
+        switchingReaderRef.current = true;
+        void (async () => {
+          try {
+            const result = await api.queryArchives({
+              archiveIds: [targetId],
+              pageSize: 12,
+            });
+            const card = result.items[0];
+            if (card) setReaderCard(card);
+          } catch {
+            // 取不到就停在当前话，不打断阅读
+          } finally {
+            switchingReaderRef.current = false;
+          }
+        })();
+        return;
+      }
       const index = items.findIndex((item) => item.id === readerCard.id);
       if (index < 0) return;
       const next = items[index + direction];
@@ -1308,7 +1347,7 @@ export default function LibraryView({
         }
       })();
     },
-    [items, page, queryPage, readerCard],
+    [readerSeriesNav, items, page, queryPage, readerCard],
   );
 
   const updateReaderProgress = useCallback(
@@ -3438,6 +3477,10 @@ export default function LibraryView({
                   notify("这一话已经不在库里了", "error");
                   return;
                 }
+                // 记下这合集的集数顺序，阅读器读完一话自动接下一话。
+                setReaderSeriesIds(
+                  openSeries.items.map((entry) => entry.archiveId),
+                );
                 setReaderCard(card);
                 setOpenSeries(null);
               } catch (error) {
@@ -3452,15 +3495,26 @@ export default function LibraryView({
       {readerCard && (
         <Reader
           card={readerCard}
-          onClose={() => setReaderCard(null)}
+          onClose={() => {
+            setReaderCard(null);
+            setReaderSeriesIds(null);
+          }}
           onNotify={notify}
           onProgress={updateReaderProgress}
           onSwitchArchive={switchReaderArchive}
-          hasPrevArchive={readerIndex > 0 || (readerIndex === 0 && page > 1)}
-          hasNextArchive={
-            readerIndex >= 0 &&
-            (readerIndex < items.length - 1 || page < totalPagesRef.current)
+          hasPrevArchive={
+            readerSeriesNav
+              ? readerSeriesNav.prev != null
+              : readerIndex > 0 || (readerIndex === 0 && page > 1)
           }
+          hasNextArchive={
+            readerSeriesNav
+              ? readerSeriesNav.next != null
+              : readerIndex >= 0 &&
+                (readerIndex < items.length - 1 ||
+                  page < totalPagesRef.current)
+          }
+          continuousNext={readerSeriesNav != null}
           onOpenDetail={() => setReaderDetailOpen(true)}
           detailOpen={readerDetailOpen}
         />

@@ -45,6 +45,8 @@ interface ReaderProps {
   onSwitchArchive?: (direction: -1 | 1) => void;
   hasPrevArchive?: boolean;
   hasNextArchive?: boolean;
+  /** 合集连读：翻到最后一页再往后，直接接下一话（而不是停在末页）。 */
+  continuousNext?: boolean;
   /** 在阅读器里打开详情浮层（LibraryView 挂 DetailDrawer）。「详情 (I)」按钮。 */
   onOpenDetail?: () => void;
   /** 详情浮层开着时置真：Esc 交给浮层处理，阅读器不抢。 */
@@ -213,6 +215,7 @@ export default function Reader({
   onSwitchArchive,
   hasPrevArchive = false,
   hasNextArchive = false,
+  continuousNext = false,
   onOpenDetail,
   detailOpen = false,
 }: ReaderProps) {
@@ -765,7 +768,28 @@ const archiveEpochRef = useRef(0);
   );
 
   const step = spread ? 2 : 1;
-  const goNext = useCallback(() => goTo(page + step), [goTo, page, step]);
+  const goNext = useCallback(() => {
+    const count = info?.pageCount ?? 0;
+    if (count === 0) return;
+    const nextIndex = page + step;
+    if (nextIndex < count) {
+      setPage(Math.min(nextIndex, count - 1));
+      return;
+    }
+    // 已经是最后一页：合集连读时直接接下一话；否则保持原样停在末页。
+    if (continuousNext && hasNextArchive && onSwitchArchive) {
+      onSwitchArchive(1);
+      onNotify("这一话读完，自动接下一话", "info");
+    }
+  }, [
+    info,
+    page,
+    step,
+    continuousNext,
+    hasNextArchive,
+    onSwitchArchive,
+    onNotify,
+  ]);
   const goPrev = useCallback(() => goTo(page - step), [goTo, page, step]);
 
   /** 任何手动操作（翻页/缩放/拖动/跳页）都暂停播放，交给用户接管。 */
@@ -1233,7 +1257,10 @@ const archiveEpochRef = useRef(0);
       : "—";
   const progress =
     pageCount > 0 ? Math.min(100, ((lastVisible + 1) / pageCount) * 100) : 0;
-  const canNext = pageCount > 0 && page + step < pageCount;
+  const canNext =
+    pageCount > 0 &&
+    (page + step < pageCount ||
+      (continuousNext && hasNextArchive && onSwitchArchive != null));
   const zoomLabel =
     zoomMode === "fit"
       ? "适应页面"
