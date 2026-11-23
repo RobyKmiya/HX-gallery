@@ -94,3 +94,4 @@ src-tauri/target/debug/galleryctl.exe --library "F:/Hthings/BENZI" stats
 - [2026-11-18 · 阅读器连读与待看目录（v8）](logs/2026-11-18-reader-next-and-queue.md)
 - [2026-11-18 · 单实例守卫与更新不生效根因](logs/2026-11-18-single-instance-and-update-flow.md)
 - [2026-11-18 · 一键发布脚本（自动抬版本+打包+安装）](logs/2026-11-18-one-command-release.md)
+- [2026-11-23 · ExHentai 标签整理器（粘贴→解析→整理→复制，可从画集详情页确认导入）](logs/2026-11-23-exhentai-tag-sorter.md)

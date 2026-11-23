@@ -24,10 +24,12 @@
  * - 名字里的下划线换成空格（Danbooru 用 `long_hair` 表示「long hair」这一个标签）。
  */
 
+import { markdownTablesToTagLines } from "./exhentaiTagParser.ts";
+
 export const MAX_TAG_NAME_LENGTH = 100;
 
 /** 命名空间 → 应用内大类。键统一小写比较。 */
-const NAMESPACE_CATEGORIES: Record<string, string> = {
+export const NAMESPACE_CATEGORIES: Record<string, string> = {
   language: "语言",
   lang: "语言",
   语言: "语言",
@@ -282,6 +284,10 @@ export function parseTagInput(
   const rejected: RejectedTag[] = [];
   const seen = new Set<string>();
   let category: string | null = null;
+
+  // Markdown 表格（ExHentai 复制出来的那种）先就地转成 `ns: a\tb` 行，
+  // 剩下的切分/映射全交给下面既有逻辑。不含 `|` 的输入原样返回，行为不变。
+  raw = markdownTablesToTagLines(raw, Object.keys(NAMESPACE_CATEGORIES));
 
   // 先把 tag 链接换成 `ns: name` 独立行（走既有的命名空间头解析）。
   raw = raw.replace(TAG_URL_PATTERN, (_match, token: string) => {

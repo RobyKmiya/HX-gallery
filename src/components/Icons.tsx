@@ -240,6 +240,17 @@ export function FilterIcon(props: IconProps) {
   );
 }
 
+/** 标签整理器：三横线 + 一条下拉箭头，示意「把一堆东西归拢、拉直」。 */
+export function SortIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 6h9M4 12h13M4 18h7" />
+      <path d="M18 9v9" />
+      <path d="m15 15 3 3 3-3" />
+    </svg>
+  );
+}
+
 export function GraphIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

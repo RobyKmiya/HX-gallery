@@ -9,6 +9,7 @@ import {
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import CopyTitleButton from "./CopyTitleButton";
+import TagSorter from "./TagSorter";
 import { formatBytes, formatDateTime } from "../format";
 import { parseTagInput, summarizeByCategory, tagsFromHtml, tagsToCopyText } from "../tags";
 import type {
@@ -28,6 +29,7 @@ import {
   PlusIcon,
   RevealIcon,
   SearchIcon,
+  SortIcon,
   StarIcon,
   SwapIcon,
   TagIcon,
@@ -152,6 +154,7 @@ export default function DetailDrawer({
   const [tagPickerQuery, setTagPickerQuery] = useState("");
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   const [bulkTagText, setBulkTagText] = useState("");
+  const [tagSorterOpen, setTagSorterOpen] = useState(false);
   const [memberIds, setMemberIds] = useState<number[]>([]);
   const [collectionBusyId, setCollectionBusyId] = useState<number | null>(null);
   const [coverBusyId, setCoverBusyId] = useState<number | null>(null);
@@ -915,21 +918,34 @@ export default function DetailDrawer({
             <span className="meta-hint">
               {tags.length > 0 ? `${tags.length} 个` : "尚未添加"}
             </span>
-            {tags.length > 0 && (
+            <div className="meta-panel-actions">
               <button
                 type="button"
                 className="btn btn-quiet btn-compact"
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(tagsToCopyText(tags))
-                    .then(() => onNotify("标签已复制（命名空间: 逗号分隔，可直接回贴）", "success"))
-                    .catch(() => onNotify("复制失败", "error"));
-                }}
-                title="复制为「命名空间: 逗号分隔」格式，回贴批量导入可正确拆分"
+                onClick={() => setTagSorterOpen(true)}
+                title="打开标签整理器：粘贴 ExHentai 表格，整理后再决定要不要写进这本"
               >
-                复制标签
+                <SortIcon width={13} height={13} />
+                整理
               </button>
-            )}
+              {tags.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(tagsToCopyText(tags))
+                      .then(() =>
+                        onNotify("标签已复制（命名空间: 逗号分隔，可直接回贴）", "success"),
+                      )
+                      .catch(() => onNotify("复制失败", "error"));
+                  }}
+                  title="复制为「命名空间: 逗号分隔」格式，回贴批量导入可正确拆分"
+                >
+                  复制标签
+                </button>
+              )}
+            </div>
           </div>
 
           {tags.length > 0 && (
@@ -1438,6 +1454,15 @@ export default function DetailDrawer({
           </button>
         </div>
       </aside>
+
+      {tagSorterOpen && (
+        <TagSorter
+          archive={{ id: card.id, title: card.title }}
+          onImport={importTags}
+          onNotify={onNotify}
+          onClose={() => setTagSorterOpen(false)}
+        />
+      )}
     </div>
   );
 }
