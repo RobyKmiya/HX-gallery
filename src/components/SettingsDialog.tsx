@@ -393,6 +393,17 @@ export default function SettingsDialog({
                   <li>鼠标后退侧键：沉浸态先退沉浸，再按退出阅读</li>
                 </ul>
 
+                <h3>从 exhentai 复制标签</h3>
+                <ul className="guide-list">
+                  <li>最省事：在作品页把标签区整块复制，直接粘进导入面板——画匣会自动从文本里抠出所有 tag 链接并还原成「大类 + 名字」。</li>
+                  <li>
+                    想要干净的纯文本：在该页面按 <code>F12</code> 打开控制台，粘贴这行回车
+                    （<code>copy()</code> 是控制台专属，会把结果放进剪贴板）：
+                    <code>copy([...document.querySelectorAll('a[href*="/tag/"]')].map(a =&gt; decodeURIComponent(a.href.split('/tag/')[1]).replace(/\+/g,' ')).join('\n'))</code>
+                  </li>
+                  <li>之后粘贴进画匣即是「female: kissing」这样的行，大类自动归位，不用一个个对照打。</li>
+                </ul>
+
                 <h3>几个常用开关</h3>
                 <ul className="guide-list">
                   <li>双击画集卡片直接开看（沉浸/普通可选）：设置 → 双击画集卡片</li>

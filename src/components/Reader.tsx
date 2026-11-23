@@ -282,9 +282,15 @@ export default function Reader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enterMode, card.id]);
 
-  // 沉浸只收应用内的工具栏，**不动系统标题栏**（11-23：每次增删标题栏都会让
-  // 窗口重排重绘，肉眼可见地晃一下、闪一下，还有残影——干脆完全不碰窗口）。
-  // 想要真全屏用系统快捷键（Win+↑ / F11 由系统接管）。
+  // 真无边框（管理员 11-23 要「连标题栏都没了」的版本）：
+  // 打开阅读器时**一次性**去掉标题栏，关闭时**一次性**还原——整个阅读会话
+  // 期间窗口零调整，不会再有晃动/闪烁/残影。F 切沉浸只动应用内工具栏。
+  useEffect(() => {
+    void api.setWindowDecorations(false).catch(() => {});
+    return () => {
+      void api.setWindowDecorations(true).catch(() => {});
+    };
+  }, []);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
   /** 缩略图栏宽度：分界线可拖，缩略图随空余位置自适应（11-23）。 */

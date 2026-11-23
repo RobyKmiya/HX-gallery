@@ -254,6 +254,26 @@ export function tagsFromHtml(html: string): string | null {
   return text || null;
 }
 
+/**
+ * exhentai / e-hentai 的 tag 链接（管理员 11-23）：
+ * `https://exhentai.org/tag/female:kissing` 这类 URL 直接粘进来也能解析——
+ * 抠出 `/tag/` 后面的 token，还原成 `ns: name` 交给正常解析流程。
+ */
+const TAG_URL_PATTERN = /https?:\/\/[^\s"'<>（）:]*?\/tag\/([^\s"'<>（）]+)/gi;
+
+function decodeTagUrlToken(token: string): string {
+  let decoded = token;
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    // 编码不完整就保留原样
+  }
+  return decoded
+    .replace(/\+/g, " ")
+    .replace(/[.,;，。；」』）)\]]+$/u, "")
+    .trim();
+}
+
 export function parseTagInput(
   raw: string,
   knownNames?: readonly string[],
@@ -262,6 +282,17 @@ export function parseTagInput(
   const rejected: RejectedTag[] = [];
   const seen = new Set<string>();
   let category: string | null = null;
+
+  // 先把 tag 链接换成 `ns: name` 独立行（走既有的命名空间头解析）。
+  raw = raw.replace(TAG_URL_PATTERN, (_match, token: string) => {
+    const decoded = decodeTagUrlToken(token);
+    const colon = decoded.indexOf(":");
+    if (colon <= 0) return " ";
+    const ns = decoded.slice(0, colon).trim();
+    const name = decoded.slice(colon + 1).trim();
+    if (!ns || !name) return " ";
+    return `\n${ns}: ${name}\n`;
+  });
   // 词库：归一化后按长度降序（贪心最长匹配）
   const dictionary = knownNames
     ? knownNames
@@ -323,6 +354,17 @@ export function parseTagInput(
       ? text.split(TAG_SEPARATORS)
       : segmentByDictionary(text, dictionary);
     for (const part of pieces) {
+      const trimmed = part.trim();
+      // 内联命名空间 token：`female:kissing` 这种（无空格）。命中词表就直接
+      // 按命名空间收，不做词库贪心切分——切分可能把名字切坏。
+      const nsMatch = /^([A-Za-z_]+):(.+)$/.exec(trimmed);
+      if (nsMatch) {
+        const mapped = NAMESPACE_CATEGORIES[nsMatch[1].toLowerCase()];
+        if (mapped) {
+          push(nsMatch[2], mapped);
+          continue;
+        }
+      }
       push(part, category);
     }
   }
