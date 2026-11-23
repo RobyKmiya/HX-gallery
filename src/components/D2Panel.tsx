@@ -88,6 +88,13 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
     }
   });
   const [cookieBusyKey, setCookieBusyKey] = useState<string | null>(null);
+  const [adblockOn, setAdblockOn] = useState(() => {
+    try {
+      return window.localStorage.getItem("huaxia.d2.adblock") !== "0";
+    } catch {
+      return true;
+    }
+  });
   const [homeDraft, setHomeDraft] = useState(() => {
     try {
       return window.localStorage.getItem("huaxia.d2.home") || "https://e-hentai.org/";
@@ -284,7 +291,7 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
     setBrowseUrl(next);
     setError("");
     try {
-      await api.d2Open(next);
+      await api.d2Open(next, adblockOn);
     } catch (err) {
       const message = String(err);
       setError(message);
@@ -557,6 +564,30 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
                   保存主页
                 </button>
               </div>
+              <label className="settings-row" style={{ marginTop: 10 }}>
+                <span>广告拦截（内置名单 + 自定义文件，重开浏览窗口生效）</span>
+                <input
+                  type="checkbox"
+                  checked={adblockOn}
+                  onChange={(event) => {
+                    const next = event.target.checked;
+                    setAdblockOn(next);
+                    try {
+                      window.localStorage.setItem("huaxia.d2.adblock", next ? "1" : "0");
+                    } catch {
+                      // 存不了就只在本次生效
+                    }
+                  }}
+                />
+              </label>
+              <p className="queue-hint">
+                在 WebView2 网络请求层拦域名（机制同 AdGuard 的网络过滤）：
+                内置 40+ 个广告/弹窗/统计网络（exoclick、popads、propellerads、hilltopads、
+                doubleclick 等）。想追加域名，往
+                <code>%LOCALAPPDATA%\com.archivegallery.desktop\browser\adblock.txt</code>
+                一行一个写即可（# 开头是注释）。隐藏不了的「页面内广告元素」属于装饰性过滤，
+                可以再写油猴脚本处理。
+              </p>
             </div>
           </section>
 

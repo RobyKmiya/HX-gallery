@@ -54,7 +54,8 @@ export const api = {
    * 没有域名白名单：站点地址灵活多变，硬编码只会把人挡在登录页外面。
    * 能不能抓由解析器决定，和能不能浏览是两件事。
    */
-  d2Open: (url: string) => invoke<void>("d2_open", { url }),
+  d2Open: (url: string, adblock?: boolean) =>
+    invoke<void>("d2_open", { url, adblock: adblock ?? null }),
 
   /** 浏览窗口：后退 / 前进 / 刷新 / 关闭。 */
   d2Back: () => invoke<void>("d2_back"),

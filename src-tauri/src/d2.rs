@@ -316,6 +316,7 @@ fn open_browser_window(
     app: &AppHandle,
     url: tauri::Url,
     label: String,
+    adblock: bool,
 ) -> Result<String, String> {
     let app_for_log = app.clone();
     // 窗口销毁/状态清理都在匣浏览器引擎内部完成（browser.rs）。
@@ -330,6 +331,7 @@ fn open_browser_window(
             extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
             userscript_store: crate::userscripts::store_dir(app),
             size: (1180.0, 860.0),
+            adblock,
             log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),
         },
     )?;
@@ -741,7 +743,7 @@ where
 /// 不设域名白名单：站点地址千变万化，硬编码只会把用户挡在登录页外面。
 /// 是否可抓取由解析器决定，与能否浏览解耦。
 #[tauri::command]
-pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
+pub fn d2_open(app: AppHandle, url: String, adblock: Option<bool>) -> Result<(), String> {
     let parsed = normalize_url(&url)?;
 
     // 浏览器还在且响应正常：激活标签直接导航（保留登录态与历史）。
@@ -764,9 +766,10 @@ pub fn d2_open(app: AppHandle, url: String) -> Result<(), String> {
     let app_for_window = app.clone();
     let target = parsed.to_string();
     // 建窗会阻塞，必须离开调用线程，命令本身立刻返回。
+    let adblock = adblock.unwrap_or(true);
     std::thread::spawn(move || {
         status(&app_for_window, "正在打开浏览窗口…");
-        match open_browser_window(&app_for_window, parsed, label) {
+        match open_browser_window(&app_for_window, parsed, label, adblock) {
             Ok(opened) => {
                 log(&app_for_window, &format!("窗口已创建：{target}（{opened}）"));
                 status(&app_for_window, "窗口已打开，可以直接浏览。");

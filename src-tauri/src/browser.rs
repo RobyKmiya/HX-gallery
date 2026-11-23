@@ -77,6 +77,8 @@ pub struct BrowserOptions {
     pub userscript_store: Option<PathBuf>,
     /// 窗口初始尺寸。
     pub size: (f64, f64),
+    /// 广告拦截开关（管理员 11-23；标签页创建时读一次）。
+    pub adblock: bool,
     /// 宿主日志回调（弹窗/下载/导航/油猴事件都走它）。
     pub log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
 }
@@ -91,6 +93,7 @@ impl Default for BrowserOptions {
             extra_init_scripts: Vec::new(),
             userscript_store: None,
             size: (1180.0, 860.0),
+            adblock: true,
             log: None,
         }
     }
@@ -117,6 +120,127 @@ pub fn is_alive(label: &str) -> bool {
 }
 
 /// 取浏览器的激活标签（抓取流直接拿它来 eval/导航）。
+// ── 广告拦截（管理员 11-23：喜欢 AdGuard，WebView2 装不了扩展，
+// 就在 WebView2 的网络请求层做域名拦截——机制同 AdGuard 的网络过滤）──
+static ADBLOCK_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_adblock_enabled(enabled: bool) {
+    ADBLOCK_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn adblock_enabled() -> bool {
+    ADBLOCK_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 内置拦截名单：主流广告/弹窗/统计网络 + 漫画站常用广告源。
+/// 想扩展：往 `%LOCALAPPDATA%\com.archivegallery.desktop\browser\adblock.txt`
+/// 里一行一个域名追加（会在内置名单基础上生效）。
+const ADBLOCK_DOMAINS: &[&str] = &[
+    // 通用广告网络
+    "doubleclick.net",
+    "googlesyndication.com",
+    "adservice.google.com",
+    "adnxs.com",
+    "rubiconproject.com",
+    "pubmatic.com",
+    "openx.net",
+    "criteo.com",
+    "criteo.net",
+    "taboola.com",
+    "outbrain.com",
+    "mgid.com",
+    "revcontent.com",
+    "adskeeper.co.uk",
+    "adskeeper.com",
+    " serving-sys.com",
+    "smartadserver.com",
+    // 成人站高频弹窗/跳转网络
+    "exoclick.com",
+    "exosrv.com",
+    "exdynsrv.com",
+    "exoclick.net",
+    "popads.net",
+    "popcash.net",
+    "popmyads.com",
+    "popunder.net",
+    "propellerads.com",
+    "propeller-tracking.com",
+    "propellerclick.com",
+    "hilltopads.net",
+    "hilltopads.com",
+    "adsco.re",
+    "adsterratech.com",
+    "revenuehits.com",
+    "juicyads.com",
+    "trafficjunky.net",
+    "trafficjunky.com",
+    "erosyndication.com",
+    "clickadu.com",
+    "onclickmega.com",
+    "onclickperformance.com",
+    "txtrk.net",
+    "adcash.com",
+    "adcashrevenue.com",
+];
+
+/// 读取用户自定义追加名单（可选文件，一行一个域名）。
+fn custom_adblock_domains() -> Vec<String> {
+    static CACHE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let dir = std::env::var("LOCALAPPDATA")
+                .map(|base| {
+                    std::path::PathBuf::from(base)
+                        .join("com.archivegallery.desktop")
+                        .join("browser")
+                        .join("adblock.txt")
+                })
+                .ok();
+            let Some(path) = dir else { return Vec::new() };
+            std::fs::read_to_string(path)
+                .map(|content| {
+                    content
+                        .lines()
+                        .map(|line| line.trim().to_lowercase())
+                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+fn adblock_host_blocked(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    let custom = custom_adblock_domains();
+    ADBLOCK_DOMAINS
+        .iter()
+        .copied()
+        .chain(custom.iter().map(|s| s.as_str()))
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// 给标签页挂上拦截回调：命中名单直接 404。
+fn attach_adblock(
+    builder: tauri::WebviewBuilder<tauri::Wry>,
+) -> tauri::WebviewBuilder<tauri::Wry> {
+    builder.on_web_resource_request(|request, response| {
+        if !adblock_enabled() {
+            return;
+        }
+        let Some(host) = request.uri().host() else {
+            return;
+        };
+        if adblock_host_blocked(host) {
+            *response.status_mut() = tauri::http::StatusCode::NOT_FOUND;
+        }
+    })
+}
+
 /// 拖拽排序：把 tabId 移到第 index 位（类似 Edge 的标签拖动，11-23）。
 /// 只改 tabs 顺序（芯片行展示 + 前后切换语义）；webview 在窗口里的堆叠
 /// 顺序与切换无关，不用动。
@@ -186,6 +310,8 @@ pub fn open(
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
     let app_for_window = app.clone();
     let userscript_store = opts.userscript_store.clone();
+    // 广告拦截开关跟随本次打开（设置里改完重开浏览窗口生效）。
+    set_adblock_enabled(opts.adblock);
     let label_for_thread = label.clone();
     let first_tab_id = format!("{label}-tab-0");
     // 建窗整体放到独立线程（add_child 在同步命令/事件回调里调用会死锁，
@@ -498,6 +624,7 @@ fn attach_tab_hooks(
     label: &str,
     tab_id: &str,
 ) -> tauri::WebviewBuilder<tauri::Wry> {
+    let builder = attach_adblock(builder);
     let label_for_new = label.to_string();
     let label_for_dl = label.to_string();
     let label_for_nav = label.to_string();
