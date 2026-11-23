@@ -63,6 +63,8 @@ export const api = {
   /** 用浏览器里复制的 Cookie 串登录内建浏览器（exhentai 用）。 */
   d2SetCookies: (cookieHeader: string) =>
     invoke<number>("d2_set_cookies", { cookieHeader }),
+  /** 一键抓取当前浏览标签页里的全部 tag（返回每行一个 ns: name）。 */
+  d2CollectTags: () => invoke<string>("d2_collect_tags"),
   d2CloseWindow: () => invoke<void>("d2_close_window"),
 
   /** 读当前浏览窗口地址，供「抓取当前页」一键使用（没开窗口返回空串）。 */

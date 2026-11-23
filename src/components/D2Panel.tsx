@@ -39,6 +39,7 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
   /** Cookie 登录：粘贴 Cookie 头或一行一个 name=value。 */
   const [cookieText, setCookieText] = useState("");
   const [cookieBusy, setCookieBusy] = useState(false);
+  const [tagsBusy, setTagsBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -174,6 +175,22 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
       onNotify(`写入 cookie 失败：${String(error)}`, "error");
     } finally {
       setCookieBusy(false);
+    }
+  }
+
+  /** 一键抓取当前页的全部 tag：结果进剪贴板，去导入面板直接粘。 */
+  async function collectTags() {
+    if (tagsBusy) return;
+    setTagsBusy(true);
+    try {
+      const text = await api.d2CollectTags();
+      const count = text.split("\n").filter((line) => line.trim()).length;
+      await navigator.clipboard.writeText(text);
+      onNotify(`已抓取 ${count} 个标签并复制到剪贴板，去导入面板粘贴即可`, "success");
+    } catch (error) {
+      onNotify(`抓取标签失败：${String(error)}`, "error");
+    } finally {
+      setTagsBusy(false);
     }
   }
 
@@ -452,6 +469,20 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
                 >
                   清空输入
                 </button>
+              </div>
+              <div className="d2-cookie-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-compact"
+                  disabled={tagsBusy}
+                  onClick={() => void collectTags()}
+                  title="在当前打开的标签页里抓全部 /tag/ 链接，整理后进剪贴板"
+                >
+                  {tagsBusy ? "抓取中…" : "一键抓取本页标签"}
+                </button>
+                <span className="queue-hint">
+                  在作品详情页点它，几百个标签一次进剪贴板；普通页面会提示没有 tag。
+                </span>
               </div>
               <p className="queue-hint">
                 只写到浏览窗口的 cookie 库（e-hentai 与 exhentai 共用），不保存到任何文件；

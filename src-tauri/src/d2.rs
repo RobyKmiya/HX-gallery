@@ -876,6 +876,113 @@ pub fn d2_set_cookies(app: tauri::AppHandle, cookie_header: String) -> Result<us
     Ok(written)
 }
 
+/// 一键抓取当前浏览标签页里的全部 tag（管理员 11-23：上百个标签不能一个一个点）。
+///
+/// 通道设计：浏览窗口没有 IPC（安全边界），所以让注入脚本把结果写进
+/// `huaxia_tags_*` 一组 cookie（每块 3000 字符，超长自动分块），Rust 侧用
+/// `cookies_for_url` 读回来再组装。脚本注入是原生 eval，不受页面 CSP 限制。
+#[tauri::command]
+pub async fn d2_collect_tags() -> Result<String, String> {
+    let label = current_label().ok_or_else(|| "浏览窗口还没打开".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let webview = crate::browser::active_webview(&label)?;
+        let url = webview
+            .url()
+            .map_err(|error| format!("拿不到当前页地址: {error}"))?;
+
+        const COLLECT_SCRIPT: &str = r#"
+(function () {
+  var tags = Array.prototype.slice
+    .call(document.querySelectorAll('a[href*="/tag/"]'))
+    .map(function (a) {
+      var m = (a.getAttribute('href') || '').split('/tag/');
+      if (m.length < 2) return null;
+      try { return decodeURIComponent(m[1]).replace(/\+/g, ' ').trim(); }
+      catch (e) { return null; }
+    })
+    .filter(Boolean);
+  var seen = {};
+  var unique = tags.filter(function (t) {
+    var k = t.toLowerCase();
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+  var enc = encodeURIComponent(unique.join('\n'));
+  var chunks = Math.max(1, Math.ceil(enc.length / 3000));
+  for (var i = 0; i < chunks; i++) {
+    document.cookie = 'huaxia_tags_' + i + '=' + enc.slice(i * 3000, (i + 1) * 3000) + ';path=/';
+  }
+  document.cookie = 'huaxia_tags_count=' + chunks + ';path=/';
+})();
+"#;
+        webview
+            .eval(COLLECT_SCRIPT)
+            .map_err(|error| format!("注入抓取脚本失败: {error}"))?;
+
+        // 脚本是同步执行的，cookie 立即可读；轮询只是兜底 race。
+        let mut assembled = String::new();
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let cookies = webview
+                .cookies_for_url(url.clone())
+                .map_err(|error| format!("读取 cookie 失败: {error}"))?;
+            let count = cookies.iter().find(|c| c.name() == "huaxia_tags_count");
+            let Some(count) = count else { continue };
+            let chunks: usize = count.value().parse().unwrap_or(0);
+            if chunks == 0 { continue; }
+            let mut parts = vec![String::new(); chunks];
+            for cookie in &cookies {
+                if let Some(rest) = cookie.name().strip_prefix("huaxia_tags_") {
+                    if let Ok(idx) = rest.parse::<usize>() {
+                        if idx < chunks {
+                            parts[idx] = cookie.value().to_string();
+                        }
+                    }
+                }
+            }
+            if parts.iter().any(String::is_empty) { continue; }
+            assembled = parts.join("");
+            break;
+        }
+        if assembled.is_empty() {
+            return Err("没抓到标签：当前页可能不是作品详情页（本子页才有 tag 列表）".to_string());
+        }
+
+        // 清掉工作 cookie，下次抓取不会串味。
+        let _ = webview.eval("for (var i = 0; i < 50; i++) { document.cookie = 'huaxia_tags_' + i + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/'; } document.cookie = 'huaxia_tags_count=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';");
+
+        let decoded = percent_decode(&assembled);
+        let total = decoded.lines().filter(|line| !line.trim().is_empty()).count();
+        if total == 0 {
+            return Err("当前页没有解析出任何 tag".to_string());
+        }
+        Ok(decoded)
+    })
+    .await
+    .map_err(|error| format!("抓取任务异常结束: {error}"))?
+}
+
+/// 手写的百分号解码（cookie 值由前端 encodeURIComponent 编码）。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &raw[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 /// 解析 Cookie 头：分号或换行分隔，取第一条 `=` 前后。
 fn parse_cookie_pairs(raw: &str) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
