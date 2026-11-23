@@ -917,14 +917,7 @@ pub fn d2_start(
     start_fetch(&app, state.inner(), url)
 }
 
-/// 浏览器工具栏（独立 webview，无 IPC）触发抓取时用：自己从 AppHandle 取状态。
-pub fn start_fetch_from_toolbar(app: &AppHandle, url: String) -> Result<(), String> {
-    use tauri::Manager;
-    let state = app.state::<crate::AppState>();
-    start_fetch(app, state.inner(), url)
-}
-
-/// `d2_start` 与工具栏抓取共用的主体。
+/// `d2_start` 的抓取主体。
 fn start_fetch(app: &AppHandle, state: &AppState, url: String) -> Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|_| "网址格式不正确".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {

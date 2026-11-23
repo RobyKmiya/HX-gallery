@@ -9,7 +9,6 @@
   var lastStateJson = "";
   var addrFocused = false;
   var zoomPct = 100;
-  var grabBusy = false;
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -98,16 +97,6 @@
       }
       render();
     }
-    // 抓取中的忙碌态由 Rust 侧写回 __xkGrab，避免按钮被重复点。
-    if (window.__xkGrab === "busy" && !grabBusy) {
-      grabBusy = true;
-      var g = $("grab");
-      if (g) { g.textContent = "…"; g.title = "正在抓取本页…"; }
-    } else if (window.__xkGrab !== "busy" && grabBusy) {
-      grabBusy = false;
-      var g2 = $("grab");
-      if (g2) { g2.textContent = "⬇"; g2.title = "抓取本页整部漫画入库"; }
-    }
     window.requestAnimationFrame(function () { setTimeout(tick, 120); });
   }
   setTimeout(tick, 120);
@@ -118,11 +107,6 @@
   $("forward").addEventListener("click", function () { req("forward"); });
   $("reload").addEventListener("click", function () { req("reload"); });
   $("home").addEventListener("click", function () { req("home"); });
-  // 抓取本页整部：原来在 D2 面板里，管理员要求挪到浏览器工具栏上。
-  $("grab").addEventListener("click", function () {
-    if (grabBusy) return;
-    req("grab");
-  });
   $("newtab").addEventListener("click", function () {
     req("new", { url: (state && state.activeUrl) || "https://e-hentai.org/" });
   });

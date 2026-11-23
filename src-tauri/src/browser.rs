@@ -1036,32 +1036,6 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
                 "back" => history_action(&label, "back"),
                 "forward" => history_action(&label, "forward"),
                 "reload" => history_action(&label, "reload"),
-                // 工具栏「抓取本页」：把当前激活标签的整部作品抓下来入库。
-                // 原来这个按钮在 D2 面板里且只做了「填入地址」，等于无效；
-                // 管理员要求挪到浏览器工具栏上，做成真抓取。
-                "grab" => {
-                    let current = with_state(&label, |state| {
-                        state
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.id == state.active)
-                            .map(|tab| tab.url.clone())
-                    })
-                    .flatten()
-                    .unwrap_or_default();
-                    if current.trim().is_empty() || current == "about:blank" {
-                        Err("当前标签还没有网址，先打开一个作品页".to_string())
-                    } else {
-                        // 原来的「拿当前页直接抓」是错的：本页 DOM 里的图片永远不是
-                        // 整部作品（画廊要翻页收集），而且是串行 + base64 回传，特别慢。
-                        // 现在只负责打开下载面板：范围、并发、打包都在那儿定。
-                        let opened = crate::gallery_dl::open_panel(&app);
-                        let _ = toolbar.eval("window.__xkGrab = 'busy';");
-                        let _ =
-                            toolbar.eval("setTimeout(function(){ window.__xkGrab = ''; }, 1200);");
-                        opened
-                    }
-                }
                 "reorder" => {
                     let tab_id = req
                         .get("tabId")
