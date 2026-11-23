@@ -404,6 +404,95 @@ const USER_INPUT = [
   eq("26d 未知分类 → 无大类", r.tags[0]?.category, null);
 }
 
+// ------------------------------------------- 27 纯文本 / HTML 粘贴（无表格竖线）
+{
+  // 网页复制成纯文本、或浏览器扩展只给链接不给表格：一行一类，标签横排
+  const input = [
+    `parody: [**arknights**](${URL("parody", "arknights")}) [**genshin impact**](${URL("parody", "genshin impact")})`,
+    `female: [**big breasts**](${URL("female", "big breasts")}) [**blowjob**](${URL("female", "blowjob")})`,
+  ].join("\n");
+  const r = parseExHentaiTags(input);
+  eq(
+    "27a 纯文本链接横排 · plainText",
+    r.plainText,
+    "parody: arknights，genshin impact\n\nfemale: big breasts，blowjob",
+  );
+  eq("27b 纯文本链接横排 · 标签数", r.statistics.tagCount, 4);
+
+  // 链接竖排：后续行没有分类头，继承上一行
+  const stacked = [
+    `parody: [**arknights**](${URL("parody", "arknights")})`,
+    `[**genshin impact**](${URL("parody", "genshin impact")})`,
+    `female: [**big breasts**](${URL("female", "big breasts")})`,
+  ].join("\n");
+  eq(
+    "27c 纯文本链接竖排 · plainText",
+    parseExHentaiTags(stacked).plainText,
+    "parody: arknights，genshin impact\n\nfemale: big breasts",
+  );
+
+  // 裸 URL 堆着（项目原有能力，这里锁住不被新逻辑改坏）
+  const bareUrl = [
+    `parody: ${URL("parody", "arknights")} ${URL("parody", "genshin impact")}`,
+  ].join("\n");
+  eq(
+    "27d 光秃 URL · plainText",
+    parseExHentaiTags(bareUrl).plainText,
+    "parody: arknights，genshin impact",
+  );
+
+  // HTML 片段：<a> 必须先转 markdown 再丢标签，否则空格一丢就分不开了
+  const htmlDiv =
+    `<div>parody: <a href="${URL("parody", "arknights")}">arknights</a>` +
+    `<a href="${URL("parody", "genshin impact")}">genshin impact</a></div>`;
+  eq(
+    "27e HTML div 片段 · plainText",
+    parseExHentaiTags(htmlDiv).plainText,
+    "parody: arknights，genshin impact",
+  );
+
+  const htmlTable =
+    `<table><tr><td>female:</td><td><a href="${URL("female", "big breasts")}">big breasts</a></td>` +
+    `<td><a href="${URL("female", "blowjob")}">blowjob</a></td></tr></table>`;
+  eq(
+    "27f HTML 表格 · plainText",
+    parseExHentaiTags(htmlTable).plainText,
+    "female: big breasts，blowjob",
+  );
+
+  // 制表符分隔（表格复制到记事本再粘回来）
+  const tabbed = ["parody:\tarknights\tgenshin impact", "female:\tbig breasts\tblowjob"].join("\n");
+  eq(
+    "27g 制表符分隔 · plainText",
+    parseExHentaiTags(tabbed).plainText,
+    "parody: arknights，genshin impact\n\nfemale: big breasts，blowjob",
+  );
+
+  // 最惨的情况：纯空格，没有任何边界 —— 不硬拆，但必须给一条明确提示
+  const glued = parseExHentaiTags("arknights genshin impact big breasts blowjob");
+  eq("27h 纯空格粘连 · 不硬拆", glued.statistics.tagCount, 1);
+  ok(
+    "27i 纯空格粘连 · 有 SUSPICIOUS_LONG_TAG 提示",
+    glued.errors.some((error) => error.code === "SUSPICIOUS_LONG_TAG"),
+  );
+
+  // 批量导入（parseTagInput）这条也要能吃无竖线的链接行
+  eq(
+    "27j parseTagInput · 无竖线链接行",
+    parseTagInput(input).tags.map((tag) => `${tag.category}/${tag.name}`),
+    ["原作/arknights", "原作/genshin impact", "女性/big breasts", "女性/blowjob"],
+  );
+  eq(
+    "27k parseTagInput · HTML 片段",
+    parseTagInput(htmlDiv).tags.map((tag) => tag.name),
+    ["arknights", "genshin impact"],
+  );
+
+  // 保护性：既没竖线也没链接的纯文本，必须逐字不变（不能碰既有行为）
+  const plainComma = "female: big breasts, sole female";
+  eq("27l 无链接纯文本 · 桥接原样返回", markdownTablesToTagLines(plainComma), plainComma);
+}
+
 // ------------------------------------------------------------------ 汇总
 if (failures.length === 0) {
   console.log(`全部通过：${passed} 项`);

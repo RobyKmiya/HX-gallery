@@ -32,7 +32,8 @@ export type ParseErrorCode =
   | "ORPHAN_ROW"
   | "EMPTY_ROW"
   | "OVERLONG_TAG"
-  | "BAD_URL";
+  | "BAD_URL"
+  | "SUSPICIOUS_LONG_TAG";
 
 export interface ParseError {
   code: ParseErrorCode;
@@ -128,8 +129,8 @@ const TABLE_DIVIDER = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/;
 const PIPE_PLACEHOLDER = "\u0001";
 
 function normalizeInput(raw: string): string {
-  return htmlTablesToText(
-    raw
+  return htmlToText(
+    toMarkdownAnchors(raw)
       .replace(/^\uFEFF/, "")
       .replace(/\r\n?/g, "\n")
       .replace(/[\u200B-\u200D\uFEFF]/g, "")
@@ -137,20 +138,40 @@ function normalizeInput(raw: string): string {
   );
 }
 
+/** 认得出的 HTML 标签。只认白名单，避免把 `a<b>c` 这种正文误当标签吃掉。 */
+const HTML_TAG =
+  /<\/?(?:a|abbr|b|br|div|em|font|h[1-6]|hr|i|img|li|ol|p|small|span|strong|table|tbody|td|th|thead|tr|ul)\b[^>]*>/i;
+
 /**
- * 把 HTML 表格拍平成管道分隔的纯文本。
+ * `<a href="url">文本</a>` → `[文本](url)`。
+ *
+ * **这一步不能省**：链接边界就是标签边界。若直接把 `<a>` 丢掉，网页版的
+ * `arknights` 与 `genshin impact` 就只剩中间那个空格，两者再也分不开。
+ * 转成 markdown 后，下游的 `extractCellTags` 能原样按链接切。
+ */
+function toMarkdownAnchors(raw: string): string {
+  if (!/<a\b/i.test(raw)) return raw;
+  return raw.replace(
+    /<a\b[^>]*?href\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a\s*>/gi,
+    (_match, href: string, inner: string) =>
+      `[${inner.replace(/<[^>]+>/g, "").trim()}](${href})`,
+  );
+}
+
+/**
+ * 把 HTML 片段拍平成带管道/换行的纯文本。
  *
  * 从网页复制时剪贴板里常常同时带着 `text/html`，用户也可能整段贴源码。
  * 这里不用 DOMParser（保持纯函数、可在 Node 下直测），只做四件事：
- * `</td>`/`</th>` → ` | `、`</tr>` → 换行、其余标签丢弃、常见实体还原。
- * 丢标签的同时也丢了 `href`，但链接文字本来就是标签名的主体，够用。
+ * `</td>`/`</th>` → ` | `、`</tr>` → 换行、块级收尾换行、其余标签丢弃，最后还原实体。
  */
-function htmlTablesToText(raw: string): string {
-  if (!/<t[rhd][\s>]/i.test(raw)) return raw;
+function htmlToText(raw: string): string {
+  if (!HTML_TAG.test(raw)) return raw;
   return raw
     .replace(/<\s*br\s*\/?>/gi, "\n")
     .replace(/<\s*\/\s*(td|th)\s*>/gi, " | ")
     .replace(/<\s*\/\s*tr\s*>/gi, " |\n")
+    .replace(/<\s*\/\s*(?:p|div|li|h[1-6])\s*>/gi, "\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
@@ -431,11 +452,18 @@ function truncate(text: string, limit = 40): string {
  * `location`）如果照样写 `location: a`，下游会把它当成一个带冒号的标签名，
  * 反而更脏；所以这种分类只留标签、不留头。传空即全部保留分类头。
  */
+/** 任意一个位置上的 markdown 链接。用于判断「这行要不要按链接边界拆」。 */
+const MD_LINK_ANY = /\[[^\]]*\]\([^)]*\)/;
+
+/** 行首分类头。冒号后**必须**有空白 —— `re:从零开始` 那种标签名不能被当成分类劈开。 */
+const LEAD_CATEGORY = /^([A-Za-z][A-Za-z0-9_-]{0,31})\s*[:：][ \t]+/;
+
 export function markdownTablesToTagLines(
   raw: string,
   knownCategories?: readonly string[],
 ): string {
-  if (!raw.includes("|")) return raw;
+  // 既没有表格竖线、没有行内链接、也没有 HTML 片段 → 原样返回，既有行为一字不变。
+  if (!raw.includes("|") && !MD_LINK_ANY.test(raw) && !HTML_TAG.test(raw)) return raw;
 
   const known = knownCategories
     ? new Set(knownCategories.map((key) => key.toLowerCase()))
@@ -451,23 +479,38 @@ export function markdownTablesToTagLines(
     if (TABLE_DIVIDER.test(text)) continue;
 
     const cells = splitTableRow(text);
-    if (!cells) {
-      out.push(line);
+    if (cells) {
+      const category = detectCategoryCell(cells[0]);
+      const keepHeader = category !== null && (!known || known.has(category));
+      const rest = category ? cells.slice(1) : cells;
+      const names: string[] = [];
+      for (const cell of rest) {
+        names.push(...extractCellTags(cell).tags);
+      }
+      if (names.length === 0) {
+        if (keepHeader) out.push(`${category}:`);
+        continue;
+      }
+      out.push(keepHeader ? `${category}: ${names.join("\t")}` : names.join("\t"));
       continue;
     }
 
-    const category = detectCategoryCell(cells[0]);
-    const keepHeader = category !== null && (!known || known.has(category));
-    const rest = category ? cells.slice(1) : cells;
-    const names: string[] = [];
-    for (const cell of rest) {
-      names.push(...extractCellTags(cell).tags);
-    }
-    if (names.length === 0) {
-      if (keepHeader) out.push(`${category}:`);
+    // 没有表格竖线，但一行里带着 markdown 链接：`parody: [**a**](u) [**b**](v)`。
+    // 网页复制成纯文本、或浏览器扩展只给链接不给表格时就是这种形状。
+    if (!MD_LINK_ANY.test(text)) {
+      out.push(line);
       continue;
     }
-    out.push(keepHeader ? `${category}: ${names.join("\t")}` : names.join("\t"));
+    const head = LEAD_CATEGORY.exec(text);
+    const body = head ? text.slice(head[0].length) : text;
+    const names = extractCellTags(body).tags;
+    if (names.length === 0) {
+      out.push(line);
+      continue;
+    }
+    const key = head ? head[1].toLowerCase() : null;
+    const keepHeader = key !== null && (!known || known.has(key));
+    out.push(keepHeader ? `${key}: ${names.join("\t")}` : names.join("\t"));
   }
   return out.join("\n");
 }
@@ -645,13 +688,14 @@ export function parseExHentaiTags(
     }
 
     // 旧格式：`female: big breasts, sole female`
+    // 也可能是 `female: [**big breasts**](url) ...` —— 链接行同样走这里，
+    // 所以内容必须交给 extractCellTags（链接边界切分），不能用 splitPlainRun。
     const header = /^([^\s,，;；、:：]{1,24})\s*[:：]\s*([\s\S]*)$/.exec(trimmed);
     if (header && header[2].trim()) {
       const key = normalizeCategoryCase ? header[1].toLowerCase() : header[1];
       lastCategory = key;
       statistics.rowCount += 1;
-      const pieces = splitPlainRun(header[2]);
-      for (const piece of pieces) addTag(piece, key, lineNumber);
+      for (const piece of extractCellTags(header[2]).tags) addTag(piece, key, lineNumber);
       continue;
     }
 
@@ -669,7 +713,7 @@ export function parseExHentaiTags(
         });
       }
       statistics.rowCount += 1;
-      for (const name of splitPlainRun(bare)) addTag(name, category, lineNumber);
+      for (const name of extractCellTags(trimmed).tags) addTag(name, category, lineNumber);
     }
   }
 
@@ -691,6 +735,20 @@ export function parseExHentaiTags(
     pushError({
       code: "NO_TAGS",
       message: "没有识别到任何标签，确认一下粘贴的是不是 ExHentai 的标签表格",
+    });
+  }
+
+  // 纯文本粘贴（没有任何链接/分隔符）时，多个标签会粘成一个长串。
+  // 这种输入本身无法事后还原边界，只能提示用户换格式，所以给一条明确的话。
+  const gluedTag = blocks
+    .flatMap((block) => block.tags)
+    .find((tag) => (tag.match(/\s/g)?.length ?? 0) >= 4);
+  if (gluedTag) {
+    pushError({
+      code: "SUSPICIOUS_LONG_TAG",
+      message:
+        "有个标签长到不像单个标签，可能是多个标签被空格粘在一起了。粘贴带链接的表格（每格一个【**标签**】）才能正确分开",
+      sample: truncate(gluedTag),
     });
   }
 
