@@ -545,10 +545,35 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
           headers: details.headers || {{}},
           data: typeof details.data === "string" ? details.data : "",
           responseType: type,
+          // 宿主看到这个标记才开进度探针（每 150ms 看一眼落盘字节数）。
+          hasProgress: typeof details.onprogress === "function",
           state: "pending",
         }};
+        var item = q.items[id];
         var aborted = false;
         var startedAt = Date.now();
+        var gotProgress = false;
+        var gotHeaders = false;
+        // 统一的响应对象：TM 是同一个对象从头用到尾，readyState 一路推进。
+        var res = {{
+          readyState: 0,
+          status: 0,
+          statusText: "",
+          responseText: "",
+          response: "",
+          responseType: type,
+          responseHeaders: "",
+          finalUrl: details.url,
+          responseURL: details.url,
+          loaded: 0,
+          total: 0,
+          lengthComputable: false,
+          error: "",
+        }};
+        function ready(state) {{
+          res.readyState = state;
+          try {{ if (details.onreadystatechange) details.onreadystatechange(res); }} catch (e) {{}}
+        }}
         function decode64(b64) {{
           var bin = window.atob(b64);
           var out = new Uint8Array(bin.length);
@@ -560,11 +585,32 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
           var hit = new RegExp("^" + name + ":[ \\t]*(.*)$", "im").exec(raw);
           return hit ? hit[1].trim() : "";
         }}
+        // 进度：宿主每 150ms 报一次已收字节数（文件落盘大小），total 取
+        // Content-Length，取不到就是 0 → lengthComputable=false。
+        item.onProgress = function (loaded, total) {{
+          if (aborted) return;
+          res.loaded = loaded;
+          res.total = total;
+          res.lengthComputable = total > 0;
+          // 有字节在涨就重置超时基准：大图下载不该被自己的 timeout 掐死。
+          startedAt = Date.now();
+          if (!gotProgress) {{
+            gotProgress = true;
+            if (!gotHeaders) {{ gotHeaders = true; ready(2); }}
+            ready(3);
+          }}
+          try {{ if (details.onprogress) details.onprogress(res); }} catch (e) {{}}
+        }};
+        ready(1);
+        setTimeout(function () {{
+          if (aborted) return;
+          try {{ if (details.onloadstart) details.onloadstart(res); }} catch (e) {{}}
+        }}, 0);
         var timer = setInterval(function () {{
           if (aborted) return;
-          var item = q.items[id];
-          if (!item) {{ clearInterval(timer); return; }}
-          if (item.state !== "done") {{
+          var current = q.items[id];
+          if (!current) {{ clearInterval(timer); return; }}
+          if (current.state !== "done") {{
             // 传统脚本常用 timeout 选项；超时就回 ontimeout，别让它永远等。
             if (details.timeout && Date.now() - startedAt > details.timeout) {{
               clearInterval(timer);
@@ -574,20 +620,14 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
             return;
           }}
           clearInterval(timer);
-          var body = item.responseText || "";
-          var res = {{
-            readyState: 4,
-            status: item.status || 0,
-            statusText: "",
-            responseText: body,
-            response: body,
-            responseType: type,
-            responseHeaders: item.responseHeaders || "",
-            finalUrl: details.url,
-            responseURL: details.url,
-          }};
+          var body = current.responseText || "";
+          res.status = current.status || 0;
+          res.responseHeaders = current.responseHeaders || "";
+          res.responseText = body;
+          res.response = body;
+          res.error = current.errorText || "";
           if (type === "arraybuffer" || type === "blob") {{
-            var bytes = item.responseB64 ? decode64(item.responseB64) : new Uint8Array(0);
+            var bytes = current.responseB64 ? decode64(current.responseB64) : new Uint8Array(0);
             res.responseText = "";
             if (type === "blob") {{
               var mime = headerOf(res.responseHeaders, "content-type") ||
@@ -597,20 +637,21 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
             }} else {{
               res.response = bytes.buffer;
             }}
+            res.loaded = bytes.length;
+            if (!res.total) res.total = bytes.length;
           }} else if (type === "json") {{
             try {{ res.response = JSON.parse(body); }} catch (e) {{ res.response = null; }}
           }}
           // 用完即删：一页图几 MB，堆在页面队列里就是纯泄漏（旧实现从不清理）。
           try {{ delete q.items[id]; }} catch (e) {{}}
-          // 有的脚本只认 onreadystatechange（会自己判 readyState===4）。
-          try {{
-            if (details.onreadystatechange) {{
-              res.readyState = 2; details.onreadystatechange(res);
-              res.readyState = 3; details.onreadystatechange(res);
-              res.readyState = 4; details.onreadystatechange(res);
-            }}
-          }} catch (e) {{}}
-          if (item.error) {{
+          if (!gotHeaders) {{ gotHeaders = true; ready(2); }}
+          if (!gotProgress) {{ gotProgress = true; ready(3); }}
+          ready(4);
+          if (current.error) {{
+            // 传输层失败：error 必须是字符串。漫画织机的 onerror 会直接
+            // response.error.match(...) 取域名，给 undefined 它自己抛异常、
+            // Promise 永不 settle，界面就一直转圈（2026-11-23 补）。
+            if (!res.error) res.error = "网络请求失败：" + details.url;
             try {{ if (details.onerror) details.onerror(res); }} catch (e) {{}}
           }} else {{
             try {{ if (details.onload) details.onload(res); }} catch (e) {{}}
@@ -849,6 +890,19 @@ console.log("hello");
             "responseType 要带给宿主，否则不知道该不该编二进制"
         );
         assert!(source.contains("new Blob([bytes]"), "blob 响应要还原成 Blob");
+        // 2026-11-23：织机下载时靠 onprogress 画进度条、靠 error 字符串报错。
+        assert!(
+            source.contains("hasProgress"),
+            "要告诉宿主有没有 onprogress，别白开探针"
+        );
+        assert!(
+            source.contains("onloadstart") && source.contains("lengthComputable"),
+            "onloadstart / 进度事件都要有"
+        );
+        assert!(
+            source.contains("q.onProgress") || source.contains("item.onProgress"),
+            "宿主进度回调的入口要挂在队列项上"
+        );
         assert!(source.contains("console.log(") && source.contains("hello"), "脚本体应烘焙进加载器");
     }
 

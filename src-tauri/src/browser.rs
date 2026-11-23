@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -1226,6 +1227,11 @@ fn poll_gm_xhr_queue(webview: &Webview) {
             .unwrap_or_default()
             .to_string();
         let binary = matches!(response_type.as_str(), "blob" | "arraybuffer");
+        // 脚本挂了 onprogress 才开进度探针——没挂就别每 150ms 白 eval 一次。
+        let has_progress = item
+            .get("hasProgress")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some(map) = item.get("headers").and_then(|value| value.as_object()) {
             for (key, value) in map {
@@ -1238,7 +1244,15 @@ fn poll_gm_xhr_queue(webview: &Webview) {
         GM_XHR_INFLIGHT.fetch_add(1, Ordering::Relaxed);
         let webview = webview.clone();
         std::thread::spawn(move || {
-            let outcome = curl_xhr(&url, &method, &headers, &data, binary);
+            let mut probe = has_progress.then(|| ProgressProbe::new(&webview, &id));
+            let outcome = curl_xhr(
+                &url,
+                &method,
+                &headers,
+                &data,
+                binary,
+                probe.as_mut().map(|probe| probe as &mut dyn ProgressSink),
+            );
             let result = serde_json::json!({
                 "state": "done",
                 "status": outcome.status,
@@ -1246,6 +1260,7 @@ fn poll_gm_xhr_queue(webview: &Webview) {
                 "responseB64": outcome.base64,
                 "responseHeaders": outcome.headers,
                 "error": outcome.error,
+                "errorText": outcome.error_text,
             })
             .to_string();
             let script = format!(
@@ -1253,7 +1268,7 @@ fn poll_gm_xhr_queue(webview: &Webview) {
                  if (!q) return; var r = {result}; \
                  q.state = r.state; q.status = r.status; q.responseText = r.responseText; \
                  q.responseB64 = r.responseB64; q.responseHeaders = r.responseHeaders; \
-                 q.error = r.error; }})();",
+                 q.error = r.error; q.errorText = r.errorText; }})();",
                 id = id.replace('\\', "\\\\").replace('\'', "\\'"),
                 result = result.replace('\'', "\\'"),
             );
@@ -1283,15 +1298,69 @@ struct XhrOutcome {
     base64: String,
     headers: String,
     error: bool,
+    /// 传输失败时的说明（含 URL）。漫画织机的 `onerror` 里会直接拿它做
+    /// `response.error.match(/https?:\/\/.../)` 提域名报错文案——留空或
+    /// undefined 会让它自己的回调抛异常、Promise 永不 settle，界面永远
+    /// 转圈（2026-11-23 补）。
+    error_text: String,
+}
+
+/// 下载进度出口。抽象成 trait 是为了能在单测里换成计数器，不用造 Webview。
+trait ProgressSink {
+    fn report(&mut self, loaded: u64, total: u64);
+}
+
+/// 把 curl 已落盘的字节数转给页面的 `onprogress`。
+struct ProgressProbe {
+    webview: Webview,
+    id: String,
+    last_loaded: u64,
+    last_total: u64,
+}
+
+impl ProgressProbe {
+    fn new(webview: &Webview, id: &str) -> Self {
+        Self {
+            webview: webview.clone(),
+            id: id.to_string(),
+            // 用 u64::MAX 起手，保证第一次 report（哪怕 0 字节）也会发出去。
+            last_loaded: u64::MAX,
+            last_total: u64::MAX,
+        }
+    }
+}
+
+impl ProgressSink for ProgressProbe {
+    fn report(&mut self, loaded: u64, total: u64) {
+        if loaded == self.last_loaded && total == self.last_total {
+            return;
+        }
+        self.last_loaded = loaded;
+        self.last_total = total;
+        let script = format!(
+            "(function(){{ var q = window.__xkGmXhr && window.__xkGmXhr.items['{id}']; \
+             if (!q || !q.onProgress) return; \
+             try {{ q.onProgress({loaded}, {total}); }} catch (e) {{}} }})();",
+            id = self.id.replace('\\', "\\\\").replace('\'', "\\'"),
+            loaded = loaded,
+            total = total,
+        );
+        let _ = self.webview.eval(&script);
+    }
 }
 
 /// 用 Windows 自带 curl 执行 GM 跨域请求。
+///
+/// 有进度出口时不走 `output()` 阻塞等待，而是 spawn 后每 150ms 看一眼
+/// 落盘文件大小，把 `loaded/total` 报给页面。`total` 从响应头里的
+/// `Content-Length` 取，拿不到就报 0（页面那边对应 `lengthComputable=false`）。
 fn curl_xhr(
     url: &str,
     method: &str,
     headers: &[(String, String)],
     data: &str,
     binary: bool,
+    mut progress: Option<&mut dyn ProgressSink>,
 ) -> XhrOutcome {
     let seq = GM_XHR_SEQ.fetch_add(1, Ordering::Relaxed);
     let stamp = std::time::SystemTime::now()
@@ -1305,7 +1374,8 @@ fn curl_xhr(
 
     let mut command = std::process::Command::new("curl");
     command
-        .arg("-s")
+        // -S 才把错误打到 stderr（-s 会连错误一起吞掉），错误文本要给页面。
+        .arg("-sS")
         // 图片 CDN 几乎都是 302 跳到实际地址，不跟就只能拿到一段空壳 HTML。
         .arg("-L")
         .arg("--max-redirs")
@@ -1334,8 +1404,58 @@ fn curl_xhr(
     if !data.is_empty() && method != "GET" {
         command.arg("--data").arg(data);
     }
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
 
-    let output = command.output();
+    let spawned = command.spawn();
+    let (success, stderr_text) = match spawned {
+        Ok(mut child) => {
+            // 边下边报进度：文件大小就是已收字节数。
+            let mut exited = None;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        exited = Some(status);
+                        break;
+                    }
+                    Ok(None) => {
+                        if let Some(sink) = &mut progress {
+                            let loaded = std::fs::metadata(&body_path)
+                                .map(|meta| meta.len())
+                                .unwrap_or(0);
+                            let total = content_length_of(&head_path);
+                            sink.report(loaded, total);
+                        }
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                    Err(_) => break,
+                }
+            }
+            let stderr_text = child
+                .stderr
+                .take()
+                .and_then(|mut pipe| {
+                    use std::io::Read;
+                    let mut buffer = String::new();
+                    pipe.read_to_string(&mut buffer).ok().map(|_| buffer)
+                })
+                .unwrap_or_default();
+            // 收尾补一次：最后一块写完后 curl 立刻退出，循环里可能还没轮到
+            // 那次 150ms 的采样，进度条就会停在 99%。
+            if let Some(sink) = &mut progress {
+                let loaded = std::fs::metadata(&body_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                let total = content_length_of(&head_path);
+                sink.report(loaded, total);
+            }
+            match exited {
+                Some(status) => (status.success(), stderr_text),
+                None => (false, stderr_text),
+            }
+        }
+        Err(_) => (false, String::new()),
+    };
+
     let head_raw = std::fs::read(&head_path)
         .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
         .unwrap_or_default();
@@ -1344,42 +1464,69 @@ fn curl_xhr(
     let _ = std::fs::remove_file(&head_path);
 
     let (status, headers_text) = parse_header_dump(&head_raw);
-    match output {
-        Ok(output) => {
-            let error = !output.status.success() && status == 0;
-            if binary && body_bytes.len() > GM_XHR_MAX_BINARY {
-                return XhrOutcome {
-                    status,
-                    text: String::new(),
-                    base64: String::new(),
-                    headers: headers_text,
-                    error: true,
-                };
-            }
-            XhrOutcome {
-                status,
-                text: if binary {
-                    String::new()
-                } else {
-                    String::from_utf8_lossy(&body_bytes).to_string()
-                },
-                base64: if binary && !body_bytes.is_empty() {
-                    BASE64.encode(&body_bytes)
-                } else {
-                    String::new()
-                },
-                headers: headers_text,
-                error,
-            }
+    let error = !success && status == 0;
+    let error_text = if error {
+        let detail = stderr_text.trim();
+        if detail.is_empty() {
+            format!("curl: 请求失败 {url}")
+        } else {
+            format!("{} {url}", detail.replace('\n', " "))
         }
-        Err(_) => XhrOutcome {
-            status: 0,
+    } else {
+        String::new()
+    };
+    if binary && body_bytes.len() > GM_XHR_MAX_BINARY {
+        return XhrOutcome {
+            status,
             text: String::new(),
             base64: String::new(),
-            headers: String::new(),
+            headers: headers_text,
             error: true,
-        },
+            error_text: format!(
+                "响应超过 {}MB 上限，未回传：{url}",
+                GM_XHR_MAX_BINARY / 1024 / 1024
+            ),
+        };
     }
+    XhrOutcome {
+        status,
+        text: if binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&body_bytes).to_string()
+        },
+        base64: if binary && !body_bytes.is_empty() {
+            BASE64.encode(&body_bytes)
+        } else {
+            String::new()
+        },
+        headers: headers_text,
+        error,
+        error_text,
+    }
+}
+
+/// 从 `curl -D` 的头文件里读 `Content-Length`（取最后一次出现的值，
+/// 重定向后真正的响应在最后）。读不到就当 0 —— 分块传输本来也没有。
+fn content_length_of(path: &std::path::Path) -> u64 {
+    let Ok(raw) = std::fs::read(path) else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&raw);
+    let mut total = 0u64;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.len() < 15 {
+            continue;
+        }
+        let (name, value) = line.split_at(15);
+        if name.eq_ignore_ascii_case("content-length:") {
+            if let Ok(parsed) = value.trim().parse::<u64>() {
+                total = parsed;
+            }
+        }
+    }
+    total
 }
 
 /// 解析 `curl -D` 抓下来的响应头。跟重定向时这份文件里会有多段，
@@ -1575,7 +1722,7 @@ mod tests {
         ]
         .concat();
         let (url, server) = serve_once(body.clone(), "image/jpeg");
-        let outcome = curl_xhr(&url, "GET", &[], "", true);
+        let outcome = curl_xhr(&url, "GET", &[], "", true, None);
         assert_eq!(outcome.status, 200);
         assert!(!outcome.error, "本地 200 不该判成错误");
         assert!(outcome.text.is_empty(), "二进制请求不该回文本");
@@ -1591,11 +1738,107 @@ mod tests {
             return;
         }
         let (url, server) = serve_once(b"<html>ok</html>".to_vec(), "text/html");
-        let outcome = curl_xhr(&url, "GET", &[], "", false);
+        let outcome = curl_xhr(&url, "GET", &[], "", false, None);
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.text, "<html>ok</html>");
         assert!(outcome.base64.is_empty(), "文本请求不必编 base64");
         server.join().unwrap();
+    }
+
+    /// 慢慢吐字节的服务端：分块发出、块间停顿，用来验证下载中的进度上报。
+    fn serve_slow(chunks: Vec<Vec<u8>>, gap: Duration) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑本地端口");
+        let port = listener.local_addr().unwrap().port();
+        let total: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut scratch = [0u8; 2048];
+                let _ = stream.read(&mut scratch);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\n\
+                     Content-Length: {total}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.flush();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    if index > 0 {
+                        std::thread::sleep(gap);
+                    }
+                    let _ = stream.write_all(chunk);
+                    let _ = stream.flush();
+                }
+            }
+        });
+        (format!("http://127.0.0.1:{port}/slow.jpg"), handle)
+    }
+
+    struct CollectedProgress(Vec<(u64, u64)>);
+
+    impl ProgressSink for CollectedProgress {
+        fn report(&mut self, loaded: u64, total: u64) {
+            self.0.push((loaded, total));
+        }
+    }
+
+    #[test]
+    fn curl_xhr_reports_progress_while_downloading() {
+        if !curl_ready() {
+            return;
+        }
+        // 三块、块间 400ms：150ms 一次的探针一定能踩到中间态。
+        let chunks = vec![vec![7u8; 8192], vec![8u8; 8192], vec![9u8; 8192]];
+        let total = 8192u64 * 3;
+        let (url, server) = serve_slow(chunks, Duration::from_millis(400));
+        let mut sink = CollectedProgress(Vec::new());
+        let outcome = curl_xhr(&url, "GET", &[], "", true, Some(&mut sink));
+        server.join().unwrap();
+
+        assert_eq!(outcome.status, 200, "慢速服务也应返回 200");
+        let seen = &sink.0;
+        assert!(
+            seen.len() >= 2,
+            "下载过程中应至少报两次进度，实际 {} 次：{:?}",
+            seen.len(),
+            seen
+        );
+        let mut last = 0u64;
+        for (loaded, _) in seen {
+            assert!(*loaded >= last, "进度不能倒退：{:?}", seen);
+            last = *loaded;
+        }
+        assert_eq!(
+            seen.last().map(|(loaded, _)| *loaded),
+            Some(total),
+            "最后一次进度应等于总字节数：{:?}",
+            seen
+        );
+        assert!(
+            seen.iter().any(|(loaded, reported_total)| *loaded < total
+                && *reported_total == total),
+            "中途应能报出 Content-Length 作为 total：{:?}",
+            seen
+        );
+    }
+
+    #[test]
+    fn curl_xhr_reports_error_text_with_url() {
+        if !curl_ready() {
+            return;
+        }
+        // 连不上的端口：curl 立刻报错，错文里要带 URL，供脚本提取域名。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}/gone.jpg");
+        let outcome = curl_xhr(&url, "GET", &[], "", false, None);
+        assert!(outcome.error, "连不上应判成传输失败");
+        assert_eq!(outcome.status, 0);
+        assert!(
+            outcome.error_text.contains(&url),
+            "错误文本要带 URL：{}",
+            outcome.error_text
+        );
     }
 
     #[test]
