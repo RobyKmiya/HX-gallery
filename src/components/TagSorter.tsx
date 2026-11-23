@@ -40,14 +40,17 @@ const BLOCK_SEPARATOR_OPTIONS: { value: string; label: string }[] = [
   { value: "\n", label: "分类间不空行" },
 ];
 
-const PLACEHOLDER = `在这里粘贴 ExHentai 的标签表格（Markdown / 网页复制 / 纯文本都行）：
+const PLACEHOLDER = `在这里粘贴 ExHentai 的标签表格（Markdown / 网页纯文本 / HTML 源码都行）：
 
 | parody: | [**arknights**](https://exhentai.org/tag/parody:arknights) | [**genshin impact**](https://exhentai.org/tag/parody:genshin+impact) |
 | female: | [**big breasts**](https://exhentai.org/tag/female:big+breasts) | [**blowjob**](https://exhentai.org/tag/female:blowjob) |
 
 也可以直接贴：
 female: big breasts, sole female
-artist: mountainhan`;
+artist: mountainhan
+
+只有标签名、彼此之间全靠空格的那种（arknights genshin impact …）分不出边界，
+请换成带链接或逗号的格式。`;
 
 /** 画集导入时把 ExHentai 命名空间映射成应用内大类（未收录的归 null）。 */
 function toAppCategory(key: string): string | null {
