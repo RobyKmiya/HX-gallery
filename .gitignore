@@ -39,3 +39,6 @@ backups/
 
 # 分享包（安装包是二进制，走 GitHub Releases，不进仓库）
 /dist-share/
+
+# 本机库路径（私有，不进仓库）
+/scripts/.local-library
