@@ -20,9 +20,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl, Window};
@@ -1163,15 +1166,32 @@ fn poll_tab_req(label: &str, webview: &Webview) {
 /// 油猴跨域 XHR：轮询页面侧 `window.__xkGmXhr` 队列，把 pending 的请求用
 /// curl 发出去，结果写回队列，页面侧垫片轮到自己时 resolve。
 /// 页面始终拿不到 IPC，跨域能力由宿主进程代劳——安全边界不变。
+/// 页内「认领」脚本：把所有 pending 条目原子地置成 running 并原样带回。
+///
+/// 取内容与改状态必须在同一次 eval 里完成。以前是「读一遍 → Rust 判 pending
+/// → 阻塞发请求 → 写回」，而轮询间隔只有 250ms：一个慢请求（图片动辄几秒）
+/// 就能让同一批里的其余条目被反复重发，也会把这一整条轮询线程（连工具栏
+/// 请求一起）堵住。现在认领即置忙，真正的 curl 放到独立线程并发跑。
+const GM_CLAIM_SCRIPT: &str = "JSON.stringify((function(){\
+var q = window.__xkGmXhr, out = {}; if (!q || !q.items) return out;\
+for (var k in q.items) { var it = q.items[k];\
+if (it && it.state === 'pending') { it.state = 'running'; out[k] = it; } }\
+return out; })())";
+
+/// 同时在飞的 GM 跨域请求上限。漫画织机的批量下载会一次抛十几个，
+/// 全放出去会互相抢带宽还容易触发站点限流；超出的留在 pending 下一轮再取。
+const GM_XHR_MAX_INFLIGHT: usize = 6;
+static GM_XHR_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+static GM_XHR_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn poll_gm_xhr_queue(webview: &Webview) {
     if !window_is_alive(webview) {
         return;
     }
-    let raw = match eval_json(
-        webview,
-        "JSON.stringify(window.__xkGmXhr ? window.__xkGmXhr.items : {})",
-        Duration::from_secs(2),
-    ) {
+    if GM_XHR_INFLIGHT.load(Ordering::Relaxed) >= GM_XHR_MAX_INFLIGHT {
+        return;
+    }
+    let raw = match eval_json(webview, GM_CLAIM_SCRIPT, Duration::from_secs(2)) {
         Ok(raw) if !raw.trim().is_empty() && raw != "{}" => raw,
         _ => return,
     };
@@ -1181,9 +1201,6 @@ fn poll_gm_xhr_queue(webview: &Webview) {
     };
 
     for (id, item) in items {
-        if item.get("state").and_then(|state| state.as_str()) != Some("pending") {
-            continue;
-        }
         let url = item
             .get("url")
             .and_then(|value| value.as_str())
@@ -1202,6 +1219,13 @@ fn poll_gm_xhr_queue(webview: &Webview) {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
+        // blob / arraybuffer 说明脚本要的是字节，不是文本 —— 走 base64 回传。
+        let response_type = item
+            .get("responseType")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let binary = matches!(response_type.as_str(), "blob" | "arraybuffer");
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some(map) = item.get("headers").and_then(|value| value.as_object()) {
             for (key, value) in map {
@@ -1211,43 +1235,99 @@ fn poll_gm_xhr_queue(webview: &Webview) {
             }
         }
 
-        let outcome = curl_xhr(&url, &method, &headers, &data);
-        let result = serde_json::json!({
-            "state": "done",
-            "status": outcome.0,
-            "responseText": outcome.1,
-            "responseHeaders": outcome.2,
-            "error": outcome.3,
-        })
-        .to_string();
-        let script = format!(
-            "(function(){{ var q = window.__xkGmXhr && window.__xkGmXhr.items['{id}']; \
-             if (!q) return; var r = {result}; \
-             q.state = r.state; q.status = r.status; q.responseText = r.responseText; \
-             q.responseHeaders = r.responseHeaders; q.error = r.error; }})();",
-            id = id.replace('\\', "\\\\").replace('\'', "\\'"),
-            result = result.replace('\'', "\\'"),
-        );
-        let _ = webview.eval(&script);
+        GM_XHR_INFLIGHT.fetch_add(1, Ordering::Relaxed);
+        let webview = webview.clone();
+        std::thread::spawn(move || {
+            let outcome = curl_xhr(&url, &method, &headers, &data, binary);
+            let result = serde_json::json!({
+                "state": "done",
+                "status": outcome.status,
+                "responseText": outcome.text,
+                "responseB64": outcome.base64,
+                "responseHeaders": outcome.headers,
+                "error": outcome.error,
+            })
+            .to_string();
+            let script = format!(
+                "(function(){{ var q = window.__xkGmXhr && window.__xkGmXhr.items['{id}']; \
+                 if (!q) return; var r = {result}; \
+                 q.state = r.state; q.status = r.status; q.responseText = r.responseText; \
+                 q.responseB64 = r.responseB64; q.responseHeaders = r.responseHeaders; \
+                 q.error = r.error; }})();",
+                id = id.replace('\\', "\\\\").replace('\'', "\\'"),
+                result = result.replace('\'', "\\'"),
+            );
+            let _ = webview.eval(&script);
+            GM_XHR_INFLIGHT.fetch_sub(1, Ordering::Relaxed);
+        });
     }
 }
 
-/// 用 Windows 自带 curl 执行 GM 跨域请求，返回（状态码, 响应体, 响应头, 是否出错）。
+/// 脚本没显式指定 UA 时补的默认值。图床/图库普遍按 UA 拦 curl 的裸请求，
+/// 不带 UA 会直接 403，脚本那边只会看到「下载失败」而不知为何。
+const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0";
+
+/// 二进制回传上限。再大就把单个响应序列化成几十 MB 的 JS 字面量去 eval，
+/// 页面会明显卡顿；正常漫画单页远低于这个尺寸。
+const GM_XHR_MAX_BINARY: usize = 48 * 1024 * 1024;
+
+/// GM 跨域请求的结果。
+///
+/// `text` 与 `base64` 二选一：脚本要 `blob`/`arraybuffer` 时只填 base64。
+/// 以前不管 `responseType` 一律按 UTF-8 文本回，漫画织机取图片就拿到一串
+/// U+FFFD，画出来是空白、批量下载必然失败（2026-11-23 补）。
+struct XhrOutcome {
+    status: u16,
+    text: String,
+    base64: String,
+    headers: String,
+    error: bool,
+}
+
+/// 用 Windows 自带 curl 执行 GM 跨域请求。
 fn curl_xhr(
     url: &str,
     method: &str,
     headers: &[(String, String)],
     data: &str,
-) -> (u16, String, String, bool) {
+    binary: bool,
+) -> XhrOutcome {
+    let seq = GM_XHR_SEQ.fetch_add(1, Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir();
+    let stem = format!("xk-gm-{}-{}-{}", std::process::id(), stamp, seq);
+    let body_path = dir.join(format!("{stem}.bin"));
+    let head_path = dir.join(format!("{stem}.hdr"));
+
     let mut command = std::process::Command::new("curl");
     command
         .arg("-s")
-        .arg("-i")
+        // 图片 CDN 几乎都是 302 跳到实际地址，不跟就只能拿到一段空壳 HTML。
+        .arg("-L")
+        .arg("--max-redirs")
+        .arg("10")
         .arg("--max-time")
-        .arg("60")
+        .arg(if binary { "180" } else { "60" })
+        // 头与体分两个文件：二进制体里随时会出现 "\r\n\r\n"，把它们混在
+        // 一个输出流里没法可靠切分（旧实现用 `-i`，再被 from_utf8_lossy
+        // 过一遍，字节早就废了）。
+        .arg("-D")
+        .arg(&head_path)
+        .arg("-o")
+        .arg(&body_path)
         .arg("-X")
         .arg(method)
         .arg(url);
+    if !headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("user-agent"))
+    {
+        command.arg("-A").arg(DEFAULT_UA);
+    }
     for (key, value) in headers {
         command.arg("-H").arg(format!("{key}: {value}"));
     }
@@ -1255,46 +1335,77 @@ fn curl_xhr(
         command.arg("--data").arg(data);
     }
 
-    match command.output() {
+    let output = command.output();
+    let head_raw = std::fs::read(&head_path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+    let body_bytes = std::fs::read(&body_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&body_path);
+    let _ = std::fs::remove_file(&head_path);
+
+    let (status, headers_text) = parse_header_dump(&head_raw);
+    match output {
         Ok(output) => {
-            let raw = String::from_utf8_lossy(&output.stdout).to_string();
-            let (status, header_text, body) = split_http_response(&raw);
-            (status, body, header_text, !output.status.success() && status == 0)
+            let error = !output.status.success() && status == 0;
+            if binary && body_bytes.len() > GM_XHR_MAX_BINARY {
+                return XhrOutcome {
+                    status,
+                    text: String::new(),
+                    base64: String::new(),
+                    headers: headers_text,
+                    error: true,
+                };
+            }
+            XhrOutcome {
+                status,
+                text: if binary {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&body_bytes).to_string()
+                },
+                base64: if binary && !body_bytes.is_empty() {
+                    BASE64.encode(&body_bytes)
+                } else {
+                    String::new()
+                },
+                headers: headers_text,
+                error,
+            }
         }
-        Err(_) => (0, String::new(), String::new(), true),
+        Err(_) => XhrOutcome {
+            status: 0,
+            text: String::new(),
+            base64: String::new(),
+            headers: String::new(),
+            error: true,
+        },
     }
 }
 
-fn split_http_response(raw: &str) -> (u16, String, String) {
+/// 解析 `curl -D` 抓下来的响应头。跟重定向时这份文件里会有多段，
+/// 取**最后一段**（真正的响应）；返回（状态码, 该段头文本）。
+fn parse_header_dump(raw: &str) -> (u16, String) {
     let mut status = 0u16;
-    let mut header_text = String::new();
-    let mut body = String::new();
-    let mut rest: &str = raw;
-    loop {
-        match rest.find("\r\n\r\n") {
-            Some(index) => {
-                let head = &rest[..index];
-                rest = &rest[index + 4..];
-                // 每一段响应头都解析，状态码取最后一段（跟随重定向后的最终态）。
-                for line in head.lines() {
-                    let line = line.trim();
-                    if let Some(value) = line.strip_prefix("HTTP/") {
-                        if let Some(code) = value.split_whitespace().nth(1) {
-                            if let Ok(parsed) = code.parse() {
-                                status = parsed;
-                                header_text = head.to_string();
-                            }
-                        }
-                    }
+    let mut headers = String::new();
+    for block in raw.split("\r\n\r\n") {
+        let block = block.trim_start_matches("\r\n");
+        let Some(first) = block.lines().next() else {
+            continue;
+        };
+        let Some(value) = first.trim().strip_prefix("HTTP/") else {
+            continue;
+        };
+        // "HTTP/1.1 200 OK" 去掉前缀是 "1.1 200 OK"，版本号在第 0 位。
+        if let Some(code) = value.split_whitespace().nth(1) {
+            if let Ok(parsed) = code.parse::<u16>() {
+                if parsed > 0 {
+                    status = parsed;
+                    headers = block.trim_end().to_string();
                 }
-            }
-            None => {
-                body = rest.to_string();
-                break;
             }
         }
     }
-    (status, header_text, body)
+    (status, headers)
 }
 
 fn log_for(label: &str, message: &str) {
@@ -1385,11 +1496,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn splits_http_response_and_reads_status() {
-        let raw = "HTTP/1.1 302 Found\r\nLocation: https://b/\r\n\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>ok</html>";
-        let (status, header_text, body) = split_http_response(raw);
+    fn parse_header_dump_takes_final_response() {
+        // curl -L 跟一次 302 后，头文件里是两段，要取最后一段的状态与头。
+        let raw = "HTTP/1.1 302 Found\r\nLocation: https://b/\r\n\r\n\
+                   HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\n\r\n";
+        let (status, headers) = parse_header_dump(raw);
         assert_eq!(status, 200, "取最后一段响应的状态码");
-        assert!(header_text.contains("200 OK"));
-        assert_eq!(body, "<html>ok</html>");
+        assert!(headers.contains("200 OK"));
+        assert!(headers.contains("Content-Type: image/jpeg"));
+        assert!(!headers.contains("Location:"), "不该残留重定向那段的头");
+    }
+
+    #[test]
+    fn parse_header_dump_handles_http2_and_continue() {
+        let raw = "HTTP/1.1 100 Continue\r\n\r\nHTTP/2 206 Partial Content\r\nContent-Length: 12\r\n\r\n";
+        let (status, headers) = parse_header_dump(raw);
+        assert_eq!(status, 206);
+        assert!(headers.starts_with("HTTP/2 206"));
+    }
+
+    #[test]
+    fn parse_header_dump_on_garbage_returns_zero() {
+        assert_eq!(parse_header_dump(""), (0, String::new()));
+        assert_eq!(parse_header_dump("not a header"), (0, String::new()));
+    }
+
+    #[test]
+    fn binary_body_survives_base64_roundtrip() {
+        // 二进制体里带 CRLFCRLF（旧实现按这个切头/体，必然把图切坏）。
+        let bytes: Vec<u8> = (0u8..=255).chain([13, 10, 13, 10, 0, 255]).collect();
+        let encoded = BASE64.encode(&bytes);
+        let decoded = BASE64.decode(encoded.as_bytes()).expect("base64 应可解码");
+        assert_eq!(decoded, bytes);
+        assert!(encoded.chars().all(|c| c.is_ascii()), "回传串必须是纯 ASCII");
+    }
+
+    /// 起一个只回一次的极简 HTTP 服务，返回（地址, 收工句柄）。
+    fn serve_once(body: Vec<u8>, content_type: &str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑本地端口");
+        let port = listener.local_addr().unwrap().port();
+        let content_type = content_type.to_string();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut scratch = [0u8; 2048];
+                let _ = stream.read(&mut scratch);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}/page.jpg"), handle)
+    }
+
+    fn curl_ready() -> bool {
+        std::process::Command::new("curl")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    #[test]
+    fn curl_xhr_keeps_binary_bytes_intact() {
+        if !curl_ready() {
+            return; // Windows 10+ 自带 curl；没有就跳过，不算失败
+        }
+        // 体里塞 JPEG 头、CRLFCRLF、非 UTF-8 字节：旧实现 `-i` + 按 "\r\n\r\n"
+        // 切分 + from_utf8_lossy，这三步任一步都足以把这几个字节弄坏。
+        let body: Vec<u8> = [
+            vec![0xff, 0xd8, 0xff, 0xe0],
+            b"\r\n\r\n".to_vec(),
+            vec![0x00, 0xc8, 0x0d, 0x0a],
+        ]
+        .concat();
+        let (url, server) = serve_once(body.clone(), "image/jpeg");
+        let outcome = curl_xhr(&url, "GET", &[], "", true);
+        assert_eq!(outcome.status, 200);
+        assert!(!outcome.error, "本地 200 不该判成错误");
+        assert!(outcome.text.is_empty(), "二进制请求不该回文本");
+        assert!(outcome.headers.contains("image/jpeg"));
+        let decoded = BASE64.decode(outcome.base64.as_bytes()).expect("base64 可解");
+        assert_eq!(decoded, body, "字节必须一字节不差地回传");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn curl_xhr_returns_text_for_plain_requests() {
+        if !curl_ready() {
+            return;
+        }
+        let (url, server) = serve_once(b"<html>ok</html>".to_vec(), "text/html");
+        let outcome = curl_xhr(&url, "GET", &[], "", false);
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.text, "<html>ok</html>");
+        assert!(outcome.base64.is_empty(), "文本请求不必编 base64");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn gm_claim_script_marks_running() {
+        // 认领脚本必须自己把 pending → running 并带回内容：轮询线程只管发请求，
+        // 否则同一批条目会被反复取走（重复下载同一张图）。
+        assert!(GM_CLAIM_SCRIPT.contains("state = 'running'"));
+        assert!(GM_CLAIM_SCRIPT.contains("state === 'pending'"));
+        assert!(GM_CLAIM_SCRIPT.contains("__xkGmXhr"));
     }
 }

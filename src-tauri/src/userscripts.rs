@@ -14,7 +14,7 @@
 //!   `this` 落在 window 上（Tampermonkey 行为一致）；
 //! - `GM_xmlhttpRequest` 的跨域请求走 `window.__xkGmXhr` 队列 + Rust 侧 curl
 //!   轮询器（延续本仓「脚本写队列、Rust 轮询读取」的既有模式，页面始终拿不到
-//!   IPC，安全边界不变）；文本响应 V1，二进制待续；
+//!   IPC，安全边界不变）；文本与二进制（`blob`/`arraybuffer`，base64 回传）都支持；
 //! - GM 存值用 localStorage（按脚本 id 命名空间），跨刷新持久；脚本执行错误
 //!   记进 `window.__xkGmDiag`（「装了没反应」可查）。
 //!
@@ -454,22 +454,38 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
         try {{ console.info("[匣油猴] " + (meta.name || "") + " " + msg); }} catch (e) {{}}
       }},
       // GM_download 两种签名：GM_download(url, name) / GM_download({{url, name, onload, onerror}})
+      // 不能直接用 <a download>：跨域地址上 download 属性会被忽略，浏览器当成
+      // 普通导航，一点就把当前标签顶到图片地址去了。先取字节、再走 blob: 链接
+      // （与页面同源，download 一定生效），顺带也修好图标/大图一键保存。
       download: function (url, name) {{
         var details = (url && typeof url === "object") ? url : {{ url: url, name: name }};
-        try {{
-          var a = document.createElement("a");
-          a.href = details.url;
-          if (details.name) a.download = details.name;
-          a.rel = "noreferrer";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(function () {{
-            try {{ if (details.onload) details.onload({{}}); }} catch (e) {{}}
-          }}, 0);
-        }} catch (e) {{
-          try {{ if (details.onerror) details.onerror(e); }} catch (e2) {{}}
+        function fail(error) {{
+          try {{ if (details.onerror) details.onerror(error || {{}}); }} catch (e) {{}}
         }}
+        if (!details.url) {{ fail({{ error: "GM_download 缺少 url" }}); return; }}
+        gm.xmlhttpRequest({{
+          method: "GET",
+          url: details.url,
+          headers: details.headers || {{}},
+          responseType: "blob",
+          timeout: 600000,
+          onload: function (res) {{
+            try {{
+              var href = window.URL.createObjectURL(res.response);
+              var a = document.createElement("a");
+              a.href = href;
+              if (details.name) a.download = details.name;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              setTimeout(function () {{
+                try {{ window.URL.revokeObjectURL(href); }} catch (e) {{}}
+              }}, 60000);
+              try {{ if (details.onload) details.onload({{}}); }} catch (e) {{}}
+            }} catch (e) {{ fail(e); }}
+          }},
+          onerror: function () {{ fail({{ error: "GM_download 取字节失败" }}); }},
+        }});
       }},
       // GM_addElement(parent, tag, attrs) / GM_addElement(tag, attrs)
       addElement: function (parent, tag, attrs) {{
@@ -519,15 +535,31 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
         var q = window.__xkGmXhr;
         var id = "r" + q.next;
         q.next += 1;
+        // responseType 必须原样带给宿主：blob/arraybuffer 要走二进制通道（base64
+        // 回传），否则字节被当成 UTF-8 文本过一遍就废了。漫画织机取页面图片、
+        // 打 CBZ 全靠这条，回文字它只会拿到一串 U+FFFD（2026-11-23 补）。
+        var type = details.responseType || "";
         q.items[id] = {{
           url: details.url,
           method: details.method || "GET",
           headers: details.headers || {{}},
-          data: details.data || "",
+          data: typeof details.data === "string" ? details.data : "",
+          responseType: type,
           state: "pending",
         }};
         var aborted = false;
         var startedAt = Date.now();
+        function decode64(b64) {{
+          var bin = window.atob(b64);
+          var out = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
+          return out;
+        }}
+        function headerOf(raw, name) {{
+          if (!raw) return "";
+          var hit = new RegExp("^" + name + ":[ \\t]*(.*)$", "im").exec(raw);
+          return hit ? hit[1].trim() : "";
+        }}
         var timer = setInterval(function () {{
           if (aborted) return;
           var item = q.items[id];
@@ -536,6 +568,7 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
             // 传统脚本常用 timeout 选项；超时就回 ontimeout，别让它永远等。
             if (details.timeout && Date.now() - startedAt > details.timeout) {{
               clearInterval(timer);
+              try {{ delete q.items[id]; }} catch (e) {{}}
               try {{ if (details.ontimeout) details.ontimeout({{ readyState: 4, status: 0 }}); }} catch (e) {{}}
             }}
             return;
@@ -548,9 +581,27 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
             statusText: "",
             responseText: body,
             response: body,
+            responseType: type,
             responseHeaders: item.responseHeaders || "",
             finalUrl: details.url,
+            responseURL: details.url,
           }};
+          if (type === "arraybuffer" || type === "blob") {{
+            var bytes = item.responseB64 ? decode64(item.responseB64) : new Uint8Array(0);
+            res.responseText = "";
+            if (type === "blob") {{
+              var mime = headerOf(res.responseHeaders, "content-type") ||
+                "application/octet-stream";
+              try {{ res.response = new Blob([bytes], {{ type: mime }}); }}
+              catch (e) {{ res.response = bytes.buffer; }}
+            }} else {{
+              res.response = bytes.buffer;
+            }}
+          }} else if (type === "json") {{
+            try {{ res.response = JSON.parse(body); }} catch (e) {{ res.response = null; }}
+          }}
+          // 用完即删：一页图几 MB，堆在页面队列里就是纯泄漏（旧实现从不清理）。
+          try {{ delete q.items[id]; }} catch (e) {{}}
           // 有的脚本只认 onreadystatechange（会自己判 readyState===4）。
           try {{
             if (details.onreadystatechange) {{
@@ -787,6 +838,17 @@ console.log("hello");
         );
         assert!(source.contains("GM_setClipboard"), "剪贴板垫片应存在");
         assert!(source.contains("__xkGmDiag"), "脚本错误应可诊断");
+        // 2026-11-23：二进制通道。织机取图/打 CBZ 用 blob/arraybuffer，
+        // 只回 responseText 的话字节会被当 UTF-8 弄坏，图片永远画不出来。
+        assert!(
+            source.contains("responseB64") && source.contains("decode64"),
+            "blob/arraybuffer 必须走 base64 二进制回传"
+        );
+        assert!(
+            source.contains("responseType: type"),
+            "responseType 要带给宿主，否则不知道该不该编二进制"
+        );
+        assert!(source.contains("new Blob([bytes]"), "blob 响应要还原成 Blob");
         assert!(source.contains("console.log(") && source.contains("hello"), "脚本体应烘焙进加载器");
     }
 
