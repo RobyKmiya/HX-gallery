@@ -499,6 +499,24 @@ fn current_label() -> Option<String> {
     BROWSER_LABEL.lock().ok()?.as_ref().cloned()
 }
 
+/// 解析出「现在真正在跑的那个浏览窗口」。
+///
+/// 记录的 label 只由 `d2_open` 写入，其它入口（例如直接从导航开的窗口、
+/// 或窗口被关掉后重开）会让这条记录变空/过期；过期时原来的实现会一路
+/// 报「浏览器不存在」。这里先验活，再退回扫描存活窗口，并顺手修正记录。
+pub fn resolve_label() -> Option<String> {
+    if let Some(label) = current_label() {
+        if crate::browser::is_alive(&label) {
+            return Some(label);
+        }
+    }
+    let found = crate::browser::first_alive_label()?;
+    if let Ok(mut guard) = BROWSER_LABEL.lock() {
+        *guard = Some(found.clone());
+    }
+    Some(found)
+}
+
 fn close_window() {
     if let Some(label) = current_label() {
         let _ = crate::browser::close_browser(&label);
@@ -642,6 +660,70 @@ fn meta_of(window: &Webview) -> MetaPayload {
     .unwrap_or_default()
 }
 
+/// 下载面板用的一次扫描结果。
+pub struct ActiveGallery {
+    pub label: String,
+    pub url: String,
+    pub title: String,
+    pub site: String,
+    pub entries: Vec<String>,
+}
+
+/// 扫描当前浏览窗口的激活标签，拿到整部作品的元信息与全部图片条目。
+///
+/// 条目两种形态都认：exhentai 给的是图片页 URL，其余站点给 `direct|` 直链。
+pub fn scan_active(app: &AppHandle) -> Result<ActiveGallery, String> {
+    let label = resolve_label()
+        .ok_or("画匣浏览器还没打开：先点左侧「画匣浏览器」进到作品页再下载")?;
+    let window = crate::browser::active_webview_of(&label)?;
+    let url = window
+        .url()
+        .map_err(|error| format!("拿不到当前页地址：{error}"))?
+        .to_string();
+
+    // 扫描是同步等人点按钮的，不能像后台抓取那样等 45 分钟：
+    // 90 秒内没认出作品页就直接报错，用户还能去别的页面重试。
+    let deadline = Instant::now() + Duration::from_secs(90);
+    status(app, "正在解析作品页…");
+    wait_for_gallery(&window, app, deadline)?;
+
+    let site = eval_json(
+        &window,
+        "JSON.stringify(window.__d2Probe ? window.__d2Probe() : {})",
+        Duration::from_secs(3),
+    )
+    .ok()
+    .filter(|raw| !raw.trim().is_empty())
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|value| {
+        value
+            .get("site")
+            .and_then(|site| site.as_str())
+            .map(|site| site.to_string())
+    })
+    .unwrap_or_default();
+
+    let meta = meta_of(&window);
+    status(app, "正在收集全部图片页…");
+    let entries = collect_page_urls(&window, deadline)?;
+    if entries.is_empty() {
+        return Err("没有解析到任何图片页：确认进的是作品详情页，且已在该站点登录".to_string());
+    }
+
+    let title = if meta.title.trim().is_empty() {
+        "UNTITLE".to_string()
+    } else {
+        meta.title
+    };
+    Ok(ActiveGallery {
+        label,
+        url,
+        title,
+        site,
+        entries,
+    })
+}
+
 fn fetch_flow(
     app: &AppHandle,
     url: String,
@@ -652,6 +734,8 @@ fn fetch_flow(
     // 抓取复用已打开浏览窗口的**激活标签**：用户正在看的作品页直接抓。
     // 浏览器没开就明确报错引导（多标签时代，抓谁要明确，不再后台偷偷开窗）。
     let label = current_label()
+        .filter(|label| crate::browser::is_alive(label))
+        .or_else(resolve_label)
         .ok_or("浏览窗口还没打开——先在面板里点「打开」，进到作品页再抓取")?;
     if !crate::browser::is_alive(&label) {
         return Err("浏览窗口已无响应，请关掉后重新打开再抓取".to_string());
@@ -1021,7 +1105,7 @@ fn with_window<F>(f: F) -> Result<(), String>
 where
     F: FnOnce(&Webview) -> Result<(), String>,
 {
-    let label = current_label().ok_or("浏览窗口还没打开".to_string())?;
+    let label = resolve_label().ok_or("浏览窗口还没打开".to_string())?;
     let webview = crate::browser::active_webview_of(&label)?;
     f(&webview)
 }
@@ -1074,7 +1158,7 @@ pub fn d2_open(app: AppHandle, url: String, adblock: Option<bool>) -> Result<(),
 /// 读当前浏览窗口的地址（供「抓取当前页」一键使用，免去重新粘贴）。
 #[tauri::command]
 pub fn d2_current_url() -> Result<String, String> {
-    let Some(label) = current_label() else {
+    let Some(label) = resolve_label() else {
         return Ok(String::new());
     };
     match crate::browser::active_webview_of(&label) {
@@ -1086,7 +1170,7 @@ pub fn d2_current_url() -> Result<String, String> {
 /// 后退。
 #[tauri::command]
 pub fn d2_back() -> Result<(), String> {
-    let Some(label) = current_label() else {
+    let Some(label) = resolve_label() else {
         return Err("浏览窗口还没打开".to_string());
     };
     crate::browser::history_action(&label, "back")
@@ -1095,7 +1179,7 @@ pub fn d2_back() -> Result<(), String> {
 /// 前进。
 #[tauri::command]
 pub fn d2_forward() -> Result<(), String> {
-    let Some(label) = current_label() else {
+    let Some(label) = resolve_label() else {
         return Err("浏览窗口还没打开".to_string());
     };
     crate::browser::history_action(&label, "forward")
@@ -1104,7 +1188,7 @@ pub fn d2_forward() -> Result<(), String> {
 /// 刷新。
 #[tauri::command]
 pub fn d2_reload() -> Result<(), String> {
-    let Some(label) = current_label() else {
+    let Some(label) = resolve_label() else {
         return Err("浏览窗口还没打开".to_string());
     };
     crate::browser::history_action(&label, "reload")
@@ -1208,7 +1292,7 @@ pub fn d2_set_cookies(
 /// `cookies_for_url` 读回来再组装。脚本注入是原生 eval，不受页面 CSP 限制。
 #[tauri::command]
 pub async fn d2_collect_tags() -> Result<String, String> {
-    let label = current_label().ok_or_else(|| "浏览窗口还没打开".to_string())?;
+    let label = resolve_label().ok_or_else(|| "浏览窗口还没打开".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let webview = crate::browser::active_webview(&label)?;
         let url = webview

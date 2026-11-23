@@ -71,6 +71,9 @@ export const api = {
   /** 读当前浏览窗口地址，供「抓取当前页」一键使用（没开窗口返回空串）。 */
   d2CurrentUrl: () => invoke<string>("d2_current_url"),
 
+  /** 打开独立的下载面板（范围 / 并发 / 打包都在那儿定）。 */
+  dlOpenPanel: () => invoke<void>("dl_open_panel"),
+
   /** 导入前的暂存：展开路径、给出大小 / 页数 / 疑似重复，不做任何复制。 */
   stageImportPaths: (paths: string[]) =>
     invoke<StageReport>("stage_import_paths", { paths }),

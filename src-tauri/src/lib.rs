@@ -4,6 +4,7 @@ mod asset_protocol;
 mod browser;
 mod container;
 mod d2;
+mod gallery_dl;
 pub mod db;
 pub mod fsutil;
 pub mod importer;
@@ -1905,7 +1906,14 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             save_release_settings,
             schedule_release,
             quit_for_release,
-            cancel_release
+            cancel_release,
+            gallery_dl::dl_open_panel,
+            gallery_dl::dl_scan,
+            gallery_dl::dl_start,
+            gallery_dl::dl_status,
+            gallery_dl::dl_cancel,
+            gallery_dl::dl_pick_folder,
+            gallery_dl::dl_open_folder
         ])
         .on_window_event(|window, event| {
             if matches!(

@@ -689,8 +689,19 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
 
           <section className="release-section">
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void run()}>
-                {busy ? "抓取中…" : "开始抓取并入库"}
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() =>
+                  void api.dlOpenPanel().catch((error: unknown) => {
+                    onNotify(`打开下载面板失败：${String(error)}`, "error");
+                  })
+                }
+              >
+                打开下载面板
+              </button>
+              <button type="button" className="btn btn-quiet" disabled={busy} onClick={() => void run()}>
+                {busy ? "抓取中…" : "快速入库"}
               </button>
               {busy && (
                 <button type="button" className="btn btn-quiet" onClick={() => void cancel()}>

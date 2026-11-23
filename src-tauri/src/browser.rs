@@ -119,6 +119,27 @@ pub fn is_alive(label: &str) -> bool {
     }
 }
 
+/// 找出任意一个还活着的浏览窗口。
+///
+/// 用途：d2 侧只记了一个 label（而且只有面板那条路径会写），从别的入口
+/// 打开浏览器时那个记录是空的或过期的旧值，于是所有按 label 路由的命令
+/// 全部报「浏览器不存在」。这里扫一遍真实存活的窗口做兜底。
+pub fn first_alive_label() -> Option<String> {
+    let mut guard = BROWSERS.lock().ok()?;
+    let map = guard.as_mut()?;
+    let labels: Vec<String> = map.keys().cloned().collect();
+    for label in labels {
+        let Some(state) = map.get(&label) else { continue };
+        let Some(tab) = state.tabs.iter().find(|tab| tab.id == state.active) else {
+            continue;
+        };
+        if window_is_alive(&tab.webview) {
+            return Some(label);
+        }
+    }
+    None
+}
+
 /// 取浏览器的激活标签（抓取流直接拿它来 eval/导航）。
 // ── 广告拦截（管理员 11-23：喜欢 AdGuard，WebView2 装不了扩展，
 // 就在 WebView2 的网络请求层做域名拦截——机制同 AdGuard 的网络过滤）──
@@ -1031,14 +1052,14 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
                     if current.trim().is_empty() || current == "about:blank" {
                         Err("当前标签还没有网址，先打开一个作品页".to_string())
                     } else {
+                        // 原来的「拿当前页直接抓」是错的：本页 DOM 里的图片永远不是
+                        // 整部作品（画廊要翻页收集），而且是串行 + base64 回传，特别慢。
+                        // 现在只负责打开下载面板：范围、并发、打包都在那儿定。
+                        let opened = crate::gallery_dl::open_panel(&app);
                         let _ = toolbar.eval("window.__xkGrab = 'busy';");
-                        let result = crate::d2::start_fetch_from_toolbar(&app, current);
-                        // 启动是异步的：给页面一个短 busy 反馈后自动回落，
-                        // 真实进度仍走 d2://status / d2://done 事件。
-                        let _ = toolbar.eval(
-                            "setTimeout(function(){ window.__xkGrab = ''; }, 4000);",
-                        );
-                        result
+                        let _ =
+                            toolbar.eval("setTimeout(function(){ window.__xkGrab = ''; }, 1200);");
+                        opened
                     }
                 }
                 "reorder" => {

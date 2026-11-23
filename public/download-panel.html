@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>画匣 · 下载</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #17181a;
+        --panel: #1e2023;
+        --line: #2c2f34;
+        --text: #e8e8e8;
+        --muted: #9aa0a6;
+        --accent: #e8a03a;
+        --accent-dim: #7a5520;
+        --ok: #4caf7d;
+        --bad: #e5675f;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.55 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 14px;
+        overflow-y: auto;
+      }
+      h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      h1 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .title {
+        font-weight: 600;
+        font-size: 13px;
+        word-break: break-all;
+        line-height: 1.4;
+      }
+      .meta { color: var(--muted); font-size: 12px; word-break: break-all; }
+      .row { display: flex; align-items: center; gap: 8px; }
+      .row > label { color: var(--muted); min-width: 42px; font-size: 12px; }
+      input[type="number"], input[type="text"] {
+        background: #141517;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--text);
+        padding: 5px 8px;
+        font: inherit;
+        outline: none;
+      }
+      input[type="number"] { width: 62px; text-align: center; }
+      input[type="text"] { flex: 1; min-width: 0; }
+      input:focus { border-color: var(--accent-dim); }
+      button {
+        background: #26292d;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--text);
+        padding: 5px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { border-color: var(--accent-dim); }
+      button:disabled { opacity: 0.45; cursor: default; }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #221a0c;
+        font-weight: 600;
+        flex: 1;
+        padding: 8px 10px;
+      }
+      button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+      .check { display: flex; align-items: center; gap: 6px; color: #cfcfcf; font-size: 12px; }
+      .check input { accent-color: var(--accent); }
+      .bar {
+        height: 6px;
+        background: #101113;
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        width: 0;
+        background: var(--accent);
+        transition: width 0.2s ease;
+      }
+      .status { color: var(--muted); font-size: 12px; min-height: 18px; word-break: break-all; }
+      .status.ok { color: var(--ok); }
+      .status.bad { color: var(--bad); }
+      .grow { flex: 1; }
+      .hint { color: #6f757c; font-size: 11px; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <h1><span class="dot"></span>画匣 · 下载</h1>
+
+    <div class="card">
+      <div class="title" id="title">正在读取作品页…</div>
+      <div class="meta" id="meta">—</div>
+      <div class="row">
+        <button type="button" id="rescan">重新扫描</button>
+        <span class="grow"></span>
+        <span class="hint" id="site"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label>范围</label>
+        <input type="number" id="from" min="1" value="1" />
+        <span class="hint">到</span>
+        <input type="number" id="to" min="1" value="1" />
+        <button type="button" id="all">全部</button>
+      </div>
+      <div class="row">
+        <label>并发</label>
+        <input type="number" id="conc" min="1" max="16" value="8" />
+        <span class="hint">路同时下（1–16，越高越快但更容易被图站限速）</span>
+      </div>
+      <div class="row">
+        <label>输出</label>
+        <input type="text" id="outdir" spellcheck="false" />
+      </div>
+      <div class="row">
+        <button type="button" id="pick">选目录</button>
+        <button type="button" id="openOut">打开目录</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <label class="check"><input type="checkbox" id="pkg" checked />打包成单个 CBZ</label>
+      <label class="check"><input type="checkbox" id="imp" checked />下载后导入画匣库</label>
+      <div class="hint">不打包则按「作品名-时间/0001.jpg」存成文件夹。</div>
+    </div>
+
+    <div class="bar"><i id="barfill"></i></div>
+    <div class="status" id="status">准备就绪</div>
+
+    <div class="row">
+      <button type="button" class="primary" id="start">开始下载</button>
+      <button type="button" id="cancel" disabled>取消</button>
+      <button type="button" id="open" class="hidden">打开结果</button>
+    </div>
+
+    <script src="download-panel.js"></script>
+  </body>
+</html>
