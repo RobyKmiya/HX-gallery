@@ -25,7 +25,8 @@ import {
   type GestureAction,
   type GestureSlot,
 } from "../gestures";
-import { usePersistentFlag } from "../layout";
+import { usePersistentFlag, usePersistentSize } from "../layout";
+import Splitter from "./Splitter";
 import type {
   AnimMeta,
   ArchiveCardData,
@@ -127,7 +128,7 @@ function trimPageCache(cache: Map<number, ReaderPage>, current: number) {
   }
 }
 
-const THUMB_EDGE = 160;
+const THUMB_EDGE = 240;
 
 interface ReaderThumbProps {
   archiveId: number;
@@ -281,19 +282,18 @@ export default function Reader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enterMode, card.id]);
 
-  // 沉浸时连系统标题栏一起收掉（真无边框）；切回带框或退出阅读时恢复。
-  // 卸载时再兜一次：万一读着读着被别处关掉，标题栏不会留在「没有」的状态。
-  useEffect(() => {
-    void api.setWindowDecorations(!immersive).catch(() => {});
-  }, [immersive]);
-  useEffect(
-    () => () => {
-      void api.setWindowDecorations(true).catch(() => {});
-    },
-    [],
-  );
+  // 沉浸只收应用内的工具栏，**不动系统标题栏**（11-23：每次增删标题栏都会让
+  // 窗口重排重绘，肉眼可见地晃一下、闪一下，还有残影——干脆完全不碰窗口）。
+  // 想要真全屏用系统快捷键（Win+↑ / F11 由系统接管）。
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
+  /** 缩略图栏宽度：分界线可拖，缩略图随空余位置自适应（11-23）。 */
+  const [thumbsWidth, setThumbsWidth] = usePersistentSize(
+    "huaxia.reader.thumbs",
+    168,
+    110,
+    460,
+  );
   /** 播放阅读模式（持久化）：开着的书播完自动翻页、翻完自动换下一本。 */
   const [playback, setPlayback] = useState(() => {
     try {
@@ -2056,7 +2056,12 @@ const archiveEpochRef = useRef(0);
 
       <div className="reader-body">
         {thumbsOpen && pageCount > 0 && (
-          <aside className="reader-thumbs" aria-label="页面缩略图">
+          <>
+          <aside
+            className="reader-thumbs"
+            aria-label="页面缩略图"
+            style={{ width: thumbsWidth }}
+          >
             <header>
               <h3>页面</h3>
               <button
@@ -2085,6 +2090,15 @@ const archiveEpochRef = useRef(0);
               ))}
             </div>
           </aside>
+          <Splitter
+            label="缩略图栏"
+            value={thumbsWidth}
+            min={110}
+            max={460}
+            onChange={setThumbsWidth}
+            onReset={() => setThumbsWidth(168)}
+          />
+          </>
         )}
 
         <div
