@@ -276,7 +276,15 @@ step(`安装到 ${INSTALL_DIR}`, 15, () => {
     throw new Error(`找不到安装包：${setupPath}`);
   }
   run(setupPath, ['/S']);
-  ok('安装完成');
+  // 管理员 11-23：更新完**不要**自动打开画廊，等他自己验收。
+  // NSIS 静默安装可能带起应用，装完统一杀掉；没有实例就什么都不发生。
+  try {
+    // taskkill 在没有实例时会非零退出，直接吞掉
+    execFileSync('taskkill', ['/F', '/IM', 'archive-gallery.exe'], { stdio: 'ignore' });
+  } catch {
+    // 没有运行实例，正常
+  }
+  ok('安装完成（不自动启动）');
 });
 
 step('验证', 10, () => {
