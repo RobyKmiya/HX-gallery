@@ -57,7 +57,6 @@ import Splitter from "./Splitter";
 import ReleasePanel from "./ReleasePanel";
 import D2Panel from "./D2Panel";
 import TagCenter from "./TagCenter";
-import TagSorter from "./TagSorter";
 import Toast, { type ToastData, type ToastKind } from "./Toast";
 import TrashCenter from "./TrashCenter";
 import {
@@ -80,7 +79,6 @@ import {
   RefreshIcon,
   SearchIcon,
   StarIcon,
-  SortIcon,
   SwapIcon,
   TagIcon,
   TrashIcon,
@@ -360,7 +358,6 @@ export default function LibraryView({
   const [filterOpen, setFilterOpen] = useState(false);
   const [tagQuery, setTagQuery] = useState("");
   const [tagCenterOpen, setTagCenterOpen] = useState(false);
-  const [tagSorterOpen, setTagSorterOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
@@ -2335,19 +2332,6 @@ export default function LibraryView({
             className="nav-item"
             onClick={() => {
               setLooseView(false);
-              setTagSorterOpen(true);
-            }}
-            title="ExHentai 标签整理器：粘贴 Markdown 表格 → 解析 → 整理 → 复制纯文本"
-          >
-            <SortIcon width={16} height={16} />
-            <span className="nav-label">标签整理</span>
-          </button>
-
-          <button
-            type="button"
-            className="nav-item"
-            onClick={() => {
-              setLooseView(false);
               setQueuePanelOpen(true);
             }}
             title="随机挑一批画集排队看，带进度"
@@ -3922,13 +3906,6 @@ export default function LibraryView({
             <small>会先列出清单与标签，确认之后才写入库</small>
           </div>
         </div>
-      )}
-
-      {tagSorterOpen && (
-        <TagSorter
-          onClose={() => setTagSorterOpen(false)}
-          onNotify={notify}
-        />
       )}
 
       {tagCenterOpen && (
