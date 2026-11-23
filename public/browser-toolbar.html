@@ -13,6 +13,7 @@
     --muted: #8b93a7;
     --accent: #7c93ff;
     --danger: #ff6b6b;
+    --ok: #57d39b;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -80,6 +81,9 @@
   }
   .addr-wrap:focus-within { border-color: var(--accent); }
   .addr-wrap.bad { border-color: #7a2e34; background: #1a1114; animation: flash .5s 2; }
+  .addr-wrap.ok { border-color: #2c5d47; background: #0f1a15; }
+  .addr-wrap.stalled { border-color: #6b4a22; background: #1a150e; }
+  .addr-wrap.stalled #addr { color: #d8b077; }
   @keyframes flash { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
   .addr-wrap .lock { color: var(--muted); flex: none; font-size: 11px; }
   #addr {

@@ -194,7 +194,20 @@ struct TabRecord {
     loading: bool,
 }
 
-static BROWSERS: Mutex<Option<HashMap<String, BrowserState>>> = Mutex::new(None);
+/// 所有存活浏览器实例的状态表。
+///
+/// 2026-11-24 修（**致命**）：这里原来是 `Mutex<Option<HashMap>>` + `Mutex::new(None)`，
+/// 而全仓没有任何一处把它写成 `Some(..)`——`register_browser` 的 insert 落在
+/// `None` 上被静默丢掉。后果是整台引擎没有状态机，且完全不报错：
+/// - 工具栏轮询器第一轮 `browser_exists == false` 直接 return → 顶端按钮全哑、
+///   标签条空白（没有状态推送）；
+/// - GM 跨域轮询器同样退场 → 织机所有经 GM_xmlhttpRequest 的图片请求没人接，
+///   全部等到自己超时 → 满屏 `Error: timeout`、「时延爆表」；
+/// - 页面 webview 本身照常显示，所以从外面看像「按钮坏了」而不是「引擎死了」。
+///
+/// 改用 `LazyLock` 后不可能再忘记初始化。
+static BROWSERS: std::sync::LazyLock<Mutex<HashMap<String, BrowserState>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 浏览器配置。宿主按需填，全部字段都有合理默认。
 pub struct BrowserOptions {
@@ -257,7 +270,7 @@ pub fn is_alive(label: &str) -> bool {
 /// 全部报「浏览器不存在」。这里扫一遍真实存活的窗口做兜底。
 pub fn first_alive_label() -> Option<String> {
     let mut guard = BROWSERS.lock().ok()?;
-    let map = guard.as_mut()?;
+    let map = &mut *guard;
     let labels: Vec<String> = map.keys().cloned().collect();
     for label in labels {
         let Some(state) = map.get(&label) else { continue };
@@ -425,8 +438,7 @@ pub fn active_webview(label: &str) -> Result<Webview, String> {
 
 fn with_state<R>(label: &str, f: impl FnOnce(&mut BrowserState) -> R) -> Option<R> {
     let mut guard = BROWSERS.lock().ok()?;
-    let map = guard.as_mut()?;
-    let state = map.get_mut(label)?;
+    let state = guard.get_mut(label)?;
     Some(f(state))
 }
 
@@ -556,12 +568,7 @@ pub fn open(
 pub fn browser_exists(label: &str) -> bool {
     BROWSERS
         .lock()
-        .ok()
-        .and_then(|guard| {
-            guard
-                .as_ref()
-                .map(|map| map.contains_key(label))
-        })
+        .map(|guard| guard.contains_key(label))
         .unwrap_or(false)
 }
 
@@ -938,7 +945,7 @@ pub fn set_zoom(label: &str, factor: f64) -> Result<(), String> {
 
 fn focus_tab_webview(tab_id: &str) -> Result<(), String> {
     let mut guard = BROWSERS.lock().map_err(|_| "浏览器状态异常".to_string())?;
-    let map = guard.as_mut().ok_or("浏览器状态异常")?;
+    let map = &mut *guard;
     for state in map.values_mut() {
         if let Some(tab) = state.tabs.iter().find(|tab| tab.id == tab_id) {
             return tab
@@ -950,7 +957,7 @@ fn focus_tab_webview(tab_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 给内容标签挂钩子：弹窗→开新标签、下载→宿主日志、导航→记 URL。
+/// 给内容标签挂钩子：弹窗→开新标签、下载→自动入库（带标签）、导航→记 URL。
 fn attach_tab_hooks(
     builder: tauri::WebviewBuilder<tauri::Wry>,
     app: &AppHandle,
@@ -972,20 +979,43 @@ fn attach_tab_hooks(
         .on_download({
             let label_for_download = label_for_dl.clone();
             let app_for_download = app_for_dl.clone();
-            move |_webview, event| {
+            move |webview, event| {
                 match event {
                     DownloadEvent::Requested { url, destination } => {
                         // 网页下载统一落到画匣暂存目录，下载完成后自动导入画匣库，
                         // 不再散落到用户的系统下载目录（管理员 2026-11-23 要求）。
+                        //
+                        // 文件名要留住 WebView2 给的 suggested name（来自页面的
+                        // `<a download="标题.zip">`）：以前一律用 URL 末段推导，
+                        // 织机打包走 blob: 下载，末段是随机 uuid、没有扩展名，
+                        // 入库那一步直接被「不是 zip」拒掉（2026-11-24 修）。
+                        let suggested = archive_name_from(destination);
                         if let Ok(cache) = app_for_download.path().app_cache_dir() {
                             let dir = cache.join("d2").join("downloads");
                             let _ = std::fs::create_dir_all(&dir);
-                            *destination = dir.join(download_file_name(&url));
+                            *destination = dir.join(
+                                suggested.unwrap_or_else(|| download_file_name(&url)),
+                            );
                         }
                         log_for(
                             &label_for_download,
                             &format!("下载开始：{url} → {}", destination.display()),
                         );
+                        // 顺手抓一次作品页元数据（标题 + 全部 tag），等下载收尾时
+                        // 一起入库——管理员要的「一键导入就把 tag 配好」。
+                        let key = destination.to_string_lossy().to_string();
+                        let view = webview.clone();
+                        std::thread::spawn(move || {
+                            if let Some(meta) = read_page_meta(&view) {
+                                if let Ok(mut map) = DOWNLOAD_META.lock() {
+                                    // 清掉早就没下文的旧条目，别让表无限长。
+                                    if map.len() > 24 {
+                                        map.clear();
+                                    }
+                                    map.insert(key, meta);
+                                }
+                            }
+                        });
                     }
                     DownloadEvent::Finished { url, path, success } => {
                         log_for(
@@ -1001,9 +1031,30 @@ fn attach_tab_hooks(
                         if success {
                             if let Some(file) = path {
                                 let app_import = app_for_download.clone();
+                                let label_import = label_for_download.clone();
                                 // 导入是阻塞的磁盘/数据库操作，别卡住 webview 线程。
                                 std::thread::spawn(move || {
-                                    crate::d2::import_downloaded(&app_import, file);
+                                    let meta = take_download_meta(&file);
+                                    let outcome = crate::d2::import_downloaded_meta(
+                                        &app_import,
+                                        file,
+                                        &meta.title,
+                                        &meta.tags,
+                                    );
+                                    match outcome {
+                                        Ok(message) => {
+                                            log_for(&label_import, &format!("自动入库：{message}"));
+                                            toast_toolbar(&label_import, &message, "ok");
+                                        }
+                                        Err(error) => {
+                                            log_for(&label_import, &format!("自动入库失败：{error}"));
+                                            toast_toolbar(
+                                                &label_import,
+                                                &format!("入库失败：{error}"),
+                                                "bad",
+                                            );
+                                        }
+                                    }
                                 });
                             }
                         }
@@ -1050,6 +1101,120 @@ fn attach_tab_hooks(
         // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
         // 由本脚本画匣系自己的菜单。
         .initialization_script(CONTEXT_MENU_SCRIPT)
+}
+
+/// 下载瞬间抓到的作品页元数据（标题 + tag 分组）。
+///
+/// 只从页面拿，不经网络：`__d2Meta()` 是宿主注入的站点解析器（e-hentai /
+/// nhentai / 18comic / wnacg 各一套），拿不到就返回 None，导入退化为普通入库。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct PageMeta {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    tags: HashMap<String, Vec<String>>,
+}
+
+impl PageMeta {
+    fn is_empty(&self) -> bool {
+        self.title.trim().is_empty() && self.tags.is_empty()
+    }
+}
+
+/// 下载目标路径 → 元数据。下载开始与结束是两条 WebView2 事件，中间隔着整个
+/// 传输过程，只能借这张表接力。
+static DOWNLOAD_META: std::sync::LazyLock<Mutex<HashMap<String, PageMeta>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// WebView2 给的「建议文件名」→ 可落地的压缩包名。
+///
+/// 页面 `<a download="…">` 里的名字常常带 Windows 非法字符（e-hentai 标题里
+/// 的 `?` `:` `|` 很常见），直接塞进 `SetResultFilePath` 会让下载直接失败，
+/// 所以统一过一遍 d2 的文件名清洗，只保留压缩包类扩展名。
+fn archive_name_from(destination: &std::path::Path) -> Option<String> {
+    let name = destination.file_name()?.to_string_lossy().to_string();
+    let path = std::path::Path::new(&name);
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "zip" | "cbz" | "rar" | "7z") {
+        return None;
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("下载");
+    let cleaned = crate::d2::sanitize_file_name(stem);
+    Some(format!("{cleaned}.{ext}"))
+}
+
+/// 读当前页面的作品元数据（最多等 3 秒，页面忙也不拖死下载）。
+fn read_page_meta(webview: &Webview) -> Option<PageMeta> {
+    let raw = eval_json(
+        webview,
+        "JSON.stringify((function(){ \
+           try { \
+             if (typeof window.__d2Meta === 'function') { var m = window.__d2Meta(); \
+               if (m && (m.title || (m.tags && Object.keys(m.tags).length))) return m; } \
+             return { title: document.title || '', tags: {} }; \
+           } catch (e) { return { title: '', tags: {}, error: String(e) }; } \
+         })())",
+        Duration::from_secs(3),
+    )
+    .ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let meta: PageMeta = serde_json::from_str(&raw).ok()?;
+    if meta.is_empty() {
+        None
+    } else {
+        Some(meta)
+    }
+}
+
+/// 取（并移除）某次下载的元数据。下载可能比抓取快，所以给一小段等待窗口；
+/// 路径分隔符/规范化的细微差异按文件名再兜一层。
+fn take_download_meta(path: &std::path::Path) -> PageMeta {
+    let key = path.to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    for _ in 0..25 {
+        if let Ok(mut map) = DOWNLOAD_META.lock() {
+            if let Some(meta) = map.remove(&key) {
+                return meta;
+            }
+            if !name.is_empty() {
+                let matched = map
+                    .keys()
+                    .find(|candidate| candidate.ends_with(&name))
+                    .cloned();
+                if let Some(found) = matched {
+                    if let Some(meta) = map.remove(&found) {
+                        return meta;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    PageMeta::default()
+}
+
+/// 往工具栏弹一句提示（kind: ok / bad）。工具栏是唯一始终可见的窗格。
+fn toast_toolbar(label: &str, text: &str, kind: &str) {
+    let Some(toolbar) = toolbar_of(label) else {
+        return;
+    };
+    let message = serde_json::to_string(text).unwrap_or_else(|_| "\"完成\"".to_string());
+    let kind = serde_json::to_string(kind).unwrap_or_else(|_| "\"bad\"".to_string());
+    let _ = toolbar.eval(&format!(
+        "window.__xkToast && window.__xkToast({message}, {kind});"
+    ));
 }
 
 /// 从下载 URL 提取安全文件名（去掉查询串与路径穿越字符）。
@@ -1321,16 +1486,19 @@ fn register_browser(label: &str, state: BrowserState, app: &AppHandle) {
     let label_for_close = label.to_string();
     state.window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            if let Ok(mut guard) = BROWSERS.lock() {
-                if let Some(map) = guard.as_mut() {
-                    map.remove(&label_for_close);
-                }
+            if let Ok(mut map) = BROWSERS.lock() {
+                map.remove(&label_for_close);
             }
         }
     });
-    if let Ok(mut guard) = BROWSERS.lock() {
-        if let Some(map) = guard.as_mut() {
+    // 注册失败直接炸出来（以前 insert 静默丢失，整台引擎哑掉还查不出原因）。
+    match BROWSERS.lock() {
+        Ok(mut map) => {
             map.insert(label.to_string(), state);
+        }
+        Err(error) => {
+            eprintln!("[browser] 注册浏览器失败（状态表中毒）：{error}");
+            return;
         }
     }
     // 重算布局（窗口尺寸可能在建标签期间变了）。
@@ -1348,9 +1516,12 @@ fn register_browser(label: &str, state: BrowserState, app: &AppHandle) {
 fn start_toolbar_poller(label: &str, app: AppHandle) {
     let label = label.to_string();
     std::thread::spawn(move || {
+        // 留一行启动日志：引擎活着还是哑掉，事后能一眼看出来。
+        log_for(&label, "工具栏轮询器已启动（200ms/轮）");
         loop {
             std::thread::sleep(TOOLBAR_POLL_INTERVAL);
             if !browser_exists(&label) {
+                log_for(&label, "工具栏轮询器退场（浏览器已关闭）");
                 return;
             }
             // 工具栏 webview 偶尔会在重建/隐藏时短暂取不到；原来直接 return
@@ -2294,6 +2465,24 @@ fn reposition(label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_name_sanitizes_illegal_windows_chars() {
+        // 织机打包名常带 `?` `:`（e-hentai 标题原样），不清洗会让 SetResultFilePath 失败。
+        let dest = std::path::Path::new("C:/Users/x/Downloads/[Circle] Title? Vol:1.zip");
+        let name = archive_name_from(dest).expect("zip 应该被识别");
+        assert!(!name.contains('?'));
+        assert!(!name.contains(':'));
+        assert!(name.ends_with(".zip"), "扩展名要留住：{name}");
+        assert!(name.contains("Circle"), "标题部分要留住：{name}");
+    }
+
+    #[test]
+    fn archive_name_rejects_non_archives() {
+        assert!(archive_name_from(std::path::Path::new("C:/a/b.png")).is_none());
+        // blob 下载丢了扩展名的情况：交给魔数嗅探兜底，这里不硬猜。
+        assert!(archive_name_from(std::path::Path::new("C:/a/6f1c-2b")).is_none());
+    }
 
     #[test]
     fn parse_header_dump_takes_final_response() {

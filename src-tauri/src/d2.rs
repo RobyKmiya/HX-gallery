@@ -998,32 +998,95 @@ pub fn d2_cancel() -> Result<(), String> {
 ///
 /// 只处理 zip / cbz（画匣的图集容器）；其它格式明确回绝，
 /// 不做「悄悄进库却打不开」的事。结果通过 `d2://download` 事件回传前端。
+///
+/// 不带站点元数据的入口（gallery-dl 等）走这个。
 pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
-    let ext = path
+    let _ = import_downloaded_meta(app, path, "", &HashMap::new());
+}
+
+/// 看文件头判断是不是 zip（`PK\x03\x04`，空包是 `PK\x05\x06`）。
+///
+/// 织机「打包下载」是 FileSaver + `<a download>`，WebView2 对 blob 下载有时
+/// 只给一个随机文件名、丢扩展名。这时靠魔数认出来，别让一个真 zip 因为
+/// 「看起来不是 zip」被拒之门外。
+fn looks_like_zip(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 2];
+    file.read_exact(&mut head).is_ok() && &head == b"PK"
+}
+
+/// 网页下载入库（带作品页元数据：标题 + 标签）。
+///
+/// 管理员 2026-11-24 要求：织机打包出来的就是 zip，**一键落到画匣库时顺手
+/// 把 tag 也配好**，不用再进详情页一条条补。元数据由内容页的 `__d2Meta()`
+/// 提供（e-hentai / nhentai / 18comic / wnacg 各有解析器）；拿不到就退化成
+/// 普通导入，绝不阻断。
+///
+/// 返回一句能直接弹给用户看的结果文案。
+pub fn import_downloaded_meta(
+    app: &AppHandle,
+    path: PathBuf,
+    title: &str,
+    tags: &HashMap<String, Vec<String>>,
+) -> Result<String, String> {
+    // blob 下载可能丢扩展名：先看魔数，是真 zip 就按标题补回 .zip 再入库。
+    let mut path = path;
+    let mut ext = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if ext != "zip" && ext != "cbz" && looks_like_zip(&path) {
+        let stem = if title.trim().is_empty() {
+            "网页下载".to_string()
+        } else {
+            sanitize_file_name(title)
+        };
+        let renamed = path.with_file_name(format!("{stem}.zip"));
+        match std::fs::rename(&path, &renamed) {
+            Ok(()) => {
+                log(
+                    app,
+                    &format!(
+                        "下载文件没有扩展名但内容是真 zip，改名入库：{} → {}",
+                        path.display(),
+                        renamed.display()
+                    ),
+                );
+                path = renamed;
+                ext = "zip".to_string();
+            }
+            Err(error) => log(app, &format!("补 .zip 扩展名失败：{error}")),
+        }
+    }
     if ext != "zip" && ext != "cbz" {
         log(
             app,
             &format!("下载完成但格式不是 zip/cbz，跳过导入：{}", path.display()),
         );
+        let error = if ext.is_empty() {
+            "下载的文件没有扩展名，内容也不是 zip".to_string()
+        } else {
+            format!("只支持 zip / cbz，{ext} 请手动导入")
+        };
         let _ = app.emit(
             "d2://download",
             serde_json::json!({
                 "ok": false,
                 "path": path.to_string_lossy(),
-                "error": format!("只支持 zip / cbz，{ext} 请手动导入")
+                "error": error
             }),
         );
-        return;
+        return Err(error);
     }
 
     let state = app.state::<AppState>();
     let prepared = {
         let Ok(guard) = state.lock() else {
-            return;
+            return Err("状态锁异常，稍后再试".to_string());
         };
         match guard.library.as_ref() {
             Some(library) => Ok((library.root.clone(), library.library_id.clone())),
@@ -1038,8 +1101,16 @@ pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
                 "d2://download",
                 serde_json::json!({ "ok": false, "error": error }),
             );
-            return;
+            return Err(error);
         }
+    };
+
+    // 标签一次算好：作品页有解析器时是「真标签 + 一条来源标记」，
+    // 没有就完全不挂标签（别给每个下载都糊一条「D2下载」）。
+    let drafts = if tags.is_empty() {
+        Vec::new()
+    } else {
+        tag_drafts(tags)
     };
 
     let outcome = (|| -> Result<ImportReport, String> {
@@ -1048,7 +1119,8 @@ pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
         let options = ImportOptions {
             add_to_collection: None,
             preserve_structure: None,
-            tags: Vec::new(),
+            // 关键：把作品页的 tag 一起挂上（管理员要的「一键导入就把 tag 配好」）。
+            tags: drafts.clone(),
             path_tags: Vec::new(),
             passwords: Vec::new(),
         };
@@ -1063,7 +1135,17 @@ pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
 
     match outcome {
         Ok(report) => {
-            log(app, &format!("网页下载已入库：{}", path.display()));
+            let imported = report.imported;
+            let batch_message = report.message.clone();
+            log(
+                app,
+                &format!(
+                    "网页下载已入库：{}（{} 本，{} 个标签）",
+                    path.display(),
+                    imported,
+                    drafts.len()
+                ),
+            );
             let _ = app.emit(
                 "d2://download",
                 serde_json::json!({
@@ -1072,6 +1154,21 @@ pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
                     "report": report,
                 }),
             );
+            if imported == 0 {
+                return Err(batch_message);
+            }
+            // drafts 里有一条固定的「来源/D2下载」标记，提示里报给用户的是
+            // 真正来自作品页的标签数，别把这条算进去。
+            let site_tags = drafts.len().saturating_sub(1);
+            Ok(if site_tags > 0 {
+                format!(
+                    "已入库：{}（已配 {} 个标签）",
+                    report_title(title, &path),
+                    site_tags
+                )
+            } else {
+                format!("已入库：{}", report_title(title, &path))
+            })
         }
         Err(error) => {
             log(app, &format!("网页下载入库失败：{error}"));
@@ -1079,8 +1176,20 @@ pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
                 "d2://download",
                 serde_json::json!({ "ok": false, "error": error, "path": path.to_string_lossy() }),
             );
+            Err(error)
         }
     }
+}
+
+/// 入库提示里显示的名字：优先用作品页标题，没有就用文件名。
+fn report_title(title: &str, path: &std::path::Path) -> String {
+    let trimmed = title.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "下载文件".to_string())
 }
 
 /// 补全并校验用户输入的网址（允许省略 https://）。

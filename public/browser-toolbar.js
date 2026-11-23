@@ -13,6 +13,8 @@
   var lastStateJson = "";
   var addrFocused = false;
   var toastTimer = null;
+  var bootAt = Date.now();
+  var stalled = false;
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -21,23 +23,27 @@
     (window.__xkReqQ = window.__xkReqQ || []).push(payload);
   }
 
-  // 引擎执行动作失败时调这个（Rust 侧 eval `window.__xkToast("...")`）。
-  // 工具栏只有 38px 高，弹层会被裁掉，所以错误直接显示在地址栏里闪红。
-  window.__xkToast = function (text) {
+  // 引擎执行动作失败/下载入库完成时调这个（Rust 侧 eval
+  // `window.__xkToast("...", "ok"|"bad")`）。
+  // 工具栏只有 38px 高，弹层会被裁掉，所以提示直接显示在地址栏里：
+  // bad 闪红、ok 闪绿，锁标跟着换成 ⚠ / ✓。
+  window.__xkToast = function (text, kind) {
     var wrap = $("addrWrap");
     if (!wrap) return;
-    wrap.classList.add("bad");
+    var ok = kind === "ok";
+    wrap.classList.remove("bad", "ok");
+    wrap.classList.add(ok ? "ok" : "bad");
     var addr = $("addr");
     var lock = $("lock");
-    addr.title = String(text || "操作失败");
-    // 锁图标换成警告：地址栏有输入时不能顶掉用户正在敲的内容，
-    // 但至少要让人看见「刚才那下失败是有原因的」。
-    lock.textContent = "⚠";
-    lock.style.color = "var(--danger)";
-    if (!addrFocused) addr.value = String(text || "操作失败");
+    addr.title = String(text || (ok ? "完成" : "操作失败"));
+    // 锁图标换成标记：地址栏有输入时不能顶掉用户正在敲的内容，
+    // 但至少要让人看见「刚才那下有结果」。
+    lock.textContent = ok ? "✓" : "⚠";
+    lock.style.color = ok ? "var(--ok)" : "var(--danger)";
+    if (!addrFocused) addr.value = String(text || (ok ? "完成" : "操作失败"));
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
-      wrap.classList.remove("bad");
+      wrap.classList.remove("bad", "ok");
       lock.style.color = "";
       lock.textContent = /^https:/i.test((state && state.activeUrl) || "") ? "🔒" : "◉";
       addr.title = "输入网址或搜索词，回车前往（Ctrl+L 聚焦）";
@@ -169,6 +175,25 @@
       window.__xkFocusAddr = false;
       focusAddr();
     }
+    // 引擎心跳：工具栏是唯一始终可见的窗格，通道真的死掉时必须看得见。
+    // （2026-11-24 的教训：状态表没初始化，整台引擎哑掉，界面却毫无反应，
+    //  从外面看就是「按钮全坏了」。）
+    if (!state && Date.now() - bootAt > 3000) {
+      if (!stalled) {
+        stalled = true;
+        var wrap = $("addrWrap");
+        if (wrap) wrap.classList.add("stalled");
+        if (!addrFocused) {
+          $("addr").value = "引擎无响应 · 点这里重连";
+          $("addr").title = "工具栏与浏览器引擎的通道没通，点一下重新握手";
+        }
+      }
+    } else if (state && stalled) {
+      stalled = false;
+      var wrap2 = $("addrWrap");
+      if (wrap2) wrap2.classList.remove("stalled");
+      if (!addrFocused) $("addr").value = state.activeUrl || "";
+    }
     window.requestAnimationFrame(function () { setTimeout(tick, 120); });
   }
   setTimeout(tick, 120);
@@ -200,6 +225,14 @@
 
   var addr = $("addr");
   addr.addEventListener("focus", function () {
+    // 通道卡住时点地址栏 = 手动重握手（引擎 __pull 会无条件重推全量状态）。
+    if (stalled) {
+      stalled = false;
+      bootAt = Date.now();
+      var wrap = $("addrWrap");
+      if (wrap) wrap.classList.remove("stalled");
+      req("__pull");
+    }
     addrFocused = true;
     addr.value = (state && state.activeUrl) || "";
     setTimeout(function () { addr.select(); }, 0);
