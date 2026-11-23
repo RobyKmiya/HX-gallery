@@ -8,12 +8,15 @@
 //! - 支持头字段：`@name @version @description @match @include @exclude
 //!   @run-at document-start/end/idle`（`@grant` 解析后暂不区分，全部给全套 GM）；
 //! - 运行时给每个脚本注入 `GM` 垫片：`GM_info / GM_setValue / GM_getValue /
-//!   GM_deleteValue / GM_listValues / GM_addStyle / GM_openInTab /
-//!   GM_notification / GM_download / GM_xmlhttpRequest`；
+//!   GM_deleteValue / GM_listValues / GM_addStyle / GM_addElement / GM_openInTab /
+//!   GM_notification / GM_download / GM_setClipboard / GM_registerMenuCommand /
+//!   GM_xmlhttpRequest`；脚本以 `run.call(window, ...)` 调用，让 UMD 依赖里的
+//!   `this` 落在 window 上（Tampermonkey 行为一致）；
 //! - `GM_xmlhttpRequest` 的跨域请求走 `window.__xkGmXhr` 队列 + Rust 侧 curl
 //!   轮询器（延续本仓「脚本写队列、Rust 轮询读取」的既有模式，页面始终拿不到
 //!   IPC，安全边界不变）；文本响应 V1，二进制待续；
-//! - GM 存值用 localStorage（按脚本 id 命名空间），跨刷新持久。
+//! - GM 存值用 localStorage（按脚本 id 命名空间），跨刷新持久；脚本执行错误
+//!   记进 `window.__xkGmDiag`（「装了没反应」可查）。
 //!
 //! 已知边界（详见 docs/匣浏览器经验.md）：`@match` 采用简化版通配（整条 URL
 //! 匹配，`*` → `.*`，`*:` → `https?:`），不实现 Chrome match-pattern 的 host
@@ -357,14 +360,30 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
 {entries}
   ];
 
+  // 与 Rust 侧 url_matches 等价。历史 bug（2026-11-23 修）：`https?://` 的展开
+  // 写成 "http" + pattern.slice(5)，得到的是 "http?://..."，`*://*/*` 这类
+  // @match 因此永远匹配不上——Comic Looms 的 `@match *://*/*` 从来没被执行过，
+  // 「装了脚本但没有任何按钮」的根因就在这里。Rust 单测只测 Rust 版，
+  // JS 版必须靠真机/浏览器侧验证（见 loaderMatchIsEquivalent 的注释）。
   function urlMatches(url, pattern) {{
     if (pattern.indexOf("https?://") === 0) {{
-      return urlMatches(url, "http" + pattern.slice(5)) || urlMatches(url, "https" + pattern.slice(5));
+      var tail = pattern.slice(9); // "https?://" 共 9 个字符
+      return urlMatches(url, "http://" + tail) || urlMatches(url, "https://" + tail);
     }}
     if (pattern.indexOf("://") === -1 && pattern.indexOf("*") === -1) {{
       return url.indexOf(pattern) === 0;
     }}
-    if (pattern.indexOf("*:") === 0) pattern = "https?:" + pattern.slice(2);
+    if (pattern.indexOf("*:") === 0) {{
+      return urlMatches(url, "https?:" + pattern.slice(2));
+    }}
+    return globStarMatch(url, pattern);
+  }}
+  function globStarMatch(url, pattern) {{
+    // `*:` 展开后的 `https?:` 前缀在这里收口（Rust 版同样在 glob 里再展开一次）。
+    if (pattern.indexOf("https?://") === 0) {{
+      var rest = pattern.slice(9); // "https?://" 共 9 个字符
+      return globStarMatch(url, "http://" + rest) || globStarMatch(url, "https://" + rest);
+    }}
     try {{
       var pieces = pattern.split("*");
       var cursor = 0;
@@ -419,18 +438,82 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
       getValue: function (k, def) {{ var d = gmStore(meta.id); return (k in d) ? d[k] : def; }},
       deleteValue: function (k) {{ var d = gmStore(meta.id); delete d[k]; gmSave(meta.id, d); }},
       listValues: function () {{ return Object.keys(gmStore(meta.id)); }},
-      openInTab: function (url) {{ location.href = url; }},
+      // GM_openInTab：走 window.open，由引擎 on_new_window 接成新标签。
+      // 旧实现直接改 location.href——把用户当前页顶掉，和内嵌浏览器语义不符。
+      openInTab: function (url, opts) {{
+        var target = (url && typeof url === "object") ? url.url : url;
+        var active = !(url && typeof url === "object") || url.active !== false;
+        try {{
+          var opened = window.open(target, "_blank");
+          if (!opened) location.href = target;
+        }} catch (e) {{ location.href = target; }}
+        return active;
+      }},
       notification: function (text) {{
-        try {{ console.info("[匣油猴] " + (meta.name || "") + " " + text); }} catch (e) {{}}
+        var msg = (text && typeof text === "object") ? text.text : text;
+        try {{ console.info("[匣油猴] " + (meta.name || "") + " " + msg); }} catch (e) {{}}
       }},
+      // GM_download 两种签名：GM_download(url, name) / GM_download({{url, name, onload, onerror}})
       download: function (url, name) {{
-        var a = document.createElement("a");
-        a.href = url;
-        if (name) a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        var details = (url && typeof url === "object") ? url : {{ url: url, name: name }};
+        try {{
+          var a = document.createElement("a");
+          a.href = details.url;
+          if (details.name) a.download = details.name;
+          a.rel = "noreferrer";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () {{
+            try {{ if (details.onload) details.onload({{}}); }} catch (e) {{}}
+          }}, 0);
+        }} catch (e) {{
+          try {{ if (details.onerror) details.onerror(e); }} catch (e2) {{}}
+        }}
       }},
+      // GM_addElement(parent, tag, attrs) / GM_addElement(tag, attrs)
+      addElement: function (parent, tag, attrs) {{
+        var host = document.body || document.documentElement;
+        if (typeof parent === "string") {{
+          attrs = tag || {{}};
+          tag = parent;
+          parent = host;
+        }}
+        var el = document.createElement(tag);
+        var bag = attrs || {{}};
+        Object.keys(bag).forEach(function (key) {{
+          if (key === "textContent") el.textContent = bag[key];
+          else el.setAttribute(key, bag[key]);
+        }});
+        (parent || host).appendChild(el);
+        return el;
+      }},
+      // GM_setClipboard：优先异步剪贴板，失败退回 execCommand。
+      setClipboard: function (text) {{
+        var value = String(text == null ? "" : text);
+        try {{
+          if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(value);
+            return;
+          }}
+        }} catch (e) {{}}
+        try {{
+          var ta = document.createElement("textarea");
+          ta.value = value;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          ta.remove();
+        }} catch (e) {{}}
+      }},
+      // 菜单/资源类 API：内嵌浏览器没有油猴菜单、也没做 @resource 仓库。
+      // 给空实现而不是留 undefined——很多脚本启动时无条件调用，undefined 直接崩。
+      registerMenuCommand: function () {{ return 0; }},
+      unregisterMenuCommand: function () {{}},
+      getResourceText: function () {{ return ""; }},
+      getResourceUrl: function () {{ return ""; }},
       xmlhttpRequest: function (details) {{
         window.__xkGmXhr = window.__xkGmXhr || {{ next: 1, items: {{}} }};
         var q = window.__xkGmXhr;
@@ -486,15 +569,15 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
         return {{ abort: function () {{ aborted = true; clearInterval(timer); delete q.items[id]; }} }};
       }},
     }};
-    // GM4 风格别名：GM.xmlHttpRequest / GM.addStyle / GM.getValue / GM.setValue
+    // GM4 风格别名：GM.xmlHttpRequest / GM.getValue / GM.setValue ...
     gm.xmlHttpRequest = gm.xmlhttpRequest;
-    gm.addStyle = gm.addStyle;
     return gm;
   }}
   // 传统油猴脚本用全局 GM_xxx（下划线），GM4 脚本用 GM.xxx（点号）。
   // 之前只给了 GM 对象，Comic Looms 这类混用下划线取值的脚本会
   // ReferenceError: GM_getValue is not defined 直接崩掉、UI 不出来（2026-11-23 修）。
   function setGmGlobals(gm) {{
+    window.GM = gm;
     window.GM_info = gm.info;
     window.GM_getValue = function (k, d) {{ return gm.getValue(k, d); }};
     window.GM_setValue = function (k, v) {{ return gm.setValue(k, v); }};
@@ -502,19 +585,46 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
     window.GM_listValues = function () {{ return gm.listValues(); }};
     window.GM_xmlhttpRequest = function (d) {{ return gm.xmlhttpRequest(d); }};
     window.GM_addStyle = function (css) {{ return gm.addStyle(css); }};
+    window.GM_addElement = function (a, b, c) {{ return gm.addElement(a, b, c); }};
     window.GM_download = function (u, n) {{ return gm.download(u, n); }};
     window.GM_notification = function (t) {{ return gm.notification(t); }};
-    window.GM_openInTab = function (u) {{ return gm.openInTab(u); }};
+    window.GM_openInTab = function (u, o) {{ return gm.openInTab(u, o); }};
+    window.GM_setClipboard = function (t, i) {{ return gm.setClipboard(t, i); }};
+    window.GM_registerMenuCommand = function (n, f, a) {{
+      return gm.registerMenuCommand(n, f, a);
+    }};
+    window.GM_unregisterMenuCommand = function (id) {{ return gm.unregisterMenuCommand(id); }};
+    window.GM_getResourceText = function (n) {{ return gm.getResourceText(n); }};
+    window.GM_getResourceURL = function (n) {{ return gm.getResourceUrl(n); }};
     window.unsafeWindow = window;
+  }}
+  // 诊断用：脚本崩了不能只留一行 console——画匣用户看不到控制台，
+  // 「装了脚本但没有任何反应」就成了黑箱。错误同时记进 window.__xkGmDiag，
+  // 宿主（或后续诊断脚本）可以 eval 读出来。
+  function gmReport(entry, error) {{
+    var info = {{
+      name: (entry.meta && entry.meta.name) || "",
+      id: (entry.meta && entry.meta.id) || "",
+      message: String((error && (error.stack || error.message)) || error),
+    }};
+    window.__xkGmDiag = window.__xkGmDiag || [];
+    window.__xkGmDiag.push(info);
+    try {{ console.warn("[匣油猴] 脚本执行出错 " + info.name, error); }} catch (e) {{}}
   }}
   function runOne(entry) {{
     try {{
       var gm = makeGm(entry.meta);
       setGmGlobals(gm);
-      entry.run(gm, window, window);
+      // 必须 call(window)：脚本源码（含 @require 内联的 UMD 库）里的 `this`
+      // 在 Tampermonkey 里就是 window。用 entry.run(...) 调用时 this 会变成
+      // 这个 entry 对象，file-saver 这类 `(function(global){{...}})(this)` 的
+      // UMD 就把 saveAs 挂到 entry 上，脚本裸引用全局 saveAs 直接
+      // ReferenceError 整段崩——Comic Looms 4.16.1 的 UI 不出来就是这个原因
+      // （2026-11-23 修）。
+      entry.run.call(window, gm, window, window);
       try {{ console.info("[匣油猴] 已执行 " + (entry.meta.name || entry.meta.id)); }} catch (e) {{}}
     }} catch (e) {{
-      try {{ console.warn("[匣油猴] 脚本执行出错 " + (entry.meta.name || entry.meta.id), e); }} catch (e2) {{}}
+      gmReport(entry, e);
     }}
   }}
   var start = [];
@@ -669,7 +779,34 @@ console.log("hello");
         assert!(source.contains("阅读增强"), "脚本名应烘焙进加载器");
         assert!(source.contains("GM_xmlhttpRequest") || source.contains("xmlhttpRequest"));
         assert!(source.contains("__xkGmXhr"), "跨域 XHR 队列应存在");
+        // 2026-11-23：run 必须以 window 为 this 调用，否则 UMD 依赖（file-saver）
+        // 把 saveAs 挂到 entry 上，Comic Looms 整段崩、UI 不出来。
+        assert!(
+            source.contains("entry.run.call(window"),
+            "脚本应以 window 为 this 调用"
+        );
+        assert!(source.contains("GM_setClipboard"), "剪贴板垫片应存在");
+        assert!(source.contains("__xkGmDiag"), "脚本错误应可诊断");
         assert!(source.contains("console.log(") && source.contains("hello"), "脚本体应烘焙进加载器");
+    }
+
+    #[test]
+    fn loader_js_matcher_handles_wildcard_scheme() {
+        let source = loader_source(&[]);
+        // `*://*/*` 这类 @match 的协议展开必须按 "https?://"（9 个字符）截。
+        // 历史上写成 "http" + pattern.slice(5) → 得到 "http?://..."，
+        // 于是 `*://*/*` 永远匹配不上：Comic Looms 从未被执行，UI 一个按钮
+        // 都没有（2026-11-23 用真实 loader + 真机 Edge 对照实验确认：
+        // 旧逻辑 base=false、脚本零执行；修好后 #ehvp-base 正常创建）。
+        assert!(
+            source.contains("var tail = pattern.slice(9)"),
+            "通配协议展开必须按 9 字符截"
+        );
+        assert!(
+            !source.contains("return urlMatches(url, \"http\" + pattern.slice(5))"),
+            "旧的错误偏移（slice(5)）不允许回退"
+        );
+        assert!(source.contains("globStarMatch"), "通配匹配应走 globStarMatch");
     }
 
     #[test]
