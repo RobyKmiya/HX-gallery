@@ -678,10 +678,10 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
               />
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <button type="button" className="btn btn-quiet btn-compact" onClick={() => void grabCurrent()}>
-                  抓取当前页
+                  填入当前页地址
                 </button>
                 <span className="queue-hint" style={{ alignSelf: "center" }}>
-                  直接取浏览窗口当前地址，不用再复制一遍
+                  只把地址填进来；真要抓整部，用浏览器工具栏上的 ⬇ 按钮
                 </span>
               </div>
             </div>

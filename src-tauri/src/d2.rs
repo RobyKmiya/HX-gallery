@@ -830,6 +830,18 @@ pub fn d2_start(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<(), String> {
+    start_fetch(&app, state.inner(), url)
+}
+
+/// 浏览器工具栏（独立 webview，无 IPC）触发抓取时用：自己从 AppHandle 取状态。
+pub fn start_fetch_from_toolbar(app: &AppHandle, url: String) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app.state::<crate::AppState>();
+    start_fetch(app, state.inner(), url)
+}
+
+/// `d2_start` 与工具栏抓取共用的主体。
+fn start_fetch(app: &AppHandle, state: &AppState, url: String) -> Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|_| "网址格式不正确".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("请填写 http / https 网址".to_string());
@@ -855,7 +867,7 @@ pub fn d2_start(
 
     CANCELLED.store(false, Ordering::SeqCst);
 
-    let worker = app.clone();
+    let worker = AppHandle::clone(app);
     std::thread::spawn(move || {
         let result = fetch_flow(&worker, url, root, library_id, parsed);
         match result {
@@ -895,6 +907,95 @@ pub fn d2_cancel() -> Result<(), String> {
     CANCELLED.store(true, Ordering::SeqCst);
     close_window();
     Ok(())
+}
+
+/// 内嵌浏览器网页下载完成后的自动导入（网页下载 → 画匣库）。
+///
+/// 只处理 zip / cbz（画匣的图集容器）；其它格式明确回绝，
+/// 不做「悄悄进库却打不开」的事。结果通过 `d2://download` 事件回传前端。
+pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "zip" && ext != "cbz" {
+        log(
+            app,
+            &format!("下载完成但格式不是 zip/cbz，跳过导入：{}", path.display()),
+        );
+        let _ = app.emit(
+            "d2://download",
+            serde_json::json!({
+                "ok": false,
+                "path": path.to_string_lossy(),
+                "error": format!("只支持 zip / cbz，{ext} 请手动导入")
+            }),
+        );
+        return;
+    }
+
+    let state = app.state::<AppState>();
+    let prepared = {
+        let Ok(guard) = state.lock() else {
+            return;
+        };
+        match guard.library.as_ref() {
+            Some(library) => Ok((library.root.clone(), library.library_id.clone())),
+            None => Err("还没选择库目录，下载文件先留在缓存里".to_string()),
+        }
+    };
+    let (root, library_id) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
+            log(app, &format!("下载导入跳过：{error}"));
+            let _ = app.emit(
+                "d2://download",
+                serde_json::json!({ "ok": false, "error": error }),
+            );
+            return;
+        }
+    };
+
+    let outcome = (|| -> Result<ImportReport, String> {
+        let covers = paths::covers_dir(app, &library_id)?;
+        let _guard = crate::try_maintenance()?;
+        let options = ImportOptions {
+            add_to_collection: None,
+            preserve_structure: None,
+            tags: Vec::new(),
+            path_tags: Vec::new(),
+            passwords: Vec::new(),
+        };
+        Ok(importer::import_blocking(
+            app,
+            &root,
+            &covers,
+            vec![path.clone()],
+            options,
+        ))
+    })();
+
+    match outcome {
+        Ok(report) => {
+            log(app, &format!("网页下载已入库：{}", path.display()));
+            let _ = app.emit(
+                "d2://download",
+                serde_json::json!({
+                    "ok": true,
+                    "path": path.to_string_lossy(),
+                    "report": report,
+                }),
+            );
+        }
+        Err(error) => {
+            log(app, &format!("网页下载入库失败：{error}"));
+            let _ = app.emit(
+                "d2://download",
+                serde_json::json!({ "ok": false, "error": error, "path": path.to_string_lossy() }),
+            );
+        }
+    }
 }
 
 /// 补全并校验用户输入的网址（允许省略 https://）。

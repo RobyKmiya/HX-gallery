@@ -662,6 +662,27 @@ export default function LibraryView({
     setToast({ id: Date.now(), message, kind });
   }, []);
 
+  // 内嵌浏览器网页下载自动入库（browser.rs on_download → d2::import_downloaded）。
+  // 监听放主界面而不是 D2 面板：下载多半发生在浏览器窗口，那时面板通常没开。
+  useEffect(() => {
+    const unlisten = listen<{ ok: boolean; error?: string }>(
+      "d2://download",
+      (event) => {
+        if (event.payload.ok) {
+          notify("网页下载已自动导入画匣", "success");
+        } else {
+          notify(
+            `网页下载未导入：${event.payload.error ?? "未知原因"}`,
+            "error",
+          );
+        }
+      },
+    );
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [notify]);
+
   // 开场把「上次更新到底成没成」说清楚，别让人自己去猜。
   // 同一次失败只提示一次（按 lastAt 去重），否则每次开都弹会很烦。
   useEffect(() => {

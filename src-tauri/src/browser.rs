@@ -348,7 +348,7 @@ pub fn open(
                 WebviewUrl::External(url),
             )
             .auto_resize();
-            tab_builder = attach_tab_hooks(tab_builder, &label, &first_tab_id);
+            tab_builder = attach_tab_hooks(tab_builder, &app_for_window, &label, &first_tab_id);
             if let Some(store) = userscript_store.as_ref() {
                 tab_builder = attach_userscripts(tab_builder, store, &label);
             }
@@ -496,7 +496,7 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 WebviewUrl::External(url_for_thread.clone()),
             )
             .auto_resize();
-            tab_builder = attach_tab_hooks(tab_builder, &label_for_tab, &tab_id_for_thread);
+            tab_builder = attach_tab_hooks(tab_builder, &app_for_tab, &label_for_tab, &tab_id_for_thread);
             if let Some(store) = store.as_ref() {
                 tab_builder = attach_userscripts(tab_builder, store, &label_for_tab);
             }
@@ -638,6 +638,7 @@ fn focus_tab_webview(tab_id: &str) -> Result<(), String> {
 /// 给内容标签挂钩子：弹窗→开新标签、下载→宿主日志、导航→记 URL。
 fn attach_tab_hooks(
     builder: tauri::WebviewBuilder<tauri::Wry>,
+    app: &AppHandle,
     label: &str,
     tab_id: &str,
 ) -> tauri::WebviewBuilder<tauri::Wry> {
@@ -646,6 +647,7 @@ fn attach_tab_hooks(
     let label_for_dl = label.to_string();
     let label_for_nav = label.to_string();
     let tab_id_for_nav = tab_id.to_string();
+    let app_for_dl = AppHandle::clone(app);
     builder
         // 弹窗接管 v2：新窗一律开成新标签（后台建，建好即激活）。
         .on_new_window(move |new_url, _features| {
@@ -654,9 +656,17 @@ fn attach_tab_hooks(
         })
         .on_download({
             let label_for_download = label_for_dl.clone();
+            let app_for_download = app_for_dl.clone();
             move |_webview, event| {
                 match event {
                     DownloadEvent::Requested { url, destination } => {
+                        // 网页下载统一落到画匣暂存目录，下载完成后自动导入画匣库，
+                        // 不再散落到用户的系统下载目录（管理员 2026-11-23 要求）。
+                        if let Ok(cache) = app_for_download.path().app_cache_dir() {
+                            let dir = cache.join("d2").join("downloads");
+                            let _ = std::fs::create_dir_all(&dir);
+                            *destination = dir.join(download_file_name(&url));
+                        }
                         log_for(
                             &label_for_download,
                             &format!("下载开始：{url} → {}", destination.display()),
@@ -673,11 +683,20 @@ fn attach_tab_hooks(
                                     .unwrap_or_default()
                             ),
                         );
+                        if success {
+                            if let Some(file) = path {
+                                let app_import = app_for_download.clone();
+                                // 导入是阻塞的磁盘/数据库操作，别卡住 webview 线程。
+                                std::thread::spawn(move || {
+                                    crate::d2::import_downloaded(&app_import, file);
+                                });
+                            }
+                        }
                     }
                     // DownloadEvent 标记 #[non_exhaustive]
                     _ => {}
                 }
-                true // 放行下载；目的地按 WebView2 默认（用户下载目录）
+                true // 放行下载（目的地已改到画匣缓存）
             }
         })
         .on_navigation({
@@ -691,6 +710,31 @@ fn attach_tab_hooks(
         // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
         // 由本脚本画匣系自己的菜单。
         .initialization_script(CONTEXT_MENU_SCRIPT)
+}
+
+/// 从下载 URL 提取安全文件名（去掉查询串与路径穿越字符）。
+fn download_file_name(url: &Url) -> String {
+    let raw = url
+        .path_segments()
+        .and_then(|segments| segments.filter(|part| !part.is_empty()).last())
+        .unwrap_or("download.bin");
+    let decoded = raw.replace("%20", " ");
+    let cleaned: String = decoded
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ' ') || !ch.is_ascii() {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() || !cleaned.contains('.') {
+        format!("download-{}.bin", crate::fsutil::now_ms())
+    } else {
+        cleaned.to_string()
+    }
 }
 
 /// 挂油猴加载器（含日志），返回追加后的 builder。
@@ -971,6 +1015,32 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
                 "back" => history_action(&label, "back"),
                 "forward" => history_action(&label, "forward"),
                 "reload" => history_action(&label, "reload"),
+                // 工具栏「抓取本页」：把当前激活标签的整部作品抓下来入库。
+                // 原来这个按钮在 D2 面板里且只做了「填入地址」，等于无效；
+                // 管理员要求挪到浏览器工具栏上，做成真抓取。
+                "grab" => {
+                    let current = with_state(&label, |state| {
+                        state
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.id == state.active)
+                            .map(|tab| tab.url.clone())
+                    })
+                    .flatten()
+                    .unwrap_or_default();
+                    if current.trim().is_empty() || current == "about:blank" {
+                        Err("当前标签还没有网址，先打开一个作品页".to_string())
+                    } else {
+                        let _ = toolbar.eval("window.__xkGrab = 'busy';");
+                        let result = crate::d2::start_fetch_from_toolbar(&app, current);
+                        // 启动是异步的：给页面一个短 busy 反馈后自动回落，
+                        // 真实进度仍走 d2://status / d2://done 事件。
+                        let _ = toolbar.eval(
+                            "setTimeout(function(){ window.__xkGrab = ''; }, 4000);",
+                        );
+                        result
+                    }
+                }
                 "reorder" => {
                     let tab_id = req
                         .get("tabId")

@@ -334,13 +334,18 @@ pub fn match_url(meta: &ScriptMeta, url: &str) -> bool {
 
 /// 生成注入到浏览器窗口的加载器脚本（窗口创建时烘焙全部启用脚本的源码）。
 pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
+    // 直接生成可执行函数，而不是把源码存成字符串再 new Function：
+    // ① `new Function` 属于 eval，正式包 CSP（script-src 'self'）没有
+    //    'unsafe-eval' 时会被拦掉，所有油猴脚本直接失效；
+    // ② 顺带省掉 791KB 字符串的二次编译。
     let entries: Vec<String> = scripts
         .iter()
         .map(|(meta, code)| {
             let meta_json =
                 serde_json::to_string(meta).unwrap_or_else(|_| "{}".to_string());
-            let code_json = serde_json::to_string(code).unwrap_or_default();
-            format!("    {{ meta: {meta_json}, code: {code_json} }},")
+            format!(
+                "    {{ meta: {meta_json},\n      run: function (GM, unsafeWindow, window) {{\n{code}\n      }} }},"
+            )
         })
         .collect();
 
@@ -438,20 +443,47 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
           data: details.data || "",
           state: "pending",
         }};
+        var aborted = false;
+        var startedAt = Date.now();
         var timer = setInterval(function () {{
+          if (aborted) return;
           var item = q.items[id];
-          if (!item || item.state !== "done") return;
+          if (!item) {{ clearInterval(timer); return; }}
+          if (item.state !== "done") {{
+            // 传统脚本常用 timeout 选项；超时就回 ontimeout，别让它永远等。
+            if (details.timeout && Date.now() - startedAt > details.timeout) {{
+              clearInterval(timer);
+              try {{ if (details.ontimeout) details.ontimeout({{ readyState: 4, status: 0 }}); }} catch (e) {{}}
+            }}
+            return;
+          }}
           clearInterval(timer);
+          var body = item.responseText || "";
           var res = {{
             readyState: 4,
             status: item.status || 0,
-            responseText: item.responseText || "",
+            statusText: "",
+            responseText: body,
+            response: body,
             responseHeaders: item.responseHeaders || "",
+            finalUrl: details.url,
           }};
-          if (item.error) {{ if (details.onerror) details.onerror(res); }}
-          else if (details.onload) details.onload(res);
+          // 有的脚本只认 onreadystatechange（会自己判 readyState===4）。
+          try {{
+            if (details.onreadystatechange) {{
+              res.readyState = 2; details.onreadystatechange(res);
+              res.readyState = 3; details.onreadystatechange(res);
+              res.readyState = 4; details.onreadystatechange(res);
+            }}
+          }} catch (e) {{}}
+          if (item.error) {{
+            try {{ if (details.onerror) details.onerror(res); }} catch (e) {{}}
+          }} else {{
+            try {{ if (details.onload) details.onload(res); }} catch (e) {{}}
+          }}
+          try {{ if (details.onloadend) details.onloadend(res); }} catch (e) {{}}
         }}, 80);
-        return {{ abort: function () {{ clearInterval(timer); delete q.items[id]; }} }};
+        return {{ abort: function () {{ aborted = true; clearInterval(timer); delete q.items[id]; }} }};
       }},
     }};
     // GM4 风格别名：GM.xmlHttpRequest / GM.addStyle / GM.getValue / GM.setValue
@@ -459,10 +491,28 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
     gm.addStyle = gm.addStyle;
     return gm;
   }}
+  // 传统油猴脚本用全局 GM_xxx（下划线），GM4 脚本用 GM.xxx（点号）。
+  // 之前只给了 GM 对象，Comic Looms 这类混用下划线取值的脚本会
+  // ReferenceError: GM_getValue is not defined 直接崩掉、UI 不出来（2026-11-23 修）。
+  function setGmGlobals(gm) {{
+    window.GM_info = gm.info;
+    window.GM_getValue = function (k, d) {{ return gm.getValue(k, d); }};
+    window.GM_setValue = function (k, v) {{ return gm.setValue(k, v); }};
+    window.GM_deleteValue = function (k) {{ return gm.deleteValue(k); }};
+    window.GM_listValues = function () {{ return gm.listValues(); }};
+    window.GM_xmlhttpRequest = function (d) {{ return gm.xmlhttpRequest(d); }};
+    window.GM_addStyle = function (css) {{ return gm.addStyle(css); }};
+    window.GM_download = function (u, n) {{ return gm.download(u, n); }};
+    window.GM_notification = function (t) {{ return gm.notification(t); }};
+    window.GM_openInTab = function (u) {{ return gm.openInTab(u); }};
+    window.unsafeWindow = window;
+  }}
   function runOne(entry) {{
     try {{
-      var fn = new Function("GM", "unsafeWindow", "window", entry.code);
-      fn(makeGm(entry.meta), window, window);
+      var gm = makeGm(entry.meta);
+      setGmGlobals(gm);
+      entry.run(gm, window, window);
+      try {{ console.info("[匣油猴] 已执行 " + (entry.meta.name || entry.meta.id)); }} catch (e) {{}}
     }} catch (e) {{
       try {{ console.warn("[匣油猴] 脚本执行出错 " + (entry.meta.name || entry.meta.id), e); }} catch (e2) {{}}
     }}
