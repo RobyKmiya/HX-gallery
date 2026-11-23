@@ -664,7 +664,7 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
               <input
                 value={url}
                 onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://exhentai.org/g/.../"
+                placeholder="https://exhentai.org/g/.../  ·  nhentai.net/g/.../  ·  18comic.vip/album/...  ·  wnacg.com/photos-index-aid-....html"
                 spellCheck={false}
                 style={{
                   width: "100%",
@@ -701,7 +701,7 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
             {busy && status && <p className="queue-hint">{status}</p>}
             {!busy && !error && (
               <p className="queue-hint">
-                抓取目前覆盖 exhentai / e-hentai 作品页；其余站点能正常浏览，只是还没有解析器。
+                抓取支持 exhentai / e-hentai / nhentai / 18comic / wnacg 作品页；其余站点能正常浏览，只是还没有解析器。
               </p>
             )}
             {error && (

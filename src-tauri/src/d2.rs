@@ -52,10 +52,51 @@ static BROWSER_LABEL: Mutex<Option<String>> = Mutex::new(None);
 const D2_INIT_SCRIPT: &str = r###"
 (function () {
   function clean(value) { return (value || "").trim(); }
-  function abs(href) { try { return new URL(href, location.href).href; } catch (e) { return href; } }
+  function abs(href, base) { try { return new URL(href, base || location.href).href; } catch (e) { return href; } }
+  function fetchText(url) {
+    return fetch(url, { credentials: "include" }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.text();
+    });
+  }
+  function fetchJSON(url) { return fetchText(url).then(function (t) { return JSON.parse(t); }); }
+  function addTag(tags, key, value) {
+    if (!key || !value) return;
+    (tags[key] = tags[key] || []).push(value);
+  }
+  function tagsFromLinks(selector, ns) {
+    var tags = {};
+    var links = document.querySelectorAll(selector);
+    for (var i = 0; i < links.length; i++) addTag(tags, ns, clean(links[i].textContent));
+    return tags;
+  }
+  function toBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result).split(",")[1] || ""); };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+  async function directGrab(imageUrl) {
+    var response = await fetch(imageUrl, { credentials: "include" });
+    if (!response.ok) throw new Error("图片下载失败，HTTP " + response.status);
+    var blob = await response.blob();
+    return { imageUrl: imageUrl, mime: blob.type || "image/jpeg", base64: await toBase64(blob) };
+  }
 
-  // 作品页元数据：标题 + 标签。
-  window.__d2Meta = function () {
+  // ---- 站点分派：按 host 识别解析器，未识别的站点只浏览不抓取 ----
+  function siteOf() {
+    var h = (location.hostname || "").toLowerCase().replace(/^www\./, "");
+    if (h === "exhentai.org" || h === "e-hentai.org") return "eh";
+    if (h.indexOf("nhentai") !== -1) return "nh";
+    if (h.indexOf("18comic") !== -1 || h.indexOf("jmcomic") !== -1 || h.indexOf("comic18") !== -1) return "jm";
+    if (h.indexOf("wnacg") !== -1 || /^wn\d{2}\./.test(h)) return "wn";
+    return "";
+  }
+
+  // ---- exhentai / e-hentai（原逻辑，保持不变） ----
+  function ehMeta() {
     var titles = document.querySelectorAll("#gd2 h1");
     var title = titles.length ? clean(titles[0].textContent) : "";
     var originTitle = titles.length > 1 ? clean(titles[1].textContent) : "";
@@ -71,19 +112,12 @@ const D2_INIT_SCRIPT: &str = r###"
       if (cells.length < 2) continue;
       var key = clean(cells[0].textContent).replace(":", "");
       if (!key) continue;
-      var values = [];
       var links = cells[1].querySelectorAll("a");
-      for (var a = 0; a < links.length; a++) {
-        var v = clean(links[a].textContent);
-        if (v) values.push(v);
-      }
-      if (values.length) tags[key] = values;
+      for (var a = 0; a < links.length; a++) addTag(tags, key, clean(links[a].textContent));
     }
     return { title: title, tags: tags };
-  };
-
-  // 收集整部作品所有图片页 URL：本页缩略图 + 沿 #unext 逐页翻到底。
-  window.__d2Collect = async function () {
+  }
+  async function ehCollect() {
     var seen = {};
     var urls = [];
     function grab(doc) {
@@ -103,36 +137,155 @@ const D2_INIT_SCRIPT: &str = r###"
       if (!nextHref || seen["#next#" + nextHref]) break;
       seen["#next#" + nextHref] = 1;
       var html;
-      try {
-        html = await fetch(nextHref, { credentials: "include" }).then(function (r) { return r.text(); });
-      } catch (e) {
-        break;
-      }
+      try { html = await fetchText(nextHref); } catch (e) { break; }
       doc = new DOMParser().parseFromString(html, "text/html");
     }
     return urls;
-  };
-
-  // 取一张图片页的原图字节（base64）。失败时抛异常。
-  window.__d2GrabOne = async function (pageUrl) {
-    var html = await fetch(pageUrl, { credentials: "include" }).then(function (r) { return r.text(); });
-    var doc = new DOMParser().parseFromString(html, "text/html");
+  }
+  async function ehGrabOne(pageUrl) {
+    var doc = new DOMParser().parseFromString(await fetchText(pageUrl), "text/html");
     var original = (doc.querySelector("#image-resize-notice > a") || {}).href ||
                    (doc.querySelector("#original > a") || {}).href || "";
     var img = doc.querySelector("#img");
     var normal = (img && (img.getAttribute("data-src") || img.src)) || "";
     var imageUrl = original || normal;
     if (!imageUrl) throw new Error("图片页里没找到原图地址");
-    var response = await fetch(abs(imageUrl), { credentials: "include" });
-    if (!response.ok) throw new Error("图片下载失败，HTTP " + response.status);
-    var blob = await response.blob();
-    var base64 = await new Promise(function (resolve, reject) {
-      var reader = new FileReader();
-      reader.onload = function () { resolve(String(reader.result).split(",")[1] || ""); };
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-    return { imageUrl: abs(imageUrl), mime: blob.type || "image/jpeg", base64: base64 };
+    return directGrab(abs(imageUrl, pageUrl));
+  }
+  function ehReady() { return !!document.querySelector("#gdt"); }
+
+  // ---- nhentai：走官方 API /api/v2/galleries/{id}，页表 + tag 一次拿全 ----
+  function nhId() { var m = location.pathname.match(/\/g\/(\d+)/); return m ? m[1] : ""; }
+  function nhMeta() {
+    var t = clean((document.querySelector("#info h1") || {}).textContent) ||
+            clean((document.querySelector(".info h1") || {}).textContent) ||
+            ("nhentai-" + (nhId() || ""));
+    return { title: t, tags: tagsFromLinks("#tags a.tag .name, #tags a.tag, .tag_name", "tag") };
+  }
+  async function nhCollect() {
+    var id = nhId();
+    if (!id) throw new Error("nhentai 作品页地址应含 /g/数字/");
+    var data = await fetchJSON("/api/v2/galleries/" + id);
+    var mediaId = data.media_id || (data.images && data.images.media_id);
+    var pages = (data.images && data.images.pages) || data.pages || [];
+    var extOf = { j: "jpg", p: "png", g: "gif", w: "webp" };
+    var out = [];
+    for (var i = 0; i < pages.length; i++) {
+      var p = pages[i];
+      var ext = extOf[p.t] || "jpg";
+      var tail = p.path || ((p.number || i + 1) + "." + ext);
+      out.push("direct|" + abs("https://i.nhentai.net/galleries/" + mediaId + "/" + tail));
+    }
+    if (!out.length) throw new Error("nhentai API 没返回图片页");
+    // API 异步拿到的数据先缓存，Rust 侧随后读 __d2Meta 时直接返回。
+    if (data.title) {
+      window.__d2MetaCache = {
+        title: clean(data.title.english || data.title.japanese || "") || ("nhentai-" + id),
+        tags: tagsFromLinks("#tags a.tag .name, #tags a.tag, .tag_name", "tag")
+      };
+      var apiTags = {};
+      var rawTags = data.tags || [];
+      for (var k = 0; k < rawTags.length; k++) addTag(apiTags, rawTags[k].type, clean(rawTags[k].name));
+      Object.keys(apiTags).forEach(function (key) {
+        window.__d2MetaCache.tags[key] = (window.__d2MetaCache.tags[key] || []).concat(apiTags[key]);
+      });
+    }
+    return out;
+  }
+  function nhReady() { return !!nhId(); }
+
+  // ---- 18comic（禁漫）：章节入口 → 阅读页 .owl-carousel-page 取 data-src ----
+  function jmMeta() {
+    var t = clean((document.querySelector(".panel-heading h2") || {}).textContent) || "18comic";
+    var tags = {};
+    var spans = document.querySelectorAll("div.tag-block > span");
+    for (var i = 0; i < spans.length; i++) {
+      addTag(tags, spans[i].getAttribute("data-type") || "tag", clean(spans[i].textContent));
+    }
+    return { title: t, tags: tags };
+  }
+  function jmReadUrl(href) {
+    var u = abs(href);
+    return u + (u.indexOf("?") === -1 ? "?" : "&") + "read_mode=read-by-page";
+  }
+  async function jmCollect() {
+    var readUrls = [];
+    var eps = document.querySelectorAll(".visible-lg .episode > ul > a");
+    for (var i = 0; i < eps.length; i++) readUrls.push(jmReadUrl(eps[i].href));
+    if (!readUrls.length) {
+      var block = document.querySelector(".visible-lg .read-block");
+      var a = block && (block.querySelector("a") ||
+              (block.firstElementChild && block.firstElementChild.querySelector("a")));
+      if (a) readUrls.push(jmReadUrl(a.href));
+    }
+    if (!readUrls.length) throw new Error("18comic 作品页没找到章节入口");
+    var seen = {};
+    var out = [];
+    for (var r = 0; r < readUrls.length; r++) {
+      var doc = new DOMParser().parseFromString(await fetchText(readUrls[r]), "text/html");
+      var imgs = doc.querySelectorAll(".owl-carousel-page > .center > img");
+      for (var j = 0; j < imgs.length; j++) {
+        var src = imgs[j].getAttribute("data-src") || imgs[j].getAttribute("src");
+        if (src && !seen[src]) { seen[src] = 1; out.push("direct|" + abs(src, readUrls[r])); }
+      }
+    }
+    if (!out.length) throw new Error("18comic 章节里没解析出图片（可能需要登录或站点改版）");
+    window.__d2MetaCache = jmMeta();
+    return out;
+  }
+  function jmReady() { return !!document.querySelector(".panel-heading h2, .episode"); }
+
+  // ---- wnacg（绅士漫画）：图库页 var imglist 一次拿全 ----
+  function wnMeta() {
+    var t = clean((document.querySelector("#bodywrap > h2") || {}).textContent) || "wnacg";
+    return { title: t, tags: tagsFromLinks(".asTB .tagshow", "tag") };
+  }
+  async function wnCollect() {
+    var m = location.href.match(/aid-(\d+)/);
+    if (!m) throw new Error("wnacg 作品页地址应含 aid-数字");
+    var aid = m[1];
+    var galleryUrl = abs("/photos-gallery-aid-" + aid + ".html");
+    var html = await fetchText(galleryUrl);
+    var block = html.match(/var\s+imglist\s*=\s*(\[[\s\S]*?\])\s*;/);
+    var out = [];
+    if (block) {
+      var re = /url:\s*["'](.*?)["']/g;
+      var u;
+      while ((u = re.exec(block[1])) !== null) out.push("direct|" + abs(u[1], galleryUrl));
+    }
+    if (!out.length) throw new Error("wnacg 图库页没解析出 imglist（可能需要登录或站点改版）");
+    window.__d2MetaCache = wnMeta();
+    return out;
+  }
+  function wnReady() { return /aid-\d+/.test(location.href); }
+
+  // ---- 统一入口：Rust 侧只认这三个函数和 __d2Probe ----
+  window.__d2Probe = function () {
+    var site = siteOf();
+    var ready = site === "eh" ? ehReady() : site === "nh" ? nhReady()
+              : site === "jm" ? jmReady() : site === "wn" ? wnReady() : false;
+    return { site: site, ready: !!ready };
+  };
+  window.__d2Meta = function () {
+    if (window.__d2MetaCache) return window.__d2MetaCache;
+    var site = siteOf();
+    if (site === "nh") return nhMeta();
+    if (site === "jm") return jmMeta();
+    if (site === "wn") return wnMeta();
+    return ehMeta();
+  };
+  window.__d2Collect = async function () {
+    var site = siteOf();
+    if (site === "eh") return ehCollect();
+    if (site === "nh") return nhCollect();
+    if (site === "jm") return jmCollect();
+    if (site === "wn") return wnCollect();
+    throw new Error("这个站点还没有解析器：" + location.hostname);
+  };
+  window.__d2GrabOne = async function (pageUrl) {
+    // 新站点收集阶段已给出图片直链，用 direct| 前缀区分（exhentai 仍是图片页 URL）。
+    if (pageUrl.indexOf("direct|") === 0) return directGrab(pageUrl.slice(7));
+    return ehGrabOne(pageUrl);
   };
 })();
 "###;
@@ -352,7 +505,8 @@ fn close_window() {
     }
 }
 
-/// 等页面进入作品页（出现 `#gdt`）。期间对空白页做一次诊断提示。
+/// 等页面进入受支持的作品页。判定交给注入脚本的 `__d2Probe()`（按站点分派），
+/// 不再写死 exhentai 的 `#gdt`；未识别站点直接给出明确提示。
 fn wait_for_gallery(window: &Webview, app: &AppHandle, deadline: Instant) -> Result<(), String> {
     let started = Instant::now();
     let mut blank_checked = false;
@@ -363,7 +517,7 @@ fn wait_for_gallery(window: &Webview, app: &AppHandle, deadline: Instant) -> Res
         if Instant::now() > deadline {
             let hint = if !blank_checked {
                 "作品页在限定时间内没有打开。请确认：① 系统代理已开启（WebView 走系统代理）；\
-                 ② 已在该窗口里登录站点；③ 打开的是作品详情页（地址含 /g/）。"
+                 ② 已在该窗口里登录站点；③ 打开的是受支持站点的作品详情页。"
             } else {
                 "作品页打开了，但没解析出图片列表。请确认进入的是作品详情页。"
             };
@@ -372,18 +526,24 @@ fn wait_for_gallery(window: &Webview, app: &AppHandle, deadline: Instant) -> Res
 
         if let Ok(state) = eval_json(
             window,
-            "JSON.stringify({g: !!document.querySelector('#gdt'), h: location.href, n: (document.body ? document.body.innerText.trim().length : 0)})",
+            "JSON.stringify({p: (window.__d2Probe ? window.__d2Probe() : {site:'',ready:false}), \
+             h: location.href, n: (document.body ? document.body.innerText.trim().length : 0)})",
             Duration::from_secs(3),
         ) {
-            if state.contains("\"g\":true") {
+            if state.contains("\"ready\":true") {
                 return Ok(());
+            }
+            if state.contains("\"site\":\"\"") {
+                return Err(format!(
+                    "当前站点还没有抓取解析器（{state}）。可浏览任意站点；抓取支持 exhentai / e-hentai / nhentai / 18comic / wnacg。"
+                ));
             }
             if !blank_checked && started.elapsed() > Duration::from_secs(10) {
                 blank_checked = true;
                 if state.contains("poni=no") || state.contains("\"n\":0") {
                     status(
                         app,
-                        "当前页面是空白。站点未登录一定白屏：请先用工具栏地址栏登录，登录成功后再回到作品页。",
+                        "当前页面是空白。站点未登录可能白屏：请先用工具栏地址栏登录，登录成功后再回到作品页。",
                     );
                 }
             }
@@ -516,7 +676,7 @@ fn fetch_flow(
     let page_urls = collect_page_urls(&window, deadline)?;
     if page_urls.is_empty() {
         return Err(
-            "没有解析到任何图片页。请确认打开的是作品详情页（地址含 /g/）且已登录。".to_string(),
+            "没有解析到任何图片页。请确认打开的是受支持站点的作品详情页且已登录。".to_string(),
         );
     }
     status(app, &format!("共 {} 张，开始逐张下载…", page_urls.len()));
@@ -623,13 +783,42 @@ fn fetch_flow(
     Ok(D2FetchReport {
         title,
         source_url: url,
-        page_url: page_urls.first().cloned().unwrap_or_default(),
+        // 新站点的页 URL 带 internal `direct|` 前缀，回传前端前剥掉。
+        page_url: page_urls
+            .first()
+            .map(|value| value.strip_prefix("direct|").unwrap_or(value).to_string())
+            .unwrap_or_default(),
         image_url: first_image,
         cbz_path: cbz_path.to_string_lossy().to_string(),
         pages,
         failed,
         import_report,
     })
+}
+
+/// 已写好详情页解析器的站点（抓取白名单，与浏览白名单无关）。
+/// 注意注入脚本 `siteOf()` 用子串匹配（覆盖 18comic 的多个镜像域名），
+/// 这里也要用同样的宽松匹配，避免面板认得、抓取却被挡。
+pub fn supported_site(host: &str) -> bool {
+    let owned = host.to_ascii_lowercase();
+    // 注入脚本 siteOf() 会先剥掉 www.，这里保持一致（wn01/wn23 等镜像常带 www.）
+    let h = owned.strip_prefix("www.").unwrap_or(&owned);
+    h == "exhentai.org"
+        || h == "e-hentai.org"
+        || h.contains("nhentai")
+        || h.contains("18comic")
+        || h.contains("jmcomic")
+        || h.contains("comic18")
+        || h.contains("wnacg")
+        || {
+            // wnacg 的数字镜像域名（wn01.cc / wn99.ru 等）
+            let bytes = h.as_bytes();
+            bytes.len() >= 5
+                && h.starts_with("wn")
+                && bytes[2].is_ascii_digit()
+                && bytes[3].is_ascii_digit()
+                && h[4..].starts_with('.')
+        }
 }
 
 /// 启动一次抓取。**立即返回**，进度与结果通过事件推送：
@@ -646,13 +835,11 @@ pub fn d2_start(
         return Err("请填写 http / https 网址".to_string());
     }
     // 这里限制的是「解析器能力」，不是浏览权限：任意站点都能用 d2_open 打开，
-    // 但只有 exhentai / e-hentai 的详情页解析器写好了。
+    // 只有已写好解析器的站点才能抓取。站点列表由 supported_site 统一维护。
     let host = parsed.host_str().unwrap_or("");
-    let supported = host.eq_ignore_ascii_case("exhentai.org")
-        || host.eq_ignore_ascii_case("e-hentai.org");
-    if !supported {
+    if !supported_site(host) {
         return Err(format!(
-            "抓取暂时只支持 exhentai / e-hentai（{host} 的解析器还没写）。\
+            "抓取支持 exhentai / e-hentai / nhentai / 18comic / wnacg（{host} 的解析器还没写）。\
              浏览不受限制——点上面的「打开」可以进任意站点。"
         ));
     }
@@ -1045,6 +1232,23 @@ pub fn d2_close_window() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_site_covers_all_parsers() {
+        // 主域名（大小写不敏感）
+        for host in ["exhentai.org", "E-Hentai.org", "nhentai.net", "nhentai.xxx",
+                     "18comic.vip", "www.jmcomic.cc", "comic18j-codi.net", "www.wnacg.com"] {
+            assert!(supported_site(host), "应支持 {host}");
+        }
+        // wnacg 数字镜像域名
+        for host in ["wn01.cc", "wn99.ru", "www.wn23.cc"] {
+            assert!(supported_site(host), "应支持镜像 {host}");
+        }
+        // 未写解析器的站点仍可浏览，但不能抓取
+        for host in ["example.com", "pixiv.net", "danbooru.donmai.us", ""] {
+            assert!(!supported_site(host), "不应支持 {host}");
+        }
+    }
 
     #[test]
     fn sanitize_replaces_illegal_filename_chars() {

@@ -170,8 +170,26 @@
     <li><strong>通用</strong>：网格滚动 / 分页浏览；详情面板浮动或停靠。</li>
     <li><strong>快捷键</strong>：16 个动作可自定义——点键位按钮后按新键，冲突会提示。</li>
     <li><strong>存储</strong>：库路径、画集数量与总大小，一键打开所在目录。</li>
-    <li><strong>新手教程</strong>：这份说明的精简版，随时能在应用里翻。</li>
+    <li><strong>新手教程</strong>：这份说明的精简版，随时能在应用里翻（含下方抓取能力清单）。</li>
     <li><strong>更多入口</strong>：标签中心、网页抓取、检查更新。</li>
+  </ul>
+
+  <h2>五·五、网页抓取能力（支持 5 站）</h2>
+  <p>D2 面板（设置 → 更多入口 → 网页抓取）可<strong>整部抓取</strong>：粘贴详情页网址 → 「开始抓取并入库」，逐张下载打包成 CBZ 自动入库，打上「D2下载」来源标签。</p>
+  <table>
+    <thead><tr><th>站点</th><th>详情页地址特征</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>exhentai / e-hentai</td><td>含 <code>/g/数字/</code></td><td>需登录且有 exh 权限；白屏=未登录（<code>?poni=no</code>），系统代理 <code>127.0.0.1:65532</code> 要开着</td></tr>
+      <tr><td>nhentai</td><td><code>nhentai.net/g/数字/</code></td><td>走站内 API 取页表+标签，无需登录，取图片直链逐张下载</td></tr>
+      <tr><td>18comic（禁漫）</td><td>含 <code>/album/数字/</code></td><td>多章节按章逐页抓全；新作品若图片混淆解析不出，可 Cookie 登录后重试</td></tr>
+      <tr><td>wnacg（绅士漫画）</td><td>含 <code>aid-数字</code></td><td>从图库页一次取全；支持 <code>wn01.cc</code> 等数字镜像域名</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>登录</strong>：D2 面板「Cookie 登录」按站点域名粘贴浏览器 cookie（exhentai / 18comic / wnacg / nhentai 四预设）。</li>
+    <li><strong>省事做法</strong>：先在浏览窗口打开作品页确认能看图，再点「抓取当前页」。</li>
+    <li><strong>结果</strong>：完成卡显示标题、张数、失败数、原文链接与首张图片，可「打开库目录」。</li>
+    <li><strong>边界</strong>：其余站点能正常浏览但暂无解析器；全站注入的油猴脚本可能与抓取脚本抢界面，冲突时以 D2 按钮为准。</li>
   </ul>
 
   <h2>六、数据与安全</h2>

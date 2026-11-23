@@ -404,10 +404,44 @@ export default function SettingsDialog({
                   <li>之后粘贴进画匣即是「female: kissing」这样的行，大类自动归位，不用一个个对照打。</li>
                 </ul>
 
+                <h3>一键抓取整部（支持 5 站）</h3>
+                <ul className="guide-list">
+                  <li>
+                    <strong>能抓的站点</strong>：exhentai / e-hentai、nhentai.net、18comic（禁漫）、
+                    wnacg（绅士漫画）。在 D2 面板「作品页网址」粘贴详情页地址 → 「开始抓取并入库」，
+                    画匣会把整部图片逐张下载、打包成 CBZ 并自动入库打上「D2下载」来源标签。
+                  </li>
+                  <li>
+                    <strong>exhentai / e-hentai</strong>：地址含 <code>/g/数字/</code>。白屏=未登录或无 exh 权限，
+                    先点「登录 e-hentai」在主站登录再开 exhentai；系统代理 <code>127.0.0.1:65532</code> 要开着。
+                  </li>
+                  <li>
+                    <strong>nhentai</strong>：地址含 <code>/g/数字/</code>，通过站内 API 取页表与标签，无需登录；
+                    返回的是图片直链，逐张下载不走网页中转。
+                  </li>
+                  <li>
+                    <strong>18comic（禁漫）</strong>：作品页地址含 <code>/album/数字/</code>。多章节作品会按章节逐页抓全；
+                    部分新作品有图片混淆，若解析不出可改用 Cookie 登录后重试。
+                  </li>
+                  <li>
+                    <strong>wnacg（绅士漫画）</strong>：作品页地址含 <code>aid-数字</code>（<code>photos-index-aid-…</code> 等）；
+                    从图库页一次取全图片列表，支持 <code>wn01.cc</code> 这类数字镜像域名。
+                  </li>
+                  <li>
+                    <strong>登录不上 / 抓取失败</strong>：D2 面板「Cookie 登录」可按站点域名粘贴浏览器 cookie
+                    （exhentai / 18comic / wnacg / nhentai 四个预设）。抓取前先在浏览窗口打开作品页确认能看图，
+                    再点「抓取当前页」最省事。其余站点仍可正常浏览，只是暂无解析器。
+                  </li>
+                  <li>
+                    <strong>出口</strong>：完成后卡片可「打开库目录」；原文链接、首张图片、张数与失败数都在结果卡里。
+                  </li>
+                </ul>
+
                 <h3>几个常用开关</h3>
                 <ul className="guide-list">
                   <li>双击画集卡片直接开看（沉浸/普通可选）：设置 → 双击画集卡片</li>
                   <li>网页抓取登录失败：D2 面板里用「Cookie 登录」粘贴浏览器 cookie</li>
+                  <li>内嵌浏览器广告拦截：D2 面板「浏览器设置」开关（改后需重开浏览窗口生效）</li>
                 </ul>
 
                 <h3>鼠标右键</h3>
