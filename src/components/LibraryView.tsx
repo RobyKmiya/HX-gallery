@@ -232,6 +232,10 @@ export default function LibraryView({
   /** 合集卡：只在纯浏览第 1 页有值，其余情况为空数组。 */
   const [seriesList, setSeriesList] = useState<SeriesSummary[]>([]);
   const [openSeries, setOpenSeries] = useState<SeriesSummary | null>(null);
+  /** 本次进阅读器的模式（双击卡片时按设置指定；null = 沿用记忆）。 */
+  const [readerEntryMode, setReaderEntryMode] = useState<
+    "immersive" | "normal" | null
+  >(null);
   const [seriesCreateOpen, setSeriesCreateOpen] = useState(false);
   const [seriesBusy, setSeriesBusy] = useState(false);
   /** 统一设置对话框。 */
@@ -3289,6 +3293,22 @@ export default function LibraryView({
                         key={card.id}
                         card={card}
                         onOpen={setSelected}
+                        onOpenReader={(next) => {
+                          const mode =
+                            window.localStorage.getItem(
+                              "huaxia.ui.cardDoubleOpen",
+                            ) ?? "immersive";
+                          if (mode === "off") {
+                            // 关掉双击功能时，双击仍等同单击（打开详情）。
+                            setSelected(next);
+                            return;
+                          }
+                          setSelected(null);
+                          setReaderEntryMode(
+                            mode === "normal" ? "normal" : "immersive",
+                          );
+                          setReaderCard(next);
+                        }}
                         selectionMode={selectionMode}
                         selected={selectedIds.includes(card.id)}
                         onToggleSelect={toggleSelect}
@@ -3789,9 +3809,11 @@ export default function LibraryView({
       {readerCard && (
         <Reader
           card={readerCard}
+          enterMode={readerEntryMode}
           onClose={() => {
             setReaderCard(null);
             setReaderSeriesIds(null);
+            setReaderEntryMode(null);
           }}
           onNotify={notify}
           onProgress={updateReaderProgress}

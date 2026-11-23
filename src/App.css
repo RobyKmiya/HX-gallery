@@ -7550,3 +7550,17 @@ body.is-splitting {
   font-family: "Cascadia Code", Consolas, monospace;
   letter-spacing: 0.02em;
 }
+
+/* D2 Cookie 登录区（11-23） */
+.d2-cookie-input {
+  width: 100%;
+  margin-top: 8px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.d2-cookie-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

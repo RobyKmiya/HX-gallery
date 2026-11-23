@@ -73,6 +73,14 @@ export default function SettingsDialog({
   const [tab, setTab] = useState<SettingsTab>("general");
   const [bindings, setBindings] = useState(() => loadShortcuts());
   const [gestures, setGestures] = useState(() => loadGestures());
+  /** 双击画集卡片的行为：immersive / normal / off（11-23 需求）。 */
+  const [cardDoubleOpen, setCardDoubleOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem("huaxia.ui.cardDoubleOpen") ?? "immersive";
+    } catch {
+      return "immersive";
+    }
+  });
   /** 正在录制的动作；null = 不在录制。 */
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
   const [keyHint, setKeyHint] = useState("");
@@ -159,6 +167,25 @@ export default function SettingsDialog({
                   >
                     <option value="scroll">网格滚动（一次看全部）</option>
                     <option value="pages">分页浏览（翻页看）</option>
+                  </select>
+                </label>
+                <label className="settings-row">
+                  <span>双击画集卡片</span>
+                  <select
+                    value={cardDoubleOpen}
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      setCardDoubleOpen(next);
+                      try {
+                        window.localStorage.setItem("huaxia.ui.cardDoubleOpen", next);
+                      } catch {
+                        // 存不了就只在本次生效
+                      }
+                    }}
+                  >
+                    <option value="immersive">直接阅读（沉浸）</option>
+                    <option value="normal">直接阅读（普通）</option>
+                    <option value="off">不处理（只弹详情）</option>
                   </select>
                 </label>
                 <label className="settings-row">
@@ -364,6 +391,12 @@ export default function SettingsDialog({
                   <li><code>Ctrl+C</code> 复制当前页 ｜ <code>Ctrl+Enter</code> 资源管理器定位</li>
                   <li><code>Ctrl+H</code> 老板键藏窗 ｜ <code>Ctrl+Shift+H</code> 呼回</li>
                   <li>鼠标后退侧键：沉浸态先退沉浸，再按退出阅读</li>
+                </ul>
+
+                <h3>几个常用开关</h3>
+                <ul className="guide-list">
+                  <li>双击画集卡片直接开看（沉浸/普通可选）：设置 → 双击画集卡片</li>
+                  <li>网页抓取登录失败：D2 面板里用「Cookie 登录」粘贴浏览器 cookie</li>
                 </ul>
 
                 <h3>鼠标右键</h3>

@@ -1823,6 +1823,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             d2::d2_back,
             d2::d2_forward,
             d2::d2_reload,
+            d2::d2_set_cookies,
             userscripts::gm_list_scripts,
             userscripts::gm_add_script_from_path,
             userscripts::gm_add_script_from_url,

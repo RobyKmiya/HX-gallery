@@ -69,6 +69,8 @@ interface ReaderProps {
   onOpenDetail?: () => void;
   /** 详情浮层开着时置真：Esc 交给浮层处理，阅读器不抢。 */
   detailOpen?: boolean;
+  /** 本次进入直接用的模式（画廊双击卡片时由 LibraryView 指定）。 */
+  enterMode?: "immersive" | "normal" | null;
 }
 
 type ZoomMode = "fit" | "width" | "actual";
@@ -237,6 +239,7 @@ export default function Reader({
   continuousNext = false,
   onOpenDetail,
   detailOpen = false,
+  enterMode = null,
 }: ReaderProps) {
   const [info, setInfo] = useState<ReaderInfo | null>(null);
   const [page, setPage] = useState(0);
@@ -270,6 +273,13 @@ export default function Reader({
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   /** 沉浸（无框）阅读：顶栏 / 底栏 / 进度条一律不占位、不自动冒头，只留角落一颗淡点还原。 */
   const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
+
+  // 画廊双击卡片进入时由 LibraryView 指定本次模式；不影响下次的默认记忆。
+  useEffect(() => {
+    if (!enterMode) return;
+    setImmersive(enterMode === "immersive");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enterMode, card.id]);
 
   // 沉浸时连系统标题栏一起收掉（真无边框）；切回带框或退出阅读时恢复。
   // 卸载时再兜一次：万一读着读着被别处关掉，标题栏不会留在「没有」的状态。

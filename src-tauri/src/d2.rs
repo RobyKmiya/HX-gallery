@@ -819,6 +819,94 @@ pub fn d2_reload() -> Result<(), String> {
     crate::browser::history_action(&label, "reload")
 }
 
+/// 用 Cookie 登录：把浏览器里复制出来的 Cookie 串写进内建浏览器的 cookie 库。
+///
+/// 为什么需要这条路（管理员 11-23）：exhentai 的登录流程（主站登录 → 跳
+/// exhentai）在本机一直过不去，而且账号密码登录还会撞验证码。直接注入
+/// `ipb_member_id` / `ipb_pass_hash` / `sk` 这些会话 cookie，等价于「已登录」。
+///
+/// 支持粘贴两种格式：
+/// - 一整个 Cookie 请求头：`ipb_member_id=123; ipb_pass_hash=abc; sk=xyz`
+/// - 开发工具里一条一条复制、每行一个：`ipb_member_id=123`
+///
+/// 同时写到 `.e-hentai.org` 与 `.exhentai.org`（两边共用同一套会话），
+/// 写完后把打开的标签页刷新一遍。
+#[tauri::command]
+pub fn d2_set_cookies(app: tauri::AppHandle, cookie_header: String) -> Result<usize, String> {
+    use tauri::Manager;
+
+    let pairs = parse_cookie_pairs(&cookie_header);
+    if pairs.is_empty() {
+        return Err("没解析出任何 cookie：请粘贴 name=value 形式的内容".to_string());
+    }
+
+    let mut written = 0usize;
+    let webviews = app.webviews();
+    if webviews.is_empty() {
+        return Err("浏览窗口还没打开：先点「打开浏览器」".to_string());
+    }
+
+    for (label, webview) in webviews {
+        // 只往浏览器的标签页里写，不动主界面。
+        if !label.contains("-tab-") {
+            continue;
+        }
+        for (name, value) in &pairs {
+            for domain in [".e-hentai.org", ".exhentai.org"] {
+                let mut cookie = cookie::Cookie::new(name.clone(), value.clone());
+                cookie.set_domain(domain);
+                cookie.set_path("/");
+                cookie.set_secure(true);
+                cookie.set_http_only(true);
+                if webview.set_cookie(cookie).is_ok() {
+                    written += 1;
+                }
+            }
+        }
+        // 写完刷新当前页，让站点头像/权限立刻生效。
+        if let Ok(mut url) = webview.url() {
+            url.set_fragment(None);
+            let _ = webview.navigate(url);
+        }
+    }
+
+    if written == 0 {
+        return Err("写入 cookie 失败：浏览窗口可能已经关掉了".to_string());
+    }
+    Ok(written)
+}
+
+/// 解析 Cookie 头：分号或换行分隔，取第一条 `=` 前后。
+fn parse_cookie_pairs(raw: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for part in raw.split([';', '\n', '\r']) {
+        let piece = part.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        // 跳过属性行（Path=/; Domain=...; HttpOnly 之类）
+        let lower = piece.to_ascii_lowercase();
+        if lower.starts_with("path=")
+            || lower.starts_with("domain=")
+            || lower.starts_with("expires=")
+            || lower.starts_with("max-age=")
+            || lower == "httponly"
+            || lower == "secure"
+            || lower.starts_with("samesite=")
+        {
+            continue;
+        }
+        if let Some((name, value)) = piece.split_once('=') {
+            let name = name.trim();
+            let value = value.trim();
+            if !name.is_empty() && !value.is_empty() {
+                pairs.push((name.to_string(), value.to_string()));
+            }
+        }
+    }
+    pairs
+}
+
 /// 关掉浏览窗口（不影响主界面）。
 #[tauri::command]
 pub fn d2_close_window() -> Result<(), String> {

@@ -60,6 +60,9 @@ export const api = {
   d2Back: () => invoke<void>("d2_back"),
   d2Forward: () => invoke<void>("d2_forward"),
   d2Reload: () => invoke<void>("d2_reload"),
+  /** 用浏览器里复制的 Cookie 串登录内建浏览器（exhentai 用）。 */
+  d2SetCookies: (cookieHeader: string) =>
+    invoke<number>("d2_set_cookies", { cookieHeader }),
   d2CloseWindow: () => invoke<void>("d2_close_window"),
 
   /** 读当前浏览窗口地址，供「抓取当前页」一键使用（没开窗口返回空串）。 */

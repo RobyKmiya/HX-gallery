@@ -28,6 +28,8 @@ interface ArchiveCardProps {
   onContextMenu?: (card: ArchiveCardData, x: number, y: number) => void;
   /** 队列两端禁用对应方向的按钮。 */
   queueEdges?: { upDisabled: boolean; downDisabled: boolean };
+  /** 双击卡片：直接进阅读（模式由设置决定）。 */
+  onOpenReader?: (card: ArchiveCardData) => void;
 }
 
 /**
@@ -41,6 +43,7 @@ interface ArchiveCardProps {
 function ArchiveCard({
   card,
   onOpen,
+  onOpenReader,
   selectionMode = false,
   selected = false,
   onToggleSelect,
@@ -94,6 +97,13 @@ function ArchiveCard({
       }
       aria-pressed={selectionMode ? selected : undefined}
       onClick={activate}
+      onDoubleClick={(event) => {
+        if (!onOpenReader) return;
+        // 双击是「直接开看」：别让单击的详情再拦一次。
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenReader(card);
+      }}
       onContextMenu={
         onContextMenu
           ? (event) => {

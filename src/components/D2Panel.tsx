@@ -36,6 +36,9 @@ const QUICK_SITES: { label: string; url: string; hint?: string }[] = [
 export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
   const [browseUrl, setBrowseUrl] = useState("https://e-hentai.org/");
   const [url, setUrl] = useState("");
+  /** Cookie 登录：粘贴 Cookie 头或一行一个 name=value。 */
+  const [cookieText, setCookieText] = useState("");
+  const [cookieBusy, setCookieBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -155,6 +158,24 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
       void unlistenDone.then((unlisten) => unlisten());
     };
   }, [onNotify]);
+
+  /** 把粘贴的 Cookie 写进内建浏览器（exhentai 登录失败时的主力方案）。 */
+  async function applyCookies() {
+    const raw = cookieText.trim();
+    if (!raw || cookieBusy) return;
+    setCookieBusy(true);
+    try {
+      const written = await api.d2SetCookies(raw);
+      onNotify(
+        `已写入 ${written} 条 cookie 并刷新浏览窗口；若仍是白页，检查是否漏了 ipb_member_id / ipb_pass_hash / sk`,
+        "success",
+      );
+    } catch (error) {
+      onNotify(`写入 cookie 失败：${String(error)}`, "error");
+    } finally {
+      setCookieBusy(false);
+    }
+  }
 
   async function openBrowser(target?: string) {
     const next = (target ?? browseUrl).trim();
@@ -396,6 +417,46 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
                   ))}
                 </ul>
               )}
+            </div>
+          </section>
+
+          <section className="release-section">
+            <div className="release-row-text">
+              <strong>Cookie 登录（推荐）</strong>
+              <p className="queue-hint">
+                在正常浏览器里登录 exhentai 后按 <code>F12</code> → Application → Cookies，
+                复制 <code>ipb_member_id</code>、<code>ipb_pass_hash</code>、<code>sk</code> 三项；
+                或直接整段复制 Cookie 请求头。一行一个、或分号分隔都能识别。
+              </p>
+              <textarea
+                className="import-tag-input d2-cookie-input"
+                rows={3}
+                value={cookieText}
+                spellCheck={false}
+                placeholder={"ipb_member_id=123456\nipb_pass_hash=abcdef...\nsk=xyz..."}
+                onChange={(event) => setCookieText(event.target.value)}
+              />
+              <div className="d2-cookie-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-compact"
+                  disabled={!cookieText.trim() || cookieBusy}
+                  onClick={() => void applyCookies()}
+                >
+                  {cookieBusy ? "写入中…" : "应用 Cookie 并刷新"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-compact"
+                  onClick={() => setCookieText("")}
+                >
+                  清空输入
+                </button>
+              </div>
+              <p className="queue-hint">
+                只写到浏览窗口的 cookie 库（e-hentai 与 exhentai 共用），不保存到任何文件；
+                想退出这个会话，清空浏览器数据或换一组 cookie 再点一次。
+              </p>
             </div>
           </section>
 
