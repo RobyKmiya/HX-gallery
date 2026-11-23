@@ -8,7 +8,42 @@ import { PlusIcon, TrashIcon } from "./Icons";
 interface D2PanelProps {
   onClose: () => void;
   onNotify: (message: string, kind?: "info" | "success" | "error") => void;
+  /** 库目录路径（抓取入库后一键定位用）。 */
+  libraryPath?: string;
 }
+
+/** Cookie 管理的站点预设（管理员 11-23：常用站的登录方式各不相同）。 */
+const COOKIE_SITES: {
+  key: string;
+  label: string;
+  domains: string[];
+  hint: string;
+}[] = [
+  {
+    key: "eh",
+    label: "exhentai / e-hentai",
+    domains: [".e-hentai.org", ".exhentai.org"],
+    hint: "必填 ipb_member_id、ipb_pass_hash、sk（少 sk 必白页）",
+  },
+  {
+    key: "18comic",
+    label: "18comic（禁漫天堂）",
+    domains: [".18comic.vip", ".18comic.org"],
+    hint: "登录后复制 AVS 相关 cookie，或整段 Cookie 头",
+  },
+  {
+    key: "wnacg",
+    label: "wnacg（绅士漫画）",
+    domains: [".wnacg.com"],
+    hint: "登录态 cookie，通常一两个就够",
+  },
+  {
+    key: "nhentai",
+    label: "nhentai",
+    domains: [".nhentai.net"],
+    hint: "登录态 cookie（csrftoken / sessionid）",
+  },
+];
 
 /** 常用入口。只是快捷方式，不是白名单——地址栏可以填任何站点。 */
 const QUICK_SITES: { label: string; url: string; hint?: string }[] = [
@@ -33,13 +68,33 @@ const QUICK_SITES: { label: string; url: string; hint?: string }[] = [
  * 分开的原因：exhentai 未登录会 302 到 `?poni=no` 并显示纯白页，
  * 以前的流程一按就进抓取，用户只能看到白屏和超时。现在可以先开浏览器登录。
  */
-export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
+export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps) {
   const [browseUrl, setBrowseUrl] = useState("https://e-hentai.org/");
   const [url, setUrl] = useState("");
-  /** Cookie 登录：粘贴 Cookie 头或一行一个 name=value。 */
-  const [cookieText, setCookieText] = useState("");
-  const [cookieBusy, setCookieBusy] = useState(false);
   const [tagsBusy, setTagsBusy] = useState(false);
+  /** 各站 cookie 草稿（站点 key → 文本），持久化在 localStorage（明文，本机自用）。 */
+  const [cookieDrafts, setCookieDrafts] = useState<Record<string, string>>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem("huaxia.d2.cookieDrafts") || "{}");
+    } catch {
+      return {};
+    }
+  });
+  const [cookieSavedAt, setCookieSavedAt] = useState<Record<string, number>>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem("huaxia.d2.cookieSavedAt") || "{}");
+    } catch {
+      return {};
+    }
+  });
+  const [cookieBusyKey, setCookieBusyKey] = useState<string | null>(null);
+  const [homeDraft, setHomeDraft] = useState(() => {
+    try {
+      return window.localStorage.getItem("huaxia.d2.home") || "https://e-hentai.org/";
+    } catch {
+      return "https://e-hentai.org/";
+    }
+  });
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -160,21 +215,47 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
     };
   }, [onNotify]);
 
-  /** 把粘贴的 Cookie 写进内建浏览器（exhentai 登录失败时的主力方案）。 */
-  async function applyCookies() {
-    const raw = cookieText.trim();
-    if (!raw || cookieBusy) return;
-    setCookieBusy(true);
+  /** 浏览器主页：设置里改，打开浏览器不带地址时用它。 */
+  function getHome(): string {
     try {
-      const written = await api.d2SetCookies(raw);
+      return window.localStorage.getItem("huaxia.d2.home") || "https://e-hentai.org/";
+    } catch {
+      return "https://e-hentai.org/";
+    }
+  }
+
+  function saveCookieDraft(key: string, text: string) {
+    const nextDrafts = { ...cookieDrafts, [key]: text };
+    setCookieDrafts(nextDrafts);
+    try {
+      window.localStorage.setItem("huaxia.d2.cookieDrafts", JSON.stringify(nextDrafts));
+    } catch {
+      // 存不了就只在本次生效
+    }
+  }
+
+  /** 把某站的 cookie 写进内建浏览器（只写该站的域名）。 */
+  async function applySiteCookies(site: (typeof COOKIE_SITES)[number]) {
+    const raw = (cookieDrafts[site.key] ?? "").trim();
+    if (!raw || cookieBusyKey) return;
+    setCookieBusyKey(site.key);
+    try {
+      const written = await api.d2SetCookies(raw, site.domains);
+      const savedAt = { ...cookieSavedAt, [site.key]: Date.now() };
+      setCookieSavedAt(savedAt);
+      try {
+        window.localStorage.setItem("huaxia.d2.cookieSavedAt", JSON.stringify(savedAt));
+      } catch {
+        // 同上
+      }
       onNotify(
-        `已写入 ${written} 条 cookie 并刷新浏览窗口；若仍是白页，检查是否漏了 ipb_member_id / ipb_pass_hash / sk`,
+        `已写入 ${written} 条 cookie 到 ${site.label} 并刷新浏览窗口`,
         "success",
       );
     } catch (error) {
       onNotify(`写入 cookie 失败：${String(error)}`, "error");
     } finally {
-      setCookieBusy(false);
+      setCookieBusyKey(null);
     }
   }
 
@@ -195,10 +276,10 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
   }
 
   async function openBrowser(target?: string) {
-    const next = (target ?? browseUrl).trim();
+    let next = (target ?? browseUrl).trim();
     if (!next) {
-      onNotify("请填写网址", "error");
-      return;
+      // 没填地址：用设置里的主页（默认 e-hentai）
+      next = getHome();
     }
     setBrowseUrl(next);
     setError("");
@@ -439,38 +520,56 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
 
           <section className="release-section">
             <div className="release-row-text">
-              <strong>Cookie 登录（推荐）</strong>
+              <strong>浏览器设置</strong>
               <p className="queue-hint">
-                在正常浏览器里登录 exhentai 后按 <code>F12</code> → Application → Cookies，
-                复制 <code>ipb_member_id</code>、<code>ipb_pass_hash</code>、<code>sk</code> 三项；
-                或直接整段复制 Cookie 请求头。一行一个、或分号分隔都能识别。
+                主页：在 D2 面板点「打开浏览器」不填地址时用它。
+                扩展说明：内嵌 WebView2 <strong>不支持安装浏览器扩展</strong>（AdGuard 等
+                Edge 商店扩展装不了）；去广告可改用油猴脚本路线。
               </p>
-              <textarea
-                className="import-tag-input d2-cookie-input"
-                rows={3}
-                value={cookieText}
+              <input
+                value={homeDraft}
+                onChange={(event) => setHomeDraft(event.target.value)}
+                placeholder="https://e-hentai.org/"
                 spellCheck={false}
-                placeholder={"ipb_member_id=123456\nipb_pass_hash=abcdef...\nsk=xyz..."}
-                onChange={(event) => setCookieText(event.target.value)}
+                style={{
+                  width: "100%",
+                  marginTop: 8,
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border-strong)",
+                  background: "var(--panel-raised)",
+                  color: "var(--text)",
+                }}
               />
               <div className="d2-cookie-actions">
                 <button
                   type="button"
                   className="btn btn-primary btn-compact"
-                  disabled={!cookieText.trim() || cookieBusy}
-                  onClick={() => void applyCookies()}
+                  onClick={() => {
+                    try {
+                      window.localStorage.setItem("huaxia.d2.home", homeDraft.trim());
+                      onNotify("主页已保存", "success");
+                    } catch {
+                      onNotify("主页保存失败（存储被禁用？）", "error");
+                    }
+                  }}
                 >
-                  {cookieBusy ? "写入中…" : "应用 Cookie 并刷新"}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-quiet btn-compact"
-                  onClick={() => setCookieText("")}
-                >
-                  清空输入
+                  保存主页
                 </button>
               </div>
-              <div className="d2-cookie-actions">
+            </div>
+          </section>
+
+          <section className="release-section">
+            <div className="release-row-text">
+              <strong>站点 Cookie 管理</strong>
+              <p className="queue-hint">
+                在你常用的浏览器里登录各站点，按 <code>F12</code> → Application → Cookies
+                复制需要的项粘到下面（一行一个，或整段 Cookie 头都行）。
+                Cookie 只存本机 localStorage（明文），写进内建浏览器后即记住登录态；
+                WebView2 的 cookie 库本身跨重启保留。
+              </p>
+              <div className="d2-cookie-actions" style={{ marginBottom: 10 }}>
                 <button
                   type="button"
                   className="btn btn-primary btn-compact"
@@ -484,10 +583,42 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
                   在作品详情页点它，几百个标签一次进剪贴板；普通页面会提示没有 tag。
                 </span>
               </div>
-              <p className="queue-hint">
-                只写到浏览窗口的 cookie 库（e-hentai 与 exhentai 共用），不保存到任何文件；
-                想退出这个会话，清空浏览器数据或换一组 cookie 再点一次。
-              </p>
+              {COOKIE_SITES.map((site) => {
+                const saved = cookieSavedAt[site.key];
+                return (
+                  <div className="d2-site-row" key={site.key}>
+                    <div className="d2-site-head">
+                      <strong>{site.label}</strong>
+                      {saved ? (
+                        <span className="queue-hint">
+                          上次应用 {new Date(saved).toLocaleString()}
+                        </span>
+                      ) : (
+                        <span className="queue-hint">未应用</span>
+                      )}
+                    </div>
+                    <p className="queue-hint">{site.hint}</p>
+                    <textarea
+                      className="import-tag-input d2-cookie-input"
+                      rows={2}
+                      value={cookieDrafts[site.key] ?? ""}
+                      spellCheck={false}
+                      placeholder={"name1=value1\nname2=value2"}
+                      onChange={(event) => saveCookieDraft(site.key, event.target.value)}
+                    />
+                    <div className="d2-cookie-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-compact"
+                        disabled={!(cookieDrafts[site.key] ?? "").trim() || cookieBusyKey !== null}
+                        onClick={() => void applySiteCookies(site)}
+                      >
+                        {cookieBusyKey === site.key ? "写入中…" : "写入浏览器"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
@@ -558,6 +689,17 @@ export default function D2Panel({ onClose, onNotify }: D2PanelProps) {
                   抓取 {report.pages} 张 / 跳过 {report.failed} 张
                 </p>
                 <p className="queue-hint">入库：{report.importReport.message}</p>
+                {libraryPath && (
+                  <button
+                    type="button"
+                    className="btn btn-quiet btn-compact"
+                    style={{ marginTop: 6 }}
+                    onClick={() => void api.revealInExplorer(libraryPath)}
+                    title={`在资源管理器打开 ${libraryPath}`}
+                  >
+                    打开库目录看文件
+                  </button>
+                )}
                 <p className="queue-hint">
                   新增 {report.importReport.imported} / 跳过 {report.importReport.skipped} / 失败{" "}
                   {report.importReport.failed}

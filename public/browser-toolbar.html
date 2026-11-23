@@ -116,10 +116,11 @@
     // 标签条
     var tabs = $("tabs");
     tabs.textContent = "";
-    (state.tabs || []).forEach(function (tab) {
+    (state.tabs || []).forEach(function (tab, index) {
       var chip = document.createElement("div");
       chip.className = "tab" + (tab.active ? " active" : "");
       chip.title = tab.url;
+      chip.draggable = true;
       var label = document.createElement("span");
       label.className = "t";
       label.textContent = tab.title || tab.url || "空白页";
@@ -135,6 +136,32 @@
       chip.appendChild(x);
       chip.addEventListener("click", function () {
         req("switch", { tabId: tab.id });
+      });
+      // 拖拽排序（类似 Edge）：拖到目标芯片上松手即换位
+      chip.addEventListener("dragstart", function (e) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", tab.id);
+        chip.classList.add("dragging");
+      });
+      chip.addEventListener("dragend", function () {
+        chip.classList.remove("dragging");
+      });
+      chip.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        chip.classList.add("drop-target");
+      });
+      chip.addEventListener("dragleave", function () {
+        chip.classList.remove("drop-target");
+      });
+      chip.addEventListener("drop", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        chip.classList.remove("drop-target");
+        var dragged = e.dataTransfer.getData("text/plain") || tab.id;
+        if (dragged && dragged !== tab.id) {
+          req("reorder", { tabId: dragged, index: index });
+        }
       });
       tabs.appendChild(chip);
     });

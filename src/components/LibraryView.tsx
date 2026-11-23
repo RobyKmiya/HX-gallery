@@ -3998,6 +3998,7 @@ export default function LibraryView({
         <D2Panel
           onClose={() => setD2PanelOpen(false)}
           onNotify={notify}
+          libraryPath={library.libraryPath ?? undefined}
         />
       )}
 

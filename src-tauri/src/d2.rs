@@ -832,7 +832,11 @@ pub fn d2_reload() -> Result<(), String> {
 /// 同时写到 `.e-hentai.org` 与 `.exhentai.org`（两边共用同一套会话），
 /// 写完后把打开的标签页刷新一遍。
 #[tauri::command]
-pub fn d2_set_cookies(app: tauri::AppHandle, cookie_header: String) -> Result<usize, String> {
+pub fn d2_set_cookies(
+    app: tauri::AppHandle,
+    cookie_header: String,
+    domains: Option<Vec<String>>,
+) -> Result<usize, String> {
     use tauri::Manager;
 
     let pairs = parse_cookie_pairs(&cookie_header);
@@ -846,13 +850,27 @@ pub fn d2_set_cookies(app: tauri::AppHandle, cookie_header: String) -> Result<us
         return Err("浏览窗口还没打开：先点「打开浏览器」".to_string());
     }
 
+    // 域名列表：调用方可按站点指定（18comic/wnacg/nhentai…）；
+    // 不传则默认 e-hentai + exhentai 双域。
+    let targets: Vec<String> = domains
+        .unwrap_or_else(|| vec![".e-hentai.org".to_string(), ".exhentai.org".to_string()])
+        .into_iter()
+        .map(|domain| {
+            if domain.starts_with('.') {
+                domain
+            } else {
+                format!(".{domain}")
+            }
+        })
+        .collect();
+
     for (label, webview) in webviews {
         // 只往浏览器的标签页里写，不动主界面。
         if !label.contains("-tab-") {
             continue;
         }
         for (name, value) in &pairs {
-            for domain in [".e-hentai.org", ".exhentai.org"] {
+            for domain in &targets {
                 let mut cookie = cookie::Cookie::new(name.clone(), value.clone());
                 cookie.set_domain(domain);
                 cookie.set_path("/");

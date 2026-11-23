@@ -7574,3 +7574,17 @@ body.is-splitting {
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
 }
+
+/* D2 站点 Cookie 管理（11-23） */
+.d2-site-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.d2-site-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}

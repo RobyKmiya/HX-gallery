@@ -117,6 +117,24 @@ pub fn is_alive(label: &str) -> bool {
 }
 
 /// 取浏览器的激活标签（抓取流直接拿它来 eval/导航）。
+/// 拖拽排序：把 tabId 移到第 index 位（类似 Edge 的标签拖动，11-23）。
+/// 只改 tabs 顺序（芯片行展示 + 前后切换语义）；webview 在窗口里的堆叠
+/// 顺序与切换无关，不用动。
+pub fn reorder_tab(label: &str, tab_id: &str, index: usize) -> Result<(), String> {
+    with_state(label, |state| {
+        let from = state
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or_else(|| "找不到要移动的标签".to_string())?;
+        let to = index.min(state.tabs.len().saturating_sub(1));
+        let tab = state.tabs.remove(from);
+        state.tabs.insert(to, tab);
+        Ok(())
+    })
+    .ok_or_else(|| "浏览器不存在".to_string())?
+}
+
 pub fn active_webview(label: &str) -> Result<Webview, String> {
     with_state(label, |state| {
         state
@@ -799,6 +817,18 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
                 "back" => history_action(&label, "back"),
                 "forward" => history_action(&label, "forward"),
                 "reload" => history_action(&label, "reload"),
+                "reorder" => {
+                    let tab_id = req
+                        .get("tabId")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let index = req
+                        .get("index")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0) as usize;
+                    reorder_tab(&label, &tab_id, index)
+                }
                 "home" => {
                     let home = with_state(&label, |state| state.opts.home.to_string())
                         .unwrap_or_default();

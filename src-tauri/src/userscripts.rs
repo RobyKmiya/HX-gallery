@@ -179,6 +179,45 @@ pub fn add_from_source(dir: &Path, source: &str) -> Result<ScriptMeta, String> {
     if source.trim().is_empty() {
         return Err("脚本内容为空".to_string());
     }
+    // @require：外部依赖库（jsdelivr 等）。装脚本时拉下来**拼进源码**，
+    // 注入引擎只认单文件，不另外发网络请求。拉取失败则整个安装失败，
+    // 给出明确提示（本机网络不通时常见）。
+    let requires = parse_requires(source);
+    let mut bundled = String::new();
+    for url in &requires {
+        let code = curl_download_text(url)
+            .map_err(|error| format!("拉取 @require 依赖失败（{url}）：{error}"))?;
+        bundled.push_str(&format!("// ==== @require {url} ====\n{}\n", code));
+    }
+    if !bundled.is_empty() {
+        let (fields, _) = parse_header(source);
+        if let Some(name) = fields.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone()) {
+            // 名字带进注释里方便排查
+            bundled = format!("// ==== Comic 脚本 {name}：以下为 @require 依赖 ====\n") + &bundled;
+        }
+        bundled.push_str(source);
+        return add_from_source_bundled(dir, &bundled);
+    }
+    add_from_source_bundled(dir, source)
+}
+
+/// 抽出 @require 的 URL 列表（按声明顺序）。
+fn parse_requires(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed.strip_prefix("//")?.trim();
+            let rest = rest.strip_prefix("@require")?.trim();
+            if rest.is_empty() { None } else { Some(rest.to_string()) }
+        })
+        .collect()
+}
+
+fn add_from_source_bundled(dir: &Path, source: &str) -> Result<ScriptMeta, String> {
+    if source.trim().is_empty() {
+        return Err("脚本内容为空".to_string());
+    }
     let id = Uuid::new_v4().to_string();
     let (fields, _) = parse_header(source);
     let meta = meta_from_fields(&fields, id.clone(), true);
@@ -415,6 +454,9 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
         return {{ abort: function () {{ clearInterval(timer); delete q.items[id]; }} }};
       }},
     }};
+    // GM4 风格别名：GM.xmlHttpRequest / GM.addStyle / GM.getValue / GM.setValue
+    gm.xmlHttpRequest = gm.xmlhttpRequest;
+    gm.addStyle = gm.addStyle;
     return gm;
   }}
   function runOne(entry) {{

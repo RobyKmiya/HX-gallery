@@ -61,8 +61,8 @@ export const api = {
   d2Forward: () => invoke<void>("d2_forward"),
   d2Reload: () => invoke<void>("d2_reload"),
   /** 用浏览器里复制的 Cookie 串登录内建浏览器（exhentai 用）。 */
-  d2SetCookies: (cookieHeader: string) =>
-    invoke<number>("d2_set_cookies", { cookieHeader }),
+  d2SetCookies: (cookieHeader: string, domains?: string[]) =>
+    invoke<number>("d2_set_cookies", { cookieHeader, domains: domains ?? null }),
   /** 一键抓取当前浏览标签页里的全部 tag（返回每行一个 ns: name）。 */
   d2CollectTags: () => invoke<string>("d2_collect_tags"),
   d2CloseWindow: () => invoke<void>("d2_close_window"),
