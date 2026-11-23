@@ -47,6 +47,12 @@ const NO_RESULT_HINT: Duration = Duration::from_secs(30);
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 static BROWSER_LABEL: Mutex<Option<String>> = Mutex::new(None);
 
+/// 宿主（D2 面板「浏览器设置」）填的主页。
+///
+/// 以前这里写死 e-hentai，面板里改主页对工具栏 ⌂ 一点作用都没有；现在由
+/// `d2_open` 每次带上来，浏览器首次建窗时用它（settings.json 存在则以后者为准）。
+static HOST_HOME: Mutex<Option<String>> = Mutex::new(None);
+
 /// 注入到站点页面里的解析脚本。只做解析与取字节，结果写进 `window.__d2*`，
 /// Rust 侧轮询读取（避开 WebView2 `eval_with_callback` 不等待 Promise 的限制）。
 const D2_INIT_SCRIPT: &str = r###"
@@ -470,8 +476,11 @@ fn open_browser_window(
     url: tauri::Url,
     label: String,
     adblock: bool,
+    home: &str,
 ) -> Result<String, String> {
     let app_for_log = app.clone();
+    let home_url = tauri::Url::parse(home)
+        .unwrap_or_else(|_| tauri::Url::parse("https://e-hentai.org/").expect("常量 URL 合法"));
     // 窗口销毁/状态清理都在匣浏览器引擎内部完成（browser.rs）。
     let opened = crate::browser::open(
         app,
@@ -479,8 +488,7 @@ fn open_browser_window(
         label,
         crate::browser::BrowserOptions {
             title: "画匣 · 内建浏览器".to_string(),
-            home: tauri::Url::parse("https://e-hentai.org/")
-                .map_err(|error| format!("主页 URL 不合法: {error}"))?,
+            home: home_url,
             extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
             userscript_store: crate::userscripts::store_dir(app),
             size: (1180.0, 860.0),
@@ -1108,8 +1116,21 @@ where
 /// 不设域名白名单：站点地址千变万化，硬编码只会把用户挡在登录页外面。
 /// 是否可抓取由解析器决定，与能否浏览解耦。
 #[tauri::command]
-pub fn d2_open(app: AppHandle, url: String, adblock: Option<bool>) -> Result<(), String> {
+pub fn d2_open(
+    app: AppHandle,
+    url: String,
+    adblock: Option<bool>,
+    home: Option<String>,
+) -> Result<(), String> {
     let parsed = normalize_url(&url)?;
+    // 宿主设置的主页（工具栏 ⌂ 用）；空值不覆盖上一次的设置。
+    if let Some(home) = home.as_deref().map(str::trim) {
+        if !home.is_empty() {
+            if let Ok(mut guard) = HOST_HOME.lock() {
+                *guard = Some(home.to_string());
+            }
+        }
+    }
 
     // 浏览器还在且响应正常：激活标签直接导航（保留登录态与历史）。
     // 存活判定在引擎里用回调探针（browser::is_alive），冻住的尸体瞒不过它。
@@ -1132,9 +1153,14 @@ pub fn d2_open(app: AppHandle, url: String, adblock: Option<bool>) -> Result<(),
     let target = parsed.to_string();
     // 建窗会阻塞，必须离开调用线程，命令本身立刻返回。
     let adblock = adblock.unwrap_or(true);
+    let home = HOST_HOME
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| "https://e-hentai.org/".to_string());
     std::thread::spawn(move || {
         status(&app_for_window, "正在打开浏览窗口…");
-        match open_browser_window(&app_for_window, parsed, label, adblock) {
+        match open_browser_window(&app_for_window, parsed, label, adblock, &home) {
             Ok(opened) => {
                 log(&app_for_window, &format!("窗口已创建：{target}（{opened}）"));
                 status(&app_for_window, "窗口已打开，可以直接浏览。");

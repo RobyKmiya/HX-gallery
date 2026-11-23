@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>匣浏览器 · 设置</title>
+<style>
+  :root {
+    --bg: #0c0e13;
+    --panel: #171a21;
+    --raised: #1f232b;
+    --line: #2c313c;
+    --text: #e8eaf0;
+    --muted: #8b93a7;
+    --accent: #7c93ff;
+    --danger: #ff6b6b;
+    --ok: #52c08a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: rgba(6, 8, 12, .58);
+    color: var(--text);
+    font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    user-select: none;
+  }
+  .card {
+    width: min(520px, 82vw);
+    max-height: min(620px, 86vh);
+    display: flex; flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .55);
+    overflow: hidden;
+    animation: rise .16s ease-out;
+  }
+  @keyframes rise { from { transform: translateY(8px); opacity: .4; } to { transform: none; opacity: 1; } }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; flex: 1; }
+  header .ver { color: var(--muted); font-size: 11px; }
+  header .x {
+    width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--raised); color: var(--muted); cursor: pointer; font-size: 13px;
+  }
+  header .x:hover { color: var(--danger); border-color: #5a2a30; }
+  .body { padding: 6px 18px 16px; overflow-y: auto; }
+  .row { margin: 14px 0; }
+  .row > label { display: block; font-weight: 600; margin-bottom: 6px; }
+  .row .hint { color: var(--muted); font-size: 11.5px; margin-top: 5px; }
+  input[type="text"], input[type="number"], select {
+    width: 100%; height: 32px; padding: 0 10px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: #0f1116; color: var(--text);
+    font: inherit; outline: 0;
+  }
+  input[type="text"]:focus, input[type="number"]:focus, select:focus { border-color: var(--accent); }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .inline { display: flex; align-items: center; gap: 10px; }
+  .inline .val { min-width: 52px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .check {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--raised); cursor: pointer;
+  }
+  .check input { margin-top: 2px; accent-color: var(--accent); }
+  .check b { display: block; font-weight: 600; }
+  .check span { color: var(--muted); font-size: 11.5px; }
+  .keys {
+    border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
+  }
+  .keys div {
+    display: flex; gap: 10px; padding: 6px 10px; font-size: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .keys div:last-child { border-bottom: 0; }
+  .keys kbd {
+    min-width: 108px; font: 11.5px "Cascadia Mono", Consolas, monospace;
+    color: var(--accent);
+  }
+  .keys span { color: var(--muted); }
+  footer {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 18px; border-top: 1px solid var(--line);
+    background: #14171d;
+  }
+  footer .msg { flex: 1; font-size: 12px; color: var(--muted); }
+  footer .msg.ok { color: var(--ok); }
+  footer .msg.err { color: var(--danger); }
+  button.btn {
+    height: 30px; padding: 0 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--raised);
+    color: var(--text); font: inherit; cursor: pointer;
+  }
+  button.btn:hover { border-color: #3d4353; }
+  button.primary { background: #34428f; border-color: #4556b8; }
+  button.primary:hover { background: #3d4da5; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <header>
+    <h1>浏览器设置</h1>
+    <span class="ver" id="ver"></span>
+    <button class="x" id="close" title="关闭（Esc）">✕</button>
+  </header>
+
+  <div class="body">
+    <div class="row">
+      <label for="home">主页</label>
+      <input id="home" type="text" spellcheck="false" placeholder="https://e-hentai.org/" />
+      <div class="hint">⌂ 按钮跳这里；新建标签选「主页」时也用它。</div>
+    </div>
+
+    <div class="row">
+      <label for="newTab">新建标签打开</label>
+      <select id="newTab">
+        <option value="home">主页</option>
+        <option value="blank">空白页</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="searchUrl">地址栏搜索模板</label>
+      <input id="searchUrl" type="text" spellcheck="false" placeholder="https://www.bing.com/search?q={q}" />
+      <div class="hint">输入的内容不像网址时走这里。<code>{q}</code> 是搜索词占位符。</div>
+    </div>
+
+    <div class="row">
+      <label for="zoomStep">缩放步进</label>
+      <div class="inline">
+        <input id="zoomStep" type="range" min="5" max="50" step="1" />
+        <span class="val" id="zoomStepVal">10%</span>
+      </div>
+      <div class="hint">点 − / + 每次变化多少（也可用 Ctrl+滚轮式快捷键 Ctrl+加号/减号）。</div>
+    </div>
+
+    <div class="row">
+      <label for="tabsWidth">标签栏宽度</label>
+      <div class="inline">
+        <input id="tabsWidth" type="range" min="20" max="70" step="1" />
+        <span class="val" id="tabsWidthVal">44%</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="check">
+        <input type="checkbox" id="shortcuts" />
+        <b>启用内容页快捷键<span>焦点在网页里时也响应 Ctrl+T / W / R / L、Alt+←/→、F5、Ctrl+Tab</span></b>
+      </label>
+    </div>
+
+    <div class="row">
+      <label class="check">
+        <input type="checkbox" id="showTitles" />
+        <b>标签显示网页标题<span>关掉后只显示域名，标签多时更整齐</span></b>
+      </label>
+    </div>
+
+    <div class="row">
+      <label>快捷键</label>
+      <div class="keys">
+        <div><kbd>Ctrl + T</kbd><span>新建标签</span></div>
+        <div><kbd>Ctrl + W</kbd><span>关闭当前标签</span></div>
+        <div><kbd>Ctrl + Tab</kbd><span>切换下一个标签</span></div>
+        <div><kbd>Ctrl + L</kbd><span>聚焦地址栏</span></div>
+        <div><kbd>Ctrl + R / F5</kbd><span>刷新</span></div>
+        <div><kbd>Ctrl + = / −</kbd><span>放大 / 缩小</span></div>
+        <div><kbd>Ctrl + 0</kbd><span>缩放回 100%</span></div>
+        <div><kbd>Alt + ← / →</kbd><span>后退 / 前进</span></div>
+        <div><kbd>Ctrl + ,</kbd><span>打开这个设置</span></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span class="msg" id="msg">设置保存在本机，改完点保存立刻生效。</span>
+    <button class="btn" id="cancel">取消</button>
+    <button class="btn primary" id="save">保存</button>
+  </footer>
+</div>
+
+<script src="browser-settings.js"></script>
+</body>
+</html>

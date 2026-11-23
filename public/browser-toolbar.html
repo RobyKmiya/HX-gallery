@@ -35,7 +35,9 @@
   }
   button:hover { background: #272b35; border-color: #3a404d; }
   button:active { background: #313642; }
+  button.busy { color: var(--accent); border-color: #33406b; }
   button.zoom { min-width: 52px; font-variant-numeric: tabular-nums; }
+  #settings { font-size: 13px; }
   .tabs {
     display: flex; align-items: center; gap: 4px;
     max-width: 44vw; overflow-x: auto; scrollbar-width: none;
@@ -47,7 +49,7 @@
     height: 26px; padding: 0 6px 0 10px;
     border: 1px solid transparent; border-radius: 8px;
     background: transparent; color: var(--muted);
-    cursor: pointer; max-width: 170px; min-width: 0;
+    cursor: pointer; max-width: 190px; min-width: 0;
   }
   .tab:hover { background: var(--bg-raised); color: var(--text); }
   .tab.active {
@@ -55,7 +57,15 @@
     border-color: #3a404d;
     box-shadow: inset 0 -2px 0 var(--accent);
   }
+  .tab.dragging { opacity: .45; }
+  .tab.drop-target { border-color: var(--accent); }
   .tab .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab .spinner {
+    width: 9px; height: 9px; flex: none; border-radius: 50%;
+    border: 1.5px solid #3d4356; border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .tab .x {
     flex: none; width: 16px; height: 16px; line-height: 14px;
     border-radius: 5px; text-align: center;
@@ -66,9 +76,11 @@
     flex: 1 1 auto; display: flex; align-items: center;
     height: 26px; padding: 0 8px; gap: 6px;
     border: 1px solid var(--line); border-radius: 8px;
-    background: #0f1116;
+    background: #0f1116; min-width: 80px;
   }
   .addr-wrap:focus-within { border-color: var(--accent); }
+  .addr-wrap.bad { border-color: #7a2e34; background: #1a1114; animation: flash .5s 2; }
+  @keyframes flash { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
   .addr-wrap .lock { color: var(--muted); flex: none; font-size: 11px; }
   #addr {
     flex: 1; min-width: 60px; border: 0; outline: 0; background: transparent;
@@ -76,25 +88,25 @@
     user-select: text;
   }
   .sep { width: 1px; height: 20px; background: var(--line); flex: none; }
-  .hint { color: var(--muted); }
 </style>
 </head>
 <body>
 <div class="bar">
-  <button id="back" title="后退">←</button>
-  <button id="forward" title="前进">→</button>
-  <button id="reload" title="刷新">⟳</button>
+  <button id="back" title="后退（Alt+←）">←</button>
+  <button id="forward" title="前进（Alt+→）">→</button>
+  <button id="reload" title="刷新（Ctrl+R / F5）">⟳</button>
   <button id="home" title="回到主页">⌂</button>
   <div class="tabs" id="tabs"></div>
-  <button id="newtab" title="新建标签">+</button>
+  <button id="newtab" title="新建标签（Ctrl+T）">+</button>
   <div class="sep"></div>
-  <div class="addr-wrap">
+  <div class="addr-wrap" id="addrWrap">
     <span class="lock" id="lock">◉</span>
-    <input id="addr" spellcheck="false" autocomplete="off" />
+    <input id="addr" spellcheck="false" autocomplete="off" title="输入网址或搜索词，回车前往（Ctrl+L 聚焦）" />
   </div>
-  <button id="zoomOut" title="缩小">−</button>
-  <button id="zoom" class="zoom" title="重置 100%">100%</button>
-  <button id="zoomIn" title="放大">+</button>
+  <button id="zoomOut" title="缩小（Ctrl+−）">−</button>
+  <button id="zoom" class="zoom" title="重置 100%（Ctrl+0）">100%</button>
+  <button id="zoomIn" title="放大（Ctrl++）">+</button>
+  <button id="settings" title="浏览器设置（Ctrl+,）">⚙</button>
 </div>
 
 <!-- 外置脚本：正式包 CSP 为 script-src 'self'，内联脚本会被整段拦掉。 -->

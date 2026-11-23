@@ -551,6 +551,9 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
         }};
         var item = q.items[id];
         var aborted = false;
+        // abort() 是否已经回调过（宿主写回 done 后 timer 还会再跑一轮，
+        // 不能让 onabort 触发两次）。
+        var abortNotified = false;
         var startedAt = Date.now();
         var gotProgress = false;
         var gotHeaders = false;
@@ -607,7 +610,9 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
           try {{ if (details.onloadstart) details.onloadstart(res); }} catch (e) {{}}
         }}, 0);
         var timer = setInterval(function () {{
-          if (aborted) return;
+          // 注意：这里不能 `if (aborted) return;`。取消后宿主还会写回一次
+          // done+aborted，得让这一轮把队列项清掉并回调 onabort；直接 return
+          // 会让队列项永久留在页面里（旧实现的泄漏点）。
           var current = q.items[id];
           if (!current) {{ clearInterval(timer); return; }}
           if (current.state !== "done") {{
@@ -620,6 +625,19 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
             return;
           }}
           clearInterval(timer);
+          // 被页面取消：宿主已经把 curl 杀了，不回半截数据，按 TM 语义
+          // 依次回调 onabort / onloadend 就收场。
+          if (current.aborted) {{
+            try {{ delete q.items[id]; }} catch (e) {{}}
+            res.readyState = 4;
+            res.status = 0;
+            if (!abortNotified) {{
+              abortNotified = true;
+              try {{ if (details.onabort) details.onabort(res); }} catch (e) {{}}
+            }}
+            try {{ if (details.onloadend) details.onloadend(res); }} catch (e) {{}}
+            return;
+          }}
           var body = current.responseText || "";
           res.status = current.status || 0;
           res.responseHeaders = current.responseHeaders || "";
@@ -658,7 +676,28 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
           }}
           try {{ if (details.onloadend) details.onloadend(res); }} catch (e) {{}}
         }}, 80);
-        return {{ abort: function () {{ aborted = true; clearInterval(timer); delete q.items[id]; }} }};
+        // abort()：pending 的直接撤销；已被宿主认领的置 aborted 标记，
+        // 宿主取消探针（≤800ms 一次）看到就会 kill curl——以前只停自家
+        // 定时器，curl 照样把整个文件下完，磁盘和带宽全白花。
+        return {{
+          abort: function () {{
+            if (abortNotified) return;
+            var current = q.items[id];
+            if (!current || current.state === "pending") {{
+              abortNotified = true;
+              aborted = true;
+              clearInterval(timer);
+              try {{ delete q.items[id]; }} catch (e) {{}}
+              res.readyState = 4;
+              res.status = 0;
+              try {{ if (details.onabort) details.onabort(res); }} catch (e) {{}}
+              try {{ if (details.onloadend) details.onloadend(res); }} catch (e) {{}}
+              return;
+            }}
+            aborted = true;
+            current.aborted = true;
+          }},
+        }};
       }},
     }};
     // GM4 风格别名：GM.xmlHttpRequest / GM.getValue / GM.setValue ...
@@ -902,6 +941,15 @@ console.log("hello");
         assert!(
             source.contains("q.onProgress") || source.contains("item.onProgress"),
             "宿主进度回调的入口要挂在队列项上"
+        );
+        // 2026-11-24：abort 要真取消（宿主 kill curl），不是只停自家定时器。
+        assert!(
+            source.contains("abortNotified") && source.contains("onabort"),
+            "abort 要按 TM 语义回调 onabort，且只回调一次"
+        );
+        assert!(
+            source.contains("current.aborted"),
+            "已取消的请求不许把半截数据回给脚本"
         );
         assert!(source.contains("console.log(") && source.contains("hello"), "脚本体应烘焙进加载器");
     }

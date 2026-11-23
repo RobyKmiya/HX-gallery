@@ -291,7 +291,9 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
     setBrowseUrl(next);
     setError("");
     try {
-      await api.d2Open(next, adblockOn);
+      // 主页一并带上：工具栏 ⌂ 与「新建标签 = 主页」都用它（以前这里改了
+      // 主页只影响这一次打开，⌂ 还是写死的 e-hentai）。
+      await api.d2Open(next, adblockOn, getHome());
     } catch (err) {
       const message = String(err);
       setError(message);

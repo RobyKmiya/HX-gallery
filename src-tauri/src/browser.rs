@@ -39,6 +39,126 @@ const TOOLBAR_HEIGHT: f64 = 38.0;
 const WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
 /// 工具栏请求队列 / 状态推送的轮询间隔。
 const TOOLBAR_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// 浏览器用户设置（工具栏 ⚙ 面板改，落盘 `browser/settings.json`）。
+///
+/// 字段用 camelCase 直接跟工具栏页对接（那边是原生 JS，不写转换层）。
+/// `#[serde(default)]` + 每个字段的默认值保证旧文件/缺字段都能读。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BrowserSettings {
+    /// 主页（⌂ 按钮、「新建标签 = 主页」用它）。
+    pub home: String,
+    /// 新建标签行为：`home`（主页）或 `blank`（空白页）。
+    pub new_tab: String,
+    /// 地址栏输入不是网址时的搜索模板，`{q}` 是占位符。
+    pub search_url: String,
+    /// 缩放步进（每次点 ± 变化多少）。
+    pub zoom_step: f64,
+    /// 内容页快捷键（Ctrl+T/W/R/L、Alt+←/→、F5）。
+    pub shortcuts: bool,
+    /// 标签芯片显示页面标题（false 时只显示域名，窄窗口更整齐）。
+    pub show_titles: bool,
+    /// 标签栏最大宽度占比（0.2–0.7）。
+    pub tabs_width: f64,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            home: "https://e-hentai.org/".to_string(),
+            new_tab: "home".to_string(),
+            search_url: "https://www.bing.com/search?q={q}".to_string(),
+            zoom_step: 0.1,
+            shortcuts: true,
+            show_titles: true,
+            tabs_width: 0.44,
+        }
+    }
+}
+
+impl BrowserSettings {
+    /// 收敛非法值：缩放在 25%–400%，步进不低于 5%，避免面板写坏后按钮失灵。
+    fn sanitized(mut self) -> Self {
+        if self.home.trim().is_empty() {
+            self.home = BrowserSettings::default().home;
+        }
+        if self.new_tab != "blank" {
+            self.new_tab = "home".to_string();
+        }
+        if self.search_url.trim().is_empty() || !self.search_url.contains("{q}") {
+            self.search_url = BrowserSettings::default().search_url;
+        }
+        self.zoom_step = self.zoom_step.clamp(0.05, 0.5);
+        self.tabs_width = self.tabs_width.clamp(0.2, 0.7);
+        self
+    }
+
+    /// 地址栏里「不是网址」的输入 → 搜索 URL。
+    fn search_url_for(&self, query: &str) -> String {
+        self.search_url.replace("{q}", &urlencode(query))
+    }
+}
+
+/// 最小 URL 编码（只处理 query 里常见的保留字符，够搜索用）。
+fn urlencode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() * 3);
+    for byte in raw.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// `%LOCALAPPDATA%\com.archivegallery.desktop\browser\`（与 adblock.txt 同目录）。
+fn browser_dir() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok()?;
+    let dir = PathBuf::from(base)
+        .join("com.archivegallery.desktop")
+        .join("browser");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// 读设置，`fallback_home` 只在「settings.json 还不存在」时作为主页。
+///
+/// 这样第一次打开会沿用宿主（D2 面板「浏览器设置」）填的主页，等用户在
+/// 工具栏 ⚙ 里保存过一次，就以文件为准——两处设置不再各说各话。
+pub fn load_settings_with_fallback(fallback_home: Option<&str>) -> BrowserSettings {
+    let Some(path) = browser_dir().map(|dir| dir.join("settings.json")) else {
+        return BrowserSettings::default();
+    };
+    let exists = path.exists();
+    let mut settings = if exists {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<BrowserSettings>(&raw).ok())
+            .unwrap_or_default()
+    } else {
+        BrowserSettings::default()
+    };
+    if !exists {
+        if let Some(home) = fallback_home.map(str::trim).filter(|home| !home.is_empty()) {
+            settings.home = home.to_string();
+        }
+    }
+    settings.sanitized()
+}
+
+/// 写设置（工具栏 ⚙ 面板的「保存」走这里）。
+pub fn save_settings(settings: &BrowserSettings) -> Result<(), String> {
+    let path = browser_dir()
+        .map(|dir| dir.join("settings.json"))
+        .ok_or_else(|| "取不到本地数据目录".to_string())?;
+    let raw = serde_json::to_string_pretty(settings)
+        .map_err(|error| format!("序列化浏览器设置失败：{error}"))?;
+    std::fs::write(path, raw).map_err(|error| format!("写浏览器设置失败：{error}"))
+}
 /// GM 跨域 XHR 队列的轮询间隔。
 const GM_XHR_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// 存活探针的单次等待。窗口活着但页面忙时可能要等一会，别太紧。
@@ -54,6 +174,11 @@ struct BrowserState {
     active: String,
     /// 引擎配置（extra_init / userscript_store / home / log 供新标签复用）。
     opts: BrowserOptions,
+    /// 用户设置（工具栏 ⚙ 面板可改，落盘 settings.json）。
+    settings: BrowserSettings,
+    /// ⚙ 设置浮层的 webview（打开时存在；工具栏只有 38px 高，装不下表单，
+    /// 所以另开一条铺满窗口的 webview 画遮罩式面板）。
+    settings_view: Option<Webview>,
     /// 上一次推给工具栏的状态 JSON（去重，避免 200ms 空转写穿）。
     last_pushed: String,
 }
@@ -65,6 +190,8 @@ struct TabRecord {
     title: String,
     /// 该标签的页面缩放（1.0 = 100%）。
     zoom: f64,
+    /// 正在加载（工具栏用来转刷新按钮/地址栏左侧指示）。
+    loading: bool,
 }
 
 static BROWSERS: Mutex<Option<HashMap<String, BrowserState>>> = Mutex::new(None);
@@ -398,12 +525,21 @@ pub fn open(
                     url: tab_url,
                     title: String::new(),
                     zoom: 1.0,
+                    loading: false,
                 }],
                 active: first_tab_id,
+                // 设置以落盘文件为准：面板改过的主页/步进/快捷键，重开窗口即生效。
+                // 没有文件时沿用宿主传进来的主页（D2 面板设置的那一个）。
+                settings: load_settings_with_fallback(Some(opts.home.as_str())),
+                settings_view: None,
                 opts,
                 last_pushed: String::new(),
             };
             register_browser(&label, state, &app_for_window);
+            // 快捷键开关按设置初始化（窗口刚建，标签脚本已经跑了默认值）。
+            if let Ok(view) = active_webview(&label) {
+                sync_shortcuts_flag(&label, &view);
+            }
             Ok(())
         };
         let _ = tx.send(run());
@@ -538,12 +674,13 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
 
             let tab_url = url_for_thread.to_string();
             with_state(&label_for_tab, |state| {
-                let mut record = TabRecord {
+                let record = TabRecord {
                     id: tab_id_for_thread.clone(),
                     webview,
                     url: tab_url,
                     title: String::new(),
                     zoom: 1.0,
+                    loading: false,
                 };
                 if activate_for_thread {
                     for tab in &state.tabs {
@@ -559,6 +696,18 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 Ok::<(), String>(())
             })
             .ok_or("浏览器不存在")??;
+            // 新标签同样按当前设置初始化快捷键开关。
+            if let Some(tab) = with_state(&label_for_tab, |state| {
+                state
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == tab_id_for_thread)
+                    .map(|tab| tab.webview.clone())
+            })
+            .flatten()
+            {
+                sync_shortcuts_flag(&label_for_tab, &tab);
+            }
             push_state(&label_for_tab);
             Ok(())
         };
@@ -575,6 +724,140 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
 }
 
 /// 切换标签：全部隐藏后显示目标（隐藏的标签保持进程与状态存活）。
+/// 打开 ⚙ 设置浮层（一条铺满窗口的 webview，页面自己画遮罩 + 居中卡片）。
+///
+/// 为什么不塞进工具栏 webview：工具栏只有 38px 高，任何弹层都会被裁掉。
+/// 为什么不用新开原生窗口：设置是「当前这个浏览器」的上下文，浮层更贴，
+/// 也不会多一个任务栏图标。webview 在内容标签之后创建，天然在最上层。
+pub fn open_settings_window(app: &AppHandle, label: &str) -> Result<(), String> {
+    // 已开着就聚焦（连点 ⚙ 不该开两个）。
+    if let Some(view) = with_state(label, |state| state.settings_view.clone()).flatten() {
+        let _ = view.show();
+        let _ = view.set_focus();
+        return Ok(());
+    }
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let app_for_view = app.clone();
+    let label_for_view = label.to_string();
+    std::thread::spawn(move || {
+        let run = || -> Result<(), String> {
+            let (window, settings) = with_state(&label_for_view, |state| {
+                (state.window.clone(), state.settings.clone())
+            })
+            .ok_or("浏览器不存在")?;
+            let view_label = format!("{label_for_view}-settings");
+            // 同 label 的残留（上次异常关闭）先清掉，否则 add_child 报重复。
+            if let Some(old) = with_state(&label_for_view, |state| state.settings_view.clone()).flatten() {
+                let _ = old.close();
+                with_state(&label_for_view, |state| state.settings_view = None);
+            }
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let inner = window.inner_size().unwrap_or_default();
+            let width = inner.width as f64 / scale;
+            let height = inner.height as f64 / scale;
+            // 当前设置走 initialization_script 注入：add_child 返回后立刻 eval
+            // 会打在 about:blank 上，页面一导航上下文就重置、值全丢。
+            let payload = serde_json::to_string(&settings).unwrap_or_else(|_| "{}".to_string());
+            let builder = WebviewBuilder::new(
+                view_label,
+                WebviewUrl::App("browser-settings.html".into()),
+            )
+            .auto_resize()
+            .initialization_script(&format!("window.__xkSettings = {payload};"));
+            let view = window
+                .add_child(
+                    builder,
+                    LogicalPosition::new(0.0, 0.0),
+                    LogicalSize::new(width, height),
+                )
+                .map_err(|error| format!("打开设置面板失败：{error}"))?;
+            let _ = view.set_focus();
+            with_state(&label_for_view, |state| state.settings_view = Some(view));
+            start_settings_poller(&label_for_view, &app_for_view);
+            Ok(())
+        };
+        let _ = tx.send(run());
+    });
+    match rx.recv_timeout(WINDOW_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err("打开设置面板超时".to_string()),
+    }
+}
+
+/// 关掉设置浮层（页面点「取消」/点遮罩/保存完成后都走这里）。
+pub fn close_settings_window(label: &str) -> Result<(), String> {
+    let view = with_state(label, |state| state.settings_view.take()).flatten();
+    if let Some(view) = view {
+        let _ = view.close();
+    }
+    Ok(())
+}
+
+/// 设置浮层的请求轮询：保存 / 取消都从这里进来。
+///
+/// 单独一条线程而不是塞进工具栏轮询：设置页可以一直开着，工具栏轮询
+/// 每 200ms 多 eval 一次会白烧；关掉浮层后这条线程自然退出。
+fn start_settings_poller(label: &str, app: &AppHandle) {
+    let label = label.to_string();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            let Some(view) = with_state(&label, |state| state.settings_view.clone()).flatten()
+            else {
+                return;
+            };
+            let raw = match eval_json(
+                &view,
+                "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())",
+                Duration::from_secs(1),
+            ) {
+                Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
+                // 读不到多半是页面已关/正在关，退出线程；关闭动作会把状态清掉。
+                _ => {
+                    if with_state(&label, |state| state.settings_view.is_none()).unwrap_or(true) {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let reqs: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+            for req in reqs {
+                let action = req
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arg = req
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match action.as_str() {
+                    "closeSettings" => {
+                        let _ = close_settings_window(&label);
+                        return;
+                    }
+                    _ => {
+                        // config 复用工具栏那套：写运行态 + 落盘 + 同步快捷键开关。
+                        if let Err(error) =
+                            handle_toolbar_action(&app, &label, &view, &req, &action, &arg)
+                        {
+                            let _ = view.eval(&format!(
+                                "window.__xkSetError && window.__xkSetError({});",
+                                serde_json::to_string(&error)
+                                    .unwrap_or_else(|_| "\"保存失败\"".to_string())
+                            ));
+                        } else if action == "config" {
+                            let _ = view.eval("window.__xkSetSaved && window.__xkSetSaved();");
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 pub fn switch_tab(label: &str, tab_id: &str) -> Result<(), String> {
     with_state(label, |state| {
         for tab in &state.tabs {
@@ -633,17 +916,24 @@ pub fn close_browser(label: &str) -> Result<(), String> {
 /// 激活标签缩放（factor = 1.0 为 100%）。
 pub fn set_zoom(label: &str, factor: f64) -> Result<(), String> {
     let factor = factor.clamp(0.25, 4.0);
-    with_state(label, |state| {
+    // 以前只调了 webview.set_zoom，忘了把值写回 TabRecord —— 重置 100% 后
+    // 记录里还是旧缩放，再点一次 + 会从旧值上加（表现：缩放键越点越乱）。
+    let result = with_state(label, |state| {
         let tab = state
             .tabs
-            .iter()
+            .iter_mut()
             .find(|tab| tab.id == state.active)
             .ok_or("浏览器没有激活标签")?;
+        tab.zoom = factor;
         tab.webview
             .set_zoom(factor)
             .map_err(|e| format!("缩放失败: {e}"))
     })
-    .ok_or_else(|| "浏览器不存在".to_string())?
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    if result.is_ok() {
+        push_state(label);
+    }
+    result
 }
 
 fn focus_tab_webview(tab_id: &str) -> Result<(), String> {
@@ -729,9 +1019,34 @@ fn attach_tab_hooks(
             let tab_id_for_navigation = tab_id_for_nav.clone();
             move |url| {
                 note_tab_url(&label_for_navigation, &tab_id_for_navigation, &url.to_string());
+                // 导航一发生就先进「加载中」，工具栏刷新键立刻变成停止键。
+                note_tab_loading(&label_for_navigation, &tab_id_for_navigation, true);
                 true
             }
         })
+        // 页面标题（之前没接，标签芯片只能显示 URL）。
+        .on_document_title_changed({
+            let label_for_title = label_for_nav.clone();
+            let tab_id_for_title = tab_id_for_nav.clone();
+            move |_webview, title| {
+                note_tab_title(&label_for_title, &tab_id_for_title, &title);
+            }
+        })
+        // 加载完成（含失败）：把「加载中」清掉，进度指示收尾。
+        .on_page_load({
+            let label_for_load = label_for_nav.clone();
+            let tab_id_for_load = tab_id_for_nav.clone();
+            move |webview, payload| {
+                let loading = payload.event() == tauri::webview::PageLoadEvent::Started;
+                note_tab_loading(&label_for_load, &tab_id_for_load, loading);
+                // 只在「加载完成」后写快捷键开关：新文档上下文此时才稳定，
+                // 写入的 __xkShortcuts 不会被随后的导航重置掉。
+                if !loading {
+                    sync_shortcuts_flag(&label_for_load, &webview);
+                }
+            }
+        })
+        .initialization_script(CONTENT_SHORTCUTS_SCRIPT)
         // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
         // 由本脚本画匣系自己的菜单。
         .initialization_script(CONTEXT_MENU_SCRIPT)
@@ -787,12 +1102,58 @@ fn attach_userscripts(
 }
 
 
+/// 内容页快捷键脚本（引擎级，所有内容标签注入）。
+///
+/// 内嵌 WebView2 里，焦点在网页上时工具栏收不到键盘事件，所以快捷键必须
+/// 在内容页捕获、写成 `__xkReqQ` 交给引擎执行。`window.__xkShortcuts` 是
+/// 开关（设置面板可关，避免和站点自己的 Ctrl+W 之类冲突）。
+const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
+(function () {
+  if (window.__xkKeys) return;
+  window.__xkKeys = true;
+  // 默认开；引擎在每次「加载完成」和「保存设置」后写入真实开关值。
+  if (window.__xkShortcuts === undefined) window.__xkShortcuts = true;
+  function push(action, extra) {
+    var item = { action: action };
+    if (extra) for (var k in extra) item[k] = extra[k];
+    (window.__xkReqQ = window.__xkReqQ || []).push(item);
+  }
+  document.addEventListener("keydown", function (e) {
+    if (window.__xkShortcuts === false) return;
+    var ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && !e.altKey && !e.shiftKey) {
+      var k = (e.key || "").toLowerCase();
+      if (k === "t") { e.preventDefault(); push("new"); return; }
+      if (k === "w") { e.preventDefault(); push("close"); return; }
+      if (k === "r") { e.preventDefault(); push("reload"); return; }
+      if (k === "l") { e.preventDefault(); push("focusAddr"); return; }
+      if (k === "=" || k === "+") { e.preventDefault(); push("zoomIn"); return; }
+      if (k === "-") { e.preventDefault(); push("zoomOut"); return; }
+      if (k === "0") { e.preventDefault(); push("zoomReset"); return; }
+    }
+    if (e.altKey && !e.ctrlKey && e.key === "ArrowLeft") {
+      e.preventDefault(); push("back"); return;
+    }
+    if (e.altKey && !e.ctrlKey && e.key === "ArrowRight") {
+      e.preventDefault(); push("forward"); return;
+    }
+    if (e.key === "F5") { e.preventDefault(); push("reload"); return; }
+    if (e.ctrlKey && e.key === "Tab") {
+      // Ctrl+Tab 在页面里没意义，留给引擎切下一个标签。
+      e.preventDefault();
+      push("nextTab");
+    }
+  }, true);
+})();
+"###;
+
 /// 内容页右键菜单脚本（引擎级，所有内容标签注入）。
 ///
 /// WebView2 的规则：页面在 `contextmenu` 事件里 `preventDefault()`，原生默认
 /// 菜单就不弹——所以纯页内实现即可。菜单本体也是 Shadow DOM（不沾站点样式）。
-/// 本地动作（复制/后退/刷新）页面内完成；需要引擎的动作（开新标签）写
-/// `window.__xkReq` 队列，由引擎轮询器消化。
+/// 本地动作（复制/后退/刷新）页面内完成；需要引擎的动作（开新标签）推进
+/// `window.__xkReqQ` 队列，由引擎轮询器消化（与工具栏同一套契约，数组队列
+/// 保证连点两次不会互相覆盖）。
 const CONTEXT_MENU_SCRIPT: &str = r###"
 (function () {
   if (window.__xkCtxMenu) return;
@@ -841,11 +1202,11 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
     var items = [];
 
     if (link) {
-      items.push(item("在新标签打开链接", function () { window.__xkReq = { action: "new", url: link.href }; }));
+      items.push(item("在新标签打开链接", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "new", url: link.href }); }));
       items.push(item("复制链接地址", function () { copyText(link.href); }));
     }
     if (img && (img.currentSrc || img.src)) {
-      items.push(item("在新标签打开图片", function () { window.__xkReq = { action: "new", url: img.currentSrc || img.src }; }));
+      items.push(item("在新标签打开图片", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "new", url: img.currentSrc || img.src }); }));
       items.push(item("复制图片地址", function () { copyText(img.currentSrc || img.src); }));
       items.push(item("打开原图并另存", function () {
         var url = img.currentSrc || img.src;
@@ -980,7 +1341,10 @@ fn register_browser(label: &str, state: BrowserState, app: &AppHandle) {
     start_gm_poller(label, app.clone());
 }
 
-/// 工具栏请求轮询器：读 `__xkReq` 执行动作，把最新状态写回 `__xkState`。
+/// 工具栏请求队列轮询器：读 `__xkReqQ` 执行动作，把最新状态写回 `__xkState`。
+///
+/// 用**数组队列**而不是单槽：单槽下 200ms 内连点两次（很常见：连点两下放大、
+/// 快速切标签再刷新）第二次会直接覆盖第一次，表现就是「点了没反应」。
 fn start_toolbar_poller(label: &str, app: AppHandle) {
     let label = label.to_string();
     std::thread::spawn(move || {
@@ -994,93 +1358,208 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
             let Some(toolbar) = toolbar_of(&label) else {
                 continue;
             };
+            // 读取与清空放在同一次 eval 里完成（原子取走），避免执行期间新点的
+            // 动作被误清，也避免同一批动作重复执行。
             let raw = match eval_json(
                 &toolbar,
-                "JSON.stringify(window.__xkReq || null)",
+                "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())",
                 Duration::from_secs(2),
             ) {
-                Ok(raw) if !raw.trim().is_empty() && raw != "null" => raw,
+                Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
                 _ => {
                     push_state(&label);
                     continue;
                 }
             };
-            let req: serde_json::Value = match serde_json::from_str(&raw) {
+            let reqs: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
-            let action = req
-                .get("action")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string();
-            let arg = req
-                .get("url")
-                .or_else(|| req.get("tabId"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string();
-            let result: Result<(), String> = match action.as_str() {
-                // 工具栏页 JS 就绪后主动握手：无条件推一次全量状态。
-                // 原来的去重（last_pushed）会在首次 eval 早于页面就绪时把
-                // 那次状态记为"已推"，之后相同 JSON 不再推送 → 地址栏永久空白。
-                "__pull" => {
-                    with_state(&label, |state| state.last_pushed.clear());
-                    push_state(&label);
-                    Ok(())
+            for req in reqs {
+                let action = req
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arg = req
+                    .get("url")
+                    .or_else(|| req.get("tabId"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let result = handle_toolbar_action(&app, &label, &toolbar, &req, &action, &arg);
+                if let Err(error) = result {
+                    log_for(&label, &format!("工具栏动作 {action} 失败：{error}"));
+                    // 失败要让用户看见，不能只在日志里安静地躺着。
+                    let _ = toolbar.eval(&format!(
+                        "window.__xkToast && window.__xkToast({});",
+                        serde_json::to_string(&format!("{action} 失败：{error}"))
+                            .unwrap_or_else(|_| "\"操作失败\"".to_string())
+                    ));
                 }
-                "nav" if !arg.is_empty() => {
-                    let target = if arg.starts_with("http://") || arg.starts_with("https://") {
-                        arg.clone()
-                    } else {
-                        format!("https://{arg}")
-                    };
-                    navigate_active(&label, &target)
-                }
-                "back" => history_action(&label, "back"),
-                "forward" => history_action(&label, "forward"),
-                "reload" => history_action(&label, "reload"),
-                "reorder" => {
-                    let tab_id = req
-                        .get("tabId")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let index = req
-                        .get("index")
-                        .and_then(|value| value.as_u64())
-                        .unwrap_or(0) as usize;
-                    reorder_tab(&label, &tab_id, index)
-                }
-                "home" => {
-                    let home = with_state(&label, |state| state.opts.home.to_string())
-                        .unwrap_or_default();
-                    if home.is_empty() {
-                        Ok(())
-                    } else {
-                        navigate_active(&label, &home)
-                    }
-                }
-                "new" => new_tab(&app, &label, &arg, true).map(|_| ()),
-                "close" => close_tab(&label, &arg),
-                "switch" => switch_tab(&label, &arg),
-                "zoomIn" => adjust_zoom(&label, 0.1),
-                "zoomOut" => adjust_zoom(&label, -0.1),
-                "zoomReset" => set_zoom(&label, 1.0),
-                _ => Ok(()),
-            };
-            if let Err(error) = result {
-                log_for(&label, &format!("工具栏动作 {action} 失败：{error}"));
             }
-            // 清掉请求槽（先清再推状态，避免重复执行）。
-            let _ = toolbar.eval("window.__xkReq = null;");
             push_state(&label);
         }
     });
 }
 
+/// 单个工具栏动作的执行体（拆出来是为了 poller 循环短、错误处理统一）。
+fn handle_toolbar_action(
+    app: &AppHandle,
+    label: &str,
+    toolbar: &Webview,
+    req: &serde_json::Value,
+    action: &str,
+    arg: &str,
+) -> Result<(), String> {
+    match action {
+        // 工具栏页 JS 就绪后主动握手：无条件推一次全量状态。
+        // 原来的去重（last_pushed）会在首次 eval 早于页面就绪时把
+        // 那次状态记为"已推"，之后相同 JSON 不再推送 → 地址栏永久空白。
+        "__pull" => {
+            with_state(label, |state| state.last_pushed.clear());
+            push_state(label);
+            Ok(())
+        }
+        "nav" if !arg.is_empty() => {
+            let target = resolve_address(label, arg);
+            navigate_active(label, &target)
+        }
+        "back" => history_action(label, "back"),
+        "forward" => history_action(label, "forward"),
+        "reload" => history_action(label, "reload"),
+        "stop" => stop_loading(label),
+        "reorder" => {
+            let tab_id = req
+                .get("tabId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let index = req
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
+            reorder_tab(label, &tab_id, index)
+        }
+        // 工具栏「+」：url 为空时按设置决定开主页还是空白页。
+        "new" => {
+            let url = if arg.trim().is_empty() {
+                with_state(label, |state| match state.settings.new_tab.as_str() {
+                    "blank" => "about:blank".to_string(),
+                    _ => state.settings.home.clone(),
+                })
+                .unwrap_or_else(|| "about:blank".to_string())
+            } else {
+                arg.to_string()
+            };
+            new_tab(app, label, &url, true).map(|_| ())
+        }
+        "home" => {
+            let home = with_state(label, |state| state.settings.home.clone())
+                .unwrap_or_default();
+            if home.trim().is_empty() {
+                Err("主页还没设置（点 ⚙ 配一个）".to_string())
+            } else {
+                navigate_active(label, &home)
+            }
+        }
+        "close" => {
+            if arg.is_empty() {
+                // 没有指定标签时关当前激活标签，符合「点 × 」的直觉。
+                let active = with_state(label, |state| state.active.clone()).unwrap_or_default();
+                close_tab(label, &active)
+            } else {
+                close_tab(label, arg)
+            }
+        }
+        "switch" => switch_tab(label, arg),
+        // Ctrl+Tab / Ctrl+Shift+Tab：在所有标签间循环。
+        "nextTab" => cycle_tab(label, 1),
+        "prevTab" => cycle_tab(label, -1),
+        "zoomIn" => adjust_zoom(label, zoom_step(label)),
+        "zoomOut" => adjust_zoom(label, -zoom_step(label)),
+        "zoomReset" => set_zoom(label, 1.0),
+        // Ctrl+L / 地址栏快捷键：把焦点交给工具栏里的地址栏。
+        "focusAddr" => {
+            let _ = toolbar.set_focus();
+            let _ = toolbar.eval(
+                "window.__xkFocusAddr = true; setTimeout(function(){ window.__xkFocusAddr = false; }, 800);",
+            );
+            Ok(())
+        }
+        // 工具栏 ⚙：打开设置浮层。
+        "openSettings" => open_settings_window(app, label),
+        // ⚙ 设置面板保存：写运行态 + 落盘，立即生效（主页/步进/快捷键不用重开）。
+        "config" => {
+            let incoming = req.get("config").cloned().unwrap_or(serde_json::Value::Null);
+            let parsed: BrowserSettings = serde_json::from_value(incoming)
+                .map_err(|error| format!("设置格式不对：{error}"))?;
+            let settings = parsed.sanitized();
+            save_settings(&settings)?;
+            let shortcuts = settings.shortcuts;
+            with_state(label, |state| {
+                state.settings = settings.clone();
+                state.opts.home = Url::parse(&settings.home)
+                    .unwrap_or_else(|_| state.opts.home.clone());
+                state.last_pushed.clear();
+            });
+            // 快捷键开关要立刻作用到已经打开的标签（它们早就注入完脚本了）。
+            if let Some(views) = tab_webviews(label) {
+                for view in views {
+                    let _ = view.eval(&format!("window.__xkShortcuts = {shortcuts};"));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 缩放步进（设置面板可调，非法值退回 0.1）。
+fn zoom_step(label: &str) -> f64 {
+    with_state(label, |state| state.settings.zoom_step)
+        .unwrap_or(0.1)
+        .clamp(0.05, 0.5)
+}
+
+/// 地址栏输入 → 真正要导航的 URL。
+///
+/// 看起来不像网址（没有点、带空格、不是 localhost）就走搜索模板：
+/// 以前直接 `https://{arg}`，用户输入「xxx 漫画」会得到一个坏网址，表现就是
+/// 「地址栏按回车没反应」。
+fn resolve_address(label: &str, raw: &str) -> String {
+    let template = with_state(label, |state| state.settings.clone()).unwrap_or_default();
+    address_target(raw, &template)
+}
+
+/// `resolve_address` 的纯函数部分（单测直接测它，不必造浏览器状态）。
+fn address_target(raw: &str, settings: &BrowserSettings) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("about:")
+        || trimmed.starts_with("file:")
+    {
+        return trimmed.to_string();
+    }
+    // 像域名的判据：第一段（到第一个 / 之前）带点、整串没空格、不是以点
+    // 开头/结尾。这样粘贴「e-hentai.org/g/1/2/」这种没写 scheme 的作品
+    // 地址也能直接去，而不是被当成搜索词。
+    let host_part = trimmed.split('/').next().unwrap_or("");
+    let host_ok = !trimmed.contains(' ')
+        && !host_part.starts_with('.')
+        && !host_part.ends_with('.')
+        && (host_part.contains('.')
+            || host_part == "localhost"
+            || host_part.starts_with("localhost:"));
+    if host_ok {
+        return format!("https://{trimmed}");
+    }
+    settings.search_url_for(trimmed)
+}
+
 fn adjust_zoom(label: &str, delta: f64) -> Result<(), String> {
-    with_state(label, |state| {
+    let result = with_state(label, |state| {
         let tab = state
             .tabs
             .iter_mut()
@@ -1092,7 +1571,56 @@ fn adjust_zoom(label: &str, delta: f64) -> Result<(), String> {
             .set_zoom(factor)
             .map_err(|e| format!("缩放失败: {e}"))
     })
-    .ok_or_else(|| "浏览器不存在".to_string())?
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    // 缩放值现在进状态：不推的话工具栏那个百分比永远停在旧值。
+    if result.is_ok() {
+        push_state(label);
+    }
+    result
+}
+
+/// 停止加载（刷新键在加载中时的第二种形态）。
+///
+/// Tauri 2 的 Webview 没有暴露 Stop，页面侧 `window.stop()` 效果等价
+/// （中止后续资源请求，已渲染内容保留）。
+fn stop_loading(label: &str) -> Result<(), String> {
+    let webview = active_webview(label)?;
+    webview
+        .eval("try { window.stop(); } catch (e) {}")
+        .map_err(|error| format!("停止加载失败：{error}"))?;
+    let active = with_state(label, |state| state.active.clone()).unwrap_or_default();
+    if !active.is_empty() {
+        note_tab_loading(label, &active, false);
+    }
+    Ok(())
+}
+
+/// 在标签间循环切换（Ctrl+Tab 语义；到头回绕）。
+fn cycle_tab(label: &str, delta: i32) -> Result<(), String> {
+    let target = with_state(label, |state| {
+        if state.tabs.len() < 2 {
+            return String::new();
+        }
+        let current = state
+            .tabs
+            .iter()
+            .position(|tab| tab.id == state.active)
+            .unwrap_or(0) as i32;
+        let len = state.tabs.len() as i32;
+        let next = ((current + delta) % len + len) % len;
+        state.tabs[next as usize].id.clone()
+    })
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    if target.is_empty() {
+        return Ok(());
+    }
+    switch_tab(label, &target)
+}
+
+/// 把「快捷键开关」同步给某条内容页（设置改了要立刻作用于已开标签）。
+fn sync_shortcuts_flag(label: &str, webview: &Webview) {
+    let on = with_state(label, |state| state.settings.shortcuts).unwrap_or(true);
+    let _ = webview.eval(&format!("window.__xkShortcuts = {on};"));
 }
 
 fn toolbar_of(label: &str) -> Option<Webview> {
@@ -1130,37 +1658,36 @@ fn app_of(label: &str) -> Option<AppHandle> {
     with_state(label, |state| state.window.app_handle().clone())
 }
 
-/// 内容页右键菜单的「新标签」请求：与工具栏同一套动作分派。
+/// 内容页请求（右键菜单「在新标签打开」等）：与工具栏同一套队列契约。
 fn poll_tab_req(label: &str, webview: &Webview) {
     let raw = match eval_json(
         webview,
-        "JSON.stringify(window.__xkReq || null)",
+        "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())",
         Duration::from_secs(2),
     ) {
-        Ok(raw) if !raw.trim().is_empty() && raw != "null" => raw,
+        Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
         _ => return,
     };
-    let req: serde_json::Value = match serde_json::from_str(&raw) {
+    let reqs: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
         Ok(value) => value,
         Err(_) => return,
     };
-    if req.get("action").and_then(|value| value.as_str()) != Some("new") {
-        return;
-    }
-    let Some(url) = req.get("url").and_then(|value| value.as_str()) else {
-        return;
-    };
-    if url.is_empty() {
-        return;
-    }
-        let Some(app) = app_of(label) else {
-        return;
-    };
-    match new_tab(&app, label, url, true) {
-        Ok(_) => {
-            let _ = webview.eval("window.__xkReq = null;");
+    for req in reqs {
+        if req.get("action").and_then(|value| value.as_str()) != Some("new") {
+            continue;
         }
-        Err(error) => log_for(label, &format!("右键新标签失败：{error}")),
+        let Some(url) = req.get("url").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+        let Some(app) = app_of(label) else {
+            return;
+        };
+        if let Err(error) = new_tab(&app, label, url, true) {
+            log_for(label, &format!("右键新标签失败：{error}"));
+        }
     }
 }
 
@@ -1176,7 +1703,7 @@ fn poll_tab_req(label: &str, webview: &Webview) {
 const GM_CLAIM_SCRIPT: &str = "JSON.stringify((function(){\
 var q = window.__xkGmXhr, out = {}; if (!q || !q.items) return out;\
 for (var k in q.items) { var it = q.items[k];\
-if (it && it.state === 'pending') { it.state = 'running'; out[k] = it; } }\
+if (it && it.state === 'pending' && !it.aborted) { it.state = 'running'; out[k] = it; } }\
 return out; })())";
 
 /// 同时在飞的 GM 跨域请求上限。漫画织机的批量下载会一次抛十几个，
@@ -1245,6 +1772,8 @@ fn poll_gm_xhr_queue(webview: &Webview) {
         let webview = webview.clone();
         std::thread::spawn(move || {
             let mut probe = has_progress.then(|| ProgressProbe::new(&webview, &id));
+            // 取消探针总开：文本请求也可能是大 JSON/慢接口，点了取消同样该停。
+            let mut canceller = CancelProbe::new(&webview, &id);
             let outcome = curl_xhr(
                 &url,
                 &method,
@@ -1252,6 +1781,7 @@ fn poll_gm_xhr_queue(webview: &Webview) {
                 &data,
                 binary,
                 probe.as_mut().map(|probe| probe as &mut dyn ProgressSink),
+                Some(&mut canceller as &mut dyn Canceller),
             );
             let result = serde_json::json!({
                 "state": "done",
@@ -1261,6 +1791,7 @@ fn poll_gm_xhr_queue(webview: &Webview) {
                 "responseHeaders": outcome.headers,
                 "error": outcome.error,
                 "errorText": outcome.error_text,
+                "aborted": outcome.aborted,
             })
             .to_string();
             let script = format!(
@@ -1268,7 +1799,7 @@ fn poll_gm_xhr_queue(webview: &Webview) {
                  if (!q) return; var r = {result}; \
                  q.state = r.state; q.status = r.status; q.responseText = r.responseText; \
                  q.responseB64 = r.responseB64; q.responseHeaders = r.responseHeaders; \
-                 q.error = r.error; q.errorText = r.errorText; }})();",
+                 q.error = r.error; q.errorText = r.errorText; q.aborted = r.aborted; }})();",
                 id = id.replace('\\', "\\\\").replace('\'', "\\'"),
                 result = result.replace('\'', "\\'"),
             );
@@ -1303,6 +1834,71 @@ struct XhrOutcome {
     /// undefined 会让它自己的回调抛异常、Promise 永不 settle，界面永远
     /// 转圈（2026-11-23 补）。
     error_text: String,
+    /// 被页面 `abort()` 取消（curl 子进程已 kill，不是「网络失败」）。
+    aborted: bool,
+}
+
+/// 取消探针：curl 跑的过程中问一句「页面还要不要结果」。
+///
+/// 以前 `abort()` 只是页面自己停掉定时器，curl 那头照样把整个文件下完——
+/// 用户点了取消，磁盘和带宽还在被吃（织机一次十几张图尤其明显）。
+trait Canceller {
+    /// 返回 true 表示页面已经放弃这个请求，宿主应立刻杀子进程。
+    fn cancelled(&mut self) -> bool;
+}
+
+/// 靠 eval 读页面队列里的 `aborted` 标记。
+///
+/// 用 `eval_with_callback` + 非阻塞 `try_recv`：发起查询立刻返回，结果在
+/// 回调里进 channel，主循环不为此等待（否则采样节奏会被拖成 2 秒一次）。
+struct CancelProbe {
+    webview: Webview,
+    id: String,
+    tx: mpsc::Sender<bool>,
+    rx: mpsc::Receiver<bool>,
+    last_probe: std::time::Instant,
+    aborted: bool,
+}
+
+impl CancelProbe {
+    fn new(webview: &Webview, id: &str) -> Self {
+        let (tx, rx) = mpsc::channel::<bool>();
+        Self {
+            webview: webview.clone(),
+            id: id.to_string(),
+            tx,
+            rx,
+            // 立刻探一次（页面可能在认领后马上放弃）。
+            last_probe: std::time::Instant::now() - Duration::from_secs(1),
+            aborted: false,
+        }
+    }
+}
+
+impl Canceller for CancelProbe {
+    fn cancelled(&mut self) -> bool {
+        if self.aborted {
+            return true;
+        }
+        // 800ms 一次：取消是人的操作，不需要毫秒级响应；织机一次十几个
+        // 并发，探得太勤会白烧 eval。
+        if self.last_probe.elapsed() >= Duration::from_millis(800) {
+            self.last_probe = std::time::Instant::now();
+            let id = self.id.replace('\\', "\\\\").replace('\'', "\\'");
+            let script = format!(
+                "JSON.stringify(!!(window.__xkGmXhr && window.__xkGmXhr.items['{id}'] && \
+                 window.__xkGmXhr.items['{id}'].aborted))"
+            );
+            let tx = self.tx.clone();
+            let _ = self.webview.eval_with_callback(&script, move |value| {
+                let _ = tx.send(value.contains("true"));
+            });
+        }
+        while let Ok(flag) = self.rx.try_recv() {
+            self.aborted = flag;
+        }
+        self.aborted
+    }
 }
 
 /// 下载进度出口。抽象成 trait 是为了能在单测里换成计数器，不用造 Webview。
@@ -1361,6 +1957,7 @@ fn curl_xhr(
     data: &str,
     binary: bool,
     mut progress: Option<&mut dyn ProgressSink>,
+    mut cancel: Option<&mut dyn Canceller>,
 ) -> XhrOutcome {
     let seq = GM_XHR_SEQ.fetch_add(1, Ordering::Relaxed);
     let stamp = std::time::SystemTime::now()
@@ -1407,11 +2004,23 @@ fn curl_xhr(
     command.stdout(Stdio::null()).stderr(Stdio::piped());
 
     let spawned = command.spawn();
+    let mut aborted = false;
     let (success, stderr_text) = match spawned {
         Ok(mut child) => {
             // 边下边报进度：文件大小就是已收字节数。
             let mut exited = None;
             loop {
+                // 页面点了 abort：立刻杀子进程，别再白下几十兆。
+                if let Some(probe) = &mut cancel {
+                    if probe.cancelled() {
+                        aborted = true;
+                        let _ = child.kill();
+                        // 不再 child.wait()：实测在 Windows 上 kill 后等它
+                        // 回收会把整条线程挂住（进程已经 TerminateProcess，
+                        // 句柄随作用域释放即可）。
+                        break;
+                    }
+                }
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         exited = Some(status);
@@ -1430,15 +2039,22 @@ fn curl_xhr(
                     Err(_) => break,
                 }
             }
-            let stderr_text = child
-                .stderr
-                .take()
-                .and_then(|mut pipe| {
-                    use std::io::Read;
-                    let mut buffer = String::new();
-                    pipe.read_to_string(&mut buffer).ok().map(|_| buffer)
-                })
-                .unwrap_or_default();
+            // 取消时不要读 stderr：子进程刚被 kill，管道可能还没彻底关，
+            // read_to_string 会一直等 EOF（实测能把测试挂住 60 秒）。
+            let stderr_text = if aborted {
+                let _ = child.stderr.take();
+                String::new()
+            } else {
+                child
+                    .stderr
+                    .take()
+                    .and_then(|mut pipe| {
+                        use std::io::Read;
+                        let mut buffer = String::new();
+                        pipe.read_to_string(&mut buffer).ok().map(|_| buffer)
+                    })
+                    .unwrap_or_default()
+            };
             // 收尾补一次：最后一块写完后 curl 立刻退出，循环里可能还没轮到
             // 那次 150ms 的采样，进度条就会停在 99%。
             if let Some(sink) = &mut progress {
@@ -1486,23 +2102,29 @@ fn curl_xhr(
                 "响应超过 {}MB 上限，未回传：{url}",
                 GM_XHR_MAX_BINARY / 1024 / 1024
             ),
+            aborted,
         };
     }
+    // 被取消的请求不回半截数据：页面那边只认「已取消」，不会拿残缺字节
+    // 去拼图片（半张图比没有更糟）。
     XhrOutcome {
         status,
-        text: if binary {
+        text: if aborted {
+            String::new()
+        } else if binary {
             String::new()
         } else {
             String::from_utf8_lossy(&body_bytes).to_string()
         },
-        base64: if binary && !body_bytes.is_empty() {
+        base64: if !aborted && binary && !body_bytes.is_empty() {
             BASE64.encode(&body_bytes)
         } else {
             String::new()
         },
         headers: headers_text,
-        error,
+        error: if aborted { false } else { error },
         error_text,
+        aborted,
     }
 }
 
@@ -1572,7 +2194,27 @@ fn note_tab_url(label: &str, tab_id: &str, url: &str) {
     push_state(label);
 }
 
-/// 把最新状态（标签列表/激活项/当前 URL）写进工具栏页。
+/// 页面标题变化（之前完全没接这个事件，标签芯片只能显示 URL）。
+fn note_tab_title(label: &str, tab_id: &str, title: &str) {
+    with_state(label, |state| {
+        if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.title = title.to_string();
+        }
+    });
+    push_state(label);
+}
+
+/// 加载开始/结束（工具栏刷新按钮靠它显示转圈与「停止」）。
+fn note_tab_loading(label: &str, tab_id: &str, loading: bool) {
+    with_state(label, |state| {
+        if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.loading = loading;
+        }
+    });
+    push_state(label);
+}
+
+/// 把最新状态（标签列表/激活项/当前 URL/缩放/加载中/设置）写进工具栏页。
 fn push_state(label: &str) {
     let Some(toolbar) = toolbar_of(label) else {
         return;
@@ -1590,13 +2232,19 @@ fn push_state(label: &str) {
                 })
             })
             .collect();
-        let active_url = state
-            .tabs
-            .iter()
-            .find(|tab| tab.id == state.active)
-            .map(|tab| tab.url.clone())
-            .unwrap_or_default();
-        serde_json::json!({ "label": label, "tabs": tabs, "activeUrl": active_url }).to_string()
+        let active = state.tabs.iter().find(|tab| tab.id == state.active);
+        let active_url = active.map(|tab| tab.url.clone()).unwrap_or_default();
+        serde_json::json!({
+            "label": label,
+            "tabs": tabs,
+            "activeUrl": active_url,
+            // 缩放/加载态必须进状态：工具栏原来自己维护 zoomPct，切标签后
+            // 显示停在别的标签的百分比上，看着就像「缩放键坏了」。
+            "zoom": active.map(|tab| tab.zoom).unwrap_or(1.0),
+            "loading": active.map(|tab| tab.loading).unwrap_or(false),
+            "settings": state.settings,
+        })
+        .to_string()
     })
     .unwrap_or_else(|| "{}".to_string());
     let unchanged = with_state(label, |state| {
@@ -1634,6 +2282,11 @@ fn reposition(label: &str) {
             let _ = tab
                 .webview
                 .set_size(LogicalSize::new(width, height - TOOLBAR_HEIGHT));
+        }
+        // 设置浮层铺满整个窗口，窗口拉伸时要跟着长。
+        if let Some(view) = &state.settings_view {
+            let _ = view.set_position(LogicalPosition::new(0.0, 0.0));
+            let _ = view.set_size(LogicalSize::new(width, height));
         }
     });
 }
@@ -1722,7 +2375,7 @@ mod tests {
         ]
         .concat();
         let (url, server) = serve_once(body.clone(), "image/jpeg");
-        let outcome = curl_xhr(&url, "GET", &[], "", true, None);
+        let outcome = curl_xhr(&url, "GET", &[], "", true, None, None);
         assert_eq!(outcome.status, 200);
         assert!(!outcome.error, "本地 200 不该判成错误");
         assert!(outcome.text.is_empty(), "二进制请求不该回文本");
@@ -1738,7 +2391,7 @@ mod tests {
             return;
         }
         let (url, server) = serve_once(b"<html>ok</html>".to_vec(), "text/html");
-        let outcome = curl_xhr(&url, "GET", &[], "", false, None);
+        let outcome = curl_xhr(&url, "GET", &[], "", false, None, None);
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.text, "<html>ok</html>");
         assert!(outcome.base64.is_empty(), "文本请求不必编 base64");
@@ -1752,22 +2405,40 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let total: usize = chunks.iter().map(|chunk| chunk.len()).sum();
         let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut scratch = [0u8; 2048];
-                let _ = stream.read(&mut scratch);
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\n\
-                     Content-Length: {total}\r\nConnection: close\r\n\r\n"
-                );
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.flush();
-                for (index, chunk) in chunks.iter().enumerate() {
-                    if index > 0 {
-                        std::thread::sleep(gap);
+            // accept 必须有上限：客户端可能在连接建立前就被取消，裸 accept
+            // 会把整个测试挂死（实测 60 秒都等不回来）。
+            listener.set_nonblocking(true).ok();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break Some(stream),
+                    Err(ref error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        if std::time::Instant::now() > deadline {
+                            break None;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
                     }
-                    let _ = stream.write_all(chunk);
-                    let _ = stream.flush();
+                    Err(_) => break None,
                 }
+            };
+            let Some(mut stream) = stream else { return };
+            let _ = stream.set_nonblocking(false);
+            let mut scratch = [0u8; 2048];
+            let _ = stream.read(&mut scratch);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\n\
+                 Content-Length: {total}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            for (index, chunk) in chunks.iter().enumerate() {
+                if index > 0 {
+                    std::thread::sleep(gap);
+                }
+                let _ = stream.write_all(chunk);
+                let _ = stream.flush();
             }
         });
         (format!("http://127.0.0.1:{port}/slow.jpg"), handle)
@@ -1791,7 +2462,7 @@ mod tests {
         let total = 8192u64 * 3;
         let (url, server) = serve_slow(chunks, Duration::from_millis(400));
         let mut sink = CollectedProgress(Vec::new());
-        let outcome = curl_xhr(&url, "GET", &[], "", true, Some(&mut sink));
+        let outcome = curl_xhr(&url, "GET", &[], "", true, Some(&mut sink), None);
         server.join().unwrap();
 
         assert_eq!(outcome.status, 200, "慢速服务也应返回 200");
@@ -1831,7 +2502,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let url = format!("http://127.0.0.1:{port}/gone.jpg");
-        let outcome = curl_xhr(&url, "GET", &[], "", false, None);
+        let outcome = curl_xhr(&url, "GET", &[], "", false, None, None);
         assert!(outcome.error, "连不上应判成传输失败");
         assert_eq!(outcome.status, 0);
         assert!(
@@ -1848,5 +2519,102 @@ mod tests {
         assert!(GM_CLAIM_SCRIPT.contains("state = 'running'"));
         assert!(GM_CLAIM_SCRIPT.contains("state === 'pending'"));
         assert!(GM_CLAIM_SCRIPT.contains("__xkGmXhr"));
+        // 已取消的条目不该再被认领（用户点了取消还继续下载是最气人的）。
+        assert!(GM_CLAIM_SCRIPT.contains("!it.aborted"));
+    }
+
+    /// 第 n 次被问「还要不要」时回答「不要了」。
+    struct CancelAfterN {
+        ask_count: usize,
+        cancel_at: usize,
+    }
+
+    impl Canceller for CancelAfterN {
+        fn cancelled(&mut self) -> bool {
+            self.ask_count += 1;
+            self.ask_count >= self.cancel_at
+        }
+    }
+
+    #[test]
+    fn curl_xhr_kills_curl_when_page_aborts() {
+        if !curl_ready() {
+            return;
+        }
+        // 三块、块间 500ms：不取消的话至少要 1 秒才下完。
+        let chunks = vec![vec![3u8; 8192], vec![4u8; 8192], vec![5u8; 8192]];
+        let (url, server) = serve_slow(chunks, Duration::from_millis(500));
+        let started = std::time::Instant::now();
+        // 第 3 次问（约 300ms，curl 已连上并收到第一块）才取消——第一次就
+        // 取消的话 curl 还没建立连接，等于没测到「下载中途取消」。
+        let mut cancel = CancelAfterN {
+            ask_count: 0,
+            cancel_at: 3,
+        };
+        let outcome = curl_xhr(&url, "GET", &[], "", true, None, Some(&mut cancel));
+        let elapsed = started.elapsed();
+        let _ = server.join();
+
+        assert!(outcome.aborted, "页面取消后应标记 aborted");
+        assert!(
+            outcome.base64.is_empty() && outcome.text.is_empty(),
+            "取消的请求不能回半截数据"
+        );
+        assert!(!outcome.error, "取消不是网络错误，别触发 onerror");
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "应在第一块之后就杀进程，实际耗时 {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn address_target_tells_url_from_query() {
+        let settings = BrowserSettings::default();
+        assert_eq!(
+            address_target("e-hentai.org/g/1/2/", &settings),
+            "https://e-hentai.org/g/1/2/"
+        );
+        assert_eq!(
+            address_target("https://e-hentai.org", &settings),
+            "https://e-hentai.org"
+        );
+        assert_eq!(address_target("localhost:3000", &settings), "https://localhost:3000");
+        // 带空格的词当搜索：以前会拼成 https://xxx 漫画 这种坏地址。
+        assert_eq!(
+            address_target("百合 漫画", &settings),
+            "https://www.bing.com/search?q=%E7%99%BE%E5%90%88+%E6%BC%AB%E7%94%BB"
+        );
+        // 不像域名的单词也走搜索。
+        assert_eq!(
+            address_target("nhentai", &settings),
+            "https://www.bing.com/search?q=nhentai"
+        );
+    }
+
+    #[test]
+    fn browser_settings_sanitizes_bad_values() {
+        let broken = BrowserSettings {
+            home: "  ".to_string(),
+            new_tab: "weird".to_string(),
+            search_url: "https://x/?no-placeholder".to_string(),
+            zoom_step: 9.0,
+            shortcuts: false,
+            show_titles: false,
+            tabs_width: 3.0,
+        }
+        .sanitized();
+        assert_eq!(broken.home, BrowserSettings::default().home, "空主页回退默认");
+        assert_eq!(broken.new_tab, "home", "非法新建行为回退主页");
+        assert!(
+            broken.search_url.contains("{q}"),
+            "缺占位符的搜索模板必须回退：{}",
+            broken.search_url
+        );
+        assert_eq!(broken.zoom_step, 0.5, "步进上限 50%");
+        assert_eq!(broken.tabs_width, 0.7, "标签栏上限 70%");
+        // 布尔开关原样保留（用户明确关掉的不能被“修正”回去）。
+        assert!(!broken.shortcuts);
+        assert!(!broken.show_titles);
     }
 }
