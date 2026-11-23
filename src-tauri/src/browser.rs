@@ -971,6 +971,16 @@ fn attach_tab_hooks(
     let tab_id_for_nav = tab_id.to_string();
     let app_for_dl = AppHandle::clone(app);
     builder
+        // Chromium 对「同一站点连续第二次自动下载」会弹权限框（"下载多个文件"），
+        // 而且是个独立小窗，用户基本看不见 → 表现成「点了打包，库裡什么都没有」
+        // （2026-11-24 实测复现：第一包进库、第二包被拦）。下载是我们自己在
+        // on_download 里接管并入库的，允许即可；其它权限保持浏览器默认。
+        .on_permission_request(|_webview, kind| match kind {
+            tauri::webview::PermissionKind::AutomaticDownloads => {
+                tauri::webview::PermissionResponse::Allow
+            }
+            _ => tauri::webview::PermissionResponse::Default,
+        })
         // 弹窗接管 v2：新窗一律开成新标签（后台建，建好即激活）。
         .on_new_window(move |new_url, _features| {
             queue_pending_tab(&label_for_new, &new_url.to_string(), true);
@@ -982,40 +992,52 @@ fn attach_tab_hooks(
             move |webview, event| {
                 match event {
                     DownloadEvent::Requested { url, destination } => {
-                        // 网页下载统一落到画匣暂存目录，下载完成后自动导入画匣库，
-                        // 不再散落到用户的系统下载目录（管理员 2026-11-23 要求）。
+                        // 两条去向：
+                        // - 压缩包（以及认不出扩展名的，可能是 blob 打包）→ 画匣缓存，
+                        //   下完自动入库 + 挂标签（管理员 2026-11-24 要求）；
+                        // - 图片/视频/文档（右键「打开原图并另存」走这条）→
+                        //   用户的 `图片\画匣下载`。以前一律丢缓存再当图集导入，
+                        //   结果是「入库失败：只支持 zip / cbz」的假报警（2026-11-24 修）。
                         //
                         // 文件名要留住 WebView2 给的 suggested name（来自页面的
                         // `<a download="标题.zip">`）：以前一律用 URL 末段推导，
                         // 织机打包走 blob: 下载，末段是随机 uuid、没有扩展名，
-                        // 入库那一步直接被「不是 zip」拒掉（2026-11-24 修）。
+                        // 入库那一步直接被「不是 zip」拒掉。
                         let suggested = archive_name_from(destination);
-                        if let Ok(cache) = app_for_download.path().app_cache_dir() {
-                            let dir = cache.join("d2").join("downloads");
+                        let pictures = default_download_dir();
+                        let to_pictures = suggested.is_none() && is_media_download(destination);                        let target_dir = if to_pictures {
+                            Some(pictures.clone())
+                        } else {
+                            app_for_download
+                                .path()
+                                .app_cache_dir()
+                                .map(|cache| cache.join("d2").join("downloads"))
+                                .ok()
+                        };
+                        if let Some(dir) = target_dir {
                             let _ = std::fs::create_dir_all(&dir);
-                            *destination = dir.join(
-                                suggested.unwrap_or_else(|| download_file_name(&url)),
-                            );
+                            *destination = dir.join(safe_download_name(destination, &url));
                         }
                         log_for(
                             &label_for_download,
                             &format!("下载开始：{url} → {}", destination.display()),
                         );
-                        // 顺手抓一次作品页元数据（标题 + 全部 tag），等下载收尾时
-                        // 一起入库——管理员要的「一键导入就把 tag 配好」。
-                        let key = destination.to_string_lossy().to_string();
-                        let view = webview.clone();
-                        std::thread::spawn(move || {
-                            if let Some(meta) = read_page_meta(&view) {
-                                if let Ok(mut map) = DOWNLOAD_META.lock() {
-                                    // 清掉早就没下文的旧条目，别让表无限长。
-                                    if map.len() > 24 {
-                                        map.clear();
+                        // 只给压缩包抓元数据：图片另存不需要标签，也省一次 eval。
+                        if !destination.starts_with(&pictures) {
+                            let key = destination.to_string_lossy().to_string();
+                            let view = webview.clone();
+                            std::thread::spawn(move || {
+                                if let Some(meta) = read_page_meta(&view) {
+                                    if let Ok(mut map) = DOWNLOAD_META.lock() {
+                                        // 清掉早就没下文的旧条目，别让表无限长。
+                                        if map.len() > 24 {
+                                            map.clear();
+                                        }
+                                        map.insert(key, meta);
                                     }
-                                    map.insert(key, meta);
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
                     DownloadEvent::Finished { url, path, success } => {
                         log_for(
@@ -1030,32 +1052,53 @@ fn attach_tab_hooks(
                         );
                         if success {
                             if let Some(file) = path {
-                                let app_import = app_for_download.clone();
-                                let label_import = label_for_download.clone();
-                                // 导入是阻塞的磁盘/数据库操作，别卡住 webview 线程。
-                                std::thread::spawn(move || {
-                                    let meta = take_download_meta(&file);
-                                    let outcome = crate::d2::import_downloaded_meta(
-                                        &app_import,
-                                        file,
-                                        &meta.title,
-                                        &meta.tags,
+                                if file.starts_with(default_download_dir()) {
+                                    // 图片/视频另存：不导入，告诉用户去哪找。
+                                    log_for(
+                                        &label_for_download,
+                                        &format!("已另存：{}", file.display()),
                                     );
-                                    match outcome {
-                                        Ok(message) => {
-                                            log_for(&label_import, &format!("自动入库：{message}"));
-                                            toast_toolbar(&label_import, &message, "ok");
+                                    toast_toolbar(&label_for_download, "已另存到 图片\\画匣下载", "ok");
+                                } else {
+                                    let app_import = app_for_download.clone();
+                                    let label_import = label_for_download.clone();
+                                    let cached = file.clone();
+                                    // 导入是阻塞的磁盘/数据库操作，别卡住 webview 线程。
+                                    std::thread::spawn(move || {
+                                        let meta = take_download_meta(&cached);
+                                        let outcome = crate::d2::import_downloaded_meta(
+                                            &app_import,
+                                            cached.clone(),
+                                            &meta.title,
+                                            &meta.tags,
+                                        );
+                                        match outcome {
+                                            Ok(message) => {
+                                                log_for(&label_import, &format!("自动入库：{message}"));
+                                                toast_toolbar(&label_import, &message, "ok");
+                                                // 导入是「复制临时文件再改名」，源文件还留在
+                                                // d2/downloads 里。库在别的盘时这就是每本多一份
+                                                // 副本（管理员库在 F:，缓存会在 C: 越堆越大）。
+                                                // 入库成功就把缓存清掉；移动型导入时文件已不
+                                                // 存在，remove 失败也无所谓。
+                                                if let Ok(dir) = app_import.path().app_cache_dir() {
+                                                    let downloads = dir.join("d2").join("downloads");
+                                                    if cached.starts_with(downloads) {
+                                                        let _ = std::fs::remove_file(&cached);
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                log_for(&label_import, &format!("自动入库失败：{error}"));
+                                                toast_toolbar(
+                                                    &label_import,
+                                                    &format!("入库失败：{error}"),
+                                                    "bad",
+                                                );
+                                            }
                                         }
-                                        Err(error) => {
-                                            log_for(&label_import, &format!("自动入库失败：{error}"));
-                                            toast_toolbar(
-                                                &label_import,
-                                                &format!("入库失败：{error}"),
-                                                "bad",
-                                            );
-                                        }
-                                    }
-                                });
+                                    });
+                                }
                             }
                         }
                     }
@@ -1126,6 +1169,51 @@ impl PageMeta {
 static DOWNLOAD_META: std::sync::LazyLock<Mutex<HashMap<String, PageMeta>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// 图片/视频/文档类下载（右键「打开原图并另存」、页面直链下载走这条）。
+///
+/// 这类文件不该进图集库，也不该报「只支持 zip / cbz」——落到
+/// `图片\画匣下载` 就好。
+fn is_media_download(destination: &std::path::Path) -> bool {
+    let ext = destination
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "bmp"
+            | "svg"
+            | "mp4"
+            | "webm"
+            | "mkv"
+            | "mp3"
+            | "m4a"
+            | "wav"
+            | "pdf"
+            | "txt"
+            | "csv"
+            | "json"
+            | "html"
+            | "htm"
+    )
+}
+
+/// 非图集下载的落点：`%USERPROFILE%\Pictures\画匣下载`（与 gallery_dl 一致）。
+fn default_download_dir() -> std::path::PathBuf {
+    match std::env::var("USERPROFILE") {
+        Ok(profile) => std::path::PathBuf::from(profile)
+            .join("Pictures")
+            .join("画匣下载"),
+        Err(_) => std::env::temp_dir().join("画匣下载"),
+    }
+}
+
 /// WebView2 给的「建议文件名」→ 可落地的压缩包名。
 ///
 /// 页面 `<a download="…">` 里的名字常常带 Windows 非法字符（e-hentai 标题里
@@ -1148,6 +1236,26 @@ fn archive_name_from(destination: &std::path::Path) -> Option<String> {
         .unwrap_or("下载");
     let cleaned = crate::d2::sanitize_file_name(stem);
     Some(format!("{cleaned}.{ext}"))
+}
+
+/// 最终落盘文件名：优先保留页面给的名字（只清非法字符），实在没有才用 URL 推导。
+///
+/// 图片另存以前走到 `download_file_name(url)`：blob URL 末段是 uuid、没有扩展名，
+/// 存出来叫 `download.bin`，用户双击都打不开（2026-11-24 修）。
+fn safe_download_name(destination: &std::path::Path, url: &Url) -> String {
+    if let Some(name) = archive_name_from(destination) {
+        return name;
+    }
+    if let Some(name) = destination.file_name().map(|name| name.to_string_lossy().to_string()) {
+        let path = std::path::Path::new(&name);
+        let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+        let ext = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        if !stem.is_empty() && !ext.is_empty() {
+            let cleaned = crate::d2::sanitize_file_name(stem);
+            return format!("{cleaned}.{ext}");
+        }
+    }
+    download_file_name(url)
 }
 
 /// 读当前页面的作品元数据（最多等 3 秒，页面忙也不拖死下载）。
@@ -2475,6 +2583,24 @@ mod tests {
         assert!(!name.contains(':'));
         assert!(name.ends_with(".zip"), "扩展名要留住：{name}");
         assert!(name.contains("Circle"), "标题部分要留住：{name}");
+    }
+
+    #[test]
+    fn media_downloads_are_not_treated_as_archives() {
+        // 右键「打开原图并另存」走的是网页下载，不能当成图集去导入。
+        assert!(is_media_download(std::path::Path::new("C:/x/原图.jpg")));
+        assert!(is_media_download(std::path::Path::new("C:/x/a.PNG")));
+        assert!(!is_media_download(std::path::Path::new(
+            "C:/x/(C102) [Circle] Title.zip"
+        )));
+    }
+
+    #[test]
+    fn media_download_keeps_suggested_name() {
+        // blob URL 没有可用文件名，必须用 WebView2 给的建议名，别退化成 download.bin。
+        let url = Url::parse("blob:https://example.com/f59a13ae-8318").unwrap();
+        let dest = std::path::Path::new("C:/Users/x/Downloads/原图测试.png");
+        assert_eq!(safe_download_name(dest, &url), "原图测试.png");
     }
 
     #[test]
