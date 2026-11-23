@@ -68,6 +68,7 @@ import {
   CloseIcon,
   FolderIcon,
   FilterIcon,
+  GlobeIcon,
   GridIcon,
   HeartIcon,
   ImportIcon,
@@ -2354,9 +2355,10 @@ export default function LibraryView({
             type="button"
             className="nav-item"
             onClick={() => setD2PanelOpen(true)}
-            title="D2 下载器最小闭环测试（exhentai 第一页）"
+            title="画匣浏览器：内嵌浏览 + 整部抓取（支持 exhentai / nhentai / 18comic / wnacg）+ Cookie 登录"
           >
-            <span className="nav-label">下载测试</span>
+            <GlobeIcon width={16} height={16} />
+            <span className="nav-label">画匣浏览器</span>
           </button>
 
           {activeQueue && (

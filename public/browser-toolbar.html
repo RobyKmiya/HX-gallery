@@ -168,22 +168,34 @@
     // 地址栏：聚焦时不打断输入
     if (!addrFocused && $("addr") !== document.activeElement) {
       $("addr").value = state.activeUrl || "";
+      // 完整网址放进 title，鼠标悬停可看全，方便核对查询参数细节。
+      $("addr").title = state.activeUrl || "当前页面地址";
       $("lock").textContent = /^https:/i.test(state.activeUrl || "") ? "🔒" : "◉";
     }
   }
 
+  // 兼容两种注入形态：Rust 侧 eval("window.__xkState = {...}") 给的是对象，
+  // 历史上也有过字符串形态。原来只认 string，对象被直接跳过 → state 恒 null，
+  // 地址栏和标签条永远空白（2026-11-23 修）。
   function tick() {
     var raw = window.__xkState;
-    if (raw && typeof raw === "string") {
-      if (raw !== lastStateJson) {
-        lastStateJson = raw;
-        try { state = JSON.parse(raw); } catch (e) { state = null; }
-        render();
+    var normalized = null;
+    if (raw && typeof raw === "object") normalized = JSON.stringify(raw);
+    else if (typeof raw === "string" && raw) normalized = raw;
+    if (normalized && normalized !== lastStateJson) {
+      lastStateJson = normalized;
+      try {
+        state = typeof raw === "object" ? raw : JSON.parse(normalized);
+      } catch (e) {
+        state = null;
       }
+      render();
     }
     window.requestAnimationFrame(function () { setTimeout(tick, 120); });
   }
   setTimeout(tick, 120);
+  // 页面就绪后握手，主动拉一次全量状态（避免首帧早于注入导致空白）。
+  setTimeout(function () { req("__pull"); }, 200);
 
   $("back").addEventListener("click", function () { req("back"); });
   $("forward").addEventListener("click", function () { req("forward"); });

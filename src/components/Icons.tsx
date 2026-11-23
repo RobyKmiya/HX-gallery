@@ -72,6 +72,23 @@ export function GridIcon(props: IconProps) {
   );
 }
 
+/** 画匣浏览器：5 经 3 纬的地球经纬球（左侧导航入口图标）。 */
+export function GlobeIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      {/* 球体外圈 */}
+      <circle cx="12" cy="12" r="9" />
+      {/* 经线 5 条：中间本初子午线 + 左右两对弧 */}
+      <path d="M12 3v18" />
+      <ellipse cx="12" cy="12" rx="4.5" ry="9" />
+      <ellipse cx="12" cy="12" rx="7.5" ry="9" />
+      {/* 纬线 3 条：赤道 + 上下一对弧 */}
+      <path d="M3 12h18" />
+      <ellipse cx="12" cy="12" rx="9" ry="4" />
+    </svg>
+  );
+}
+
 export function BookIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

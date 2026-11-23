@@ -425,23 +425,40 @@ pub fn navigate_active(label: &str, url: &str) -> Result<(), String> {
     .ok_or_else(|| "浏览器不存在".to_string())?
 }
 
-/// 后退/前进/刷新（子 Webview 没有历史 API，走页面 eval）。
+/// 后退/前进/刷新。
+///
+/// 刷新（2026-11-23 修）：原来走 `eval("location.reload()")`，页面正在导航/加载时
+/// eval 会被丢弃，且失败只写日志、前端没有任何提示，表现就是「点了没反应」。
+/// 改用 Webview 原生 `reload()`， Tauri 2 的 Webview 本身就支持；
+/// 若是空白页（无 URL）则退回导航到主页，保证一定有可见反馈。
 pub fn history_action(label: &str, action: &str) -> Result<(), String> {
-    let js = match action {
-        "back" => "history.back()",
-        "forward" => "history.forward()",
-        "reload" => "location.reload()",
-        _ => return Err("未知的历史动作".to_string()),
-    };
     with_state(label, |state| {
         let tab = state
             .tabs
             .iter()
             .find(|tab| tab.id == state.active)
             .ok_or("浏览器没有激活标签")?;
-        tab.webview
-            .eval(js)
-            .map_err(|e| format!("执行失败: {e}"))
+        match action {
+            "back" => tab.webview.eval("history.back()"),
+            "forward" => tab.webview.eval("history.forward()"),
+            "reload" => {
+                if tab.url.trim().is_empty() || tab.url == "about:blank" {
+                    // home 是 Url 类型：to_string() 后再判断，别当 String trim。
+                    let home_str = state.opts.home.to_string();
+                    let target = if home_str.trim().is_empty() || home_str == "about:blank" {
+                        "https://e-hentai.org/"
+                    } else {
+                        home_str.as_str()
+                    };
+                    tab.webview.navigate(Url::parse(target).map_err(|e| format!("主页地址无效: {e}"))?)
+                } else {
+                    // 原生 reload：不受页面导航状态/CSP 影响，失败能拿到 Err。
+                    tab.webview.reload()
+                }
+            }
+            _ => return Err("未知的历史动作".to_string()),
+        }
+        .map_err(|e| format!("执行失败: {e}"))
     })
     .ok_or_else(|| "浏览器不存在".to_string())?
 }
@@ -903,8 +920,10 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
             if !browser_exists(&label) {
                 return;
             }
+            // 工具栏 webview 偶尔会在重建/隐藏时短暂取不到；原来直接 return
+            // 会让轮询线程永久退出（刷新/地址栏从此全失效），改为跳过本轮。
             let Some(toolbar) = toolbar_of(&label) else {
-                return;
+                continue;
             };
             let raw = match eval_json(
                 &toolbar,
@@ -933,6 +952,14 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
                 .unwrap_or("")
                 .to_string();
             let result: Result<(), String> = match action.as_str() {
+                // 工具栏页 JS 就绪后主动握手：无条件推一次全量状态。
+                // 原来的去重（last_pushed）会在首次 eval 早于页面就绪时把
+                // 那次状态记为"已推"，之后相同 JSON 不再推送 → 地址栏永久空白。
+                "__pull" => {
+                    with_state(&label, |state| state.last_pushed.clear());
+                    push_state(&label);
+                    Ok(())
+                }
                 "nav" if !arg.is_empty() => {
                     let target = if arg.starts_with("http://") || arg.starts_with("https://") {
                         arg.clone()
@@ -970,7 +997,6 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
                 "switch" => switch_tab(&label, &arg),
                 "zoomIn" => adjust_zoom(&label, 0.1),
                 "zoomOut" => adjust_zoom(&label, -0.1),
-                "zoomReset" => set_zoom(&label, 1.0),
                 "zoomReset" => set_zoom(&label, 1.0),
                 _ => Ok(()),
             };

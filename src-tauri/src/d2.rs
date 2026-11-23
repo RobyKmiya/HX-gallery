@@ -1034,25 +1034,32 @@ pub fn d2_set_cookies(
         return Err("没解析出任何 cookie：请粘贴 name=value 形式的内容".to_string());
     }
 
+    // 域名列表：调用方可按站点指定（18comic/wnacg/nhentai…）；
+    // 不传则默认 e-hentai + exhentai 双域。
+    // 同时保留「带点」和「裸域」两个版本：WebView2 对 Domain=.xxx 与
+    // Domain=xxx 的匹配行为不同，exhentai 的 sk 在裸域下才稳定生效。
+    let requested = domains
+        .unwrap_or_else(|| vec![".e-hentai.org".to_string(), ".exhentai.org".to_string()]);
+    let mut targets: Vec<String> = Vec::new();
+    for domain in requested {
+        let bare = domain.trim_start_matches('.').to_ascii_lowercase();
+        for candidate in [format!(".{bare}"), bare] {
+            if !targets.contains(&candidate) {
+                targets.push(candidate);
+            }
+        }
+    }
+    // 裸域集合：用来判断当前标签页是不是目标站点（决定要不要刷新）。
+    let bare_domains: Vec<String> = targets
+        .iter()
+        .map(|d| d.trim_start_matches('.').to_ascii_lowercase())
+        .collect();
+
     let mut written = 0usize;
     let webviews = app.webviews();
     if webviews.is_empty() {
         return Err("浏览窗口还没打开：先点「打开浏览器」".to_string());
     }
-
-    // 域名列表：调用方可按站点指定（18comic/wnacg/nhentai…）；
-    // 不传则默认 e-hentai + exhentai 双域。
-    let targets: Vec<String> = domains
-        .unwrap_or_else(|| vec![".e-hentai.org".to_string(), ".exhentai.org".to_string()])
-        .into_iter()
-        .map(|domain| {
-            if domain.starts_with('.') {
-                domain
-            } else {
-                format!(".{domain}")
-            }
-        })
-        .collect();
 
     for (label, webview) in webviews {
         // 只往浏览器的标签页里写，不动主界面。
@@ -1064,17 +1071,26 @@ pub fn d2_set_cookies(
                 let mut cookie = cookie::Cookie::new(name.clone(), value.clone());
                 cookie.set_domain(domain);
                 cookie.set_path("/");
-                cookie.set_secure(true);
-                cookie.set_http_only(true);
+                // 不设 secure/httpOnly：会话 cookie 要能被站点脚本读取做校验；
+                // 是否仅 HTTPS 传输由站点页面协议决定，硬设 secure 会让 HTTP 调试页失效。
                 if webview.set_cookie(cookie).is_ok() {
                     written += 1;
                 }
             }
         }
-        // 写完刷新当前页，让站点头像/权限立刻生效。
-        if let Ok(mut url) = webview.url() {
-            url.set_fragment(None);
-            let _ = webview.navigate(url);
+        // 只刷新「当前页 host 命中目标域」的标签页。
+        // 原来无条件刷新所有标签：若当前停在别的域（如 e-hentai），
+        // 写到 .exhentai.org 的 cookie 根本不会进入该请求，看上去就像「没登上」。
+        if let Ok(url) = webview.url() {
+            let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+            let hits_target = bare_domains
+                .iter()
+                .any(|d| host == *d || host.ends_with(&format!(".{d}")));
+            if hits_target {
+                let mut refresh = url.clone();
+                refresh.set_fragment(None);
+                let _ = webview.navigate(refresh);
+            }
         }
     }
 
