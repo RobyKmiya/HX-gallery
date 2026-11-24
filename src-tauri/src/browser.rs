@@ -209,6 +209,98 @@ struct TabRecord {
 static BROWSERS: std::sync::LazyLock<Mutex<HashMap<String, BrowserState>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// ── 诊断：面包屑 + 主线程心跳看门狗 ─────────────────────────
+//
+// 2026-11-24 早上真机「打开网页后直接卡死、白屏」：日志只到「正在打开浏览窗口…」
+// 就没了，进程 Responding=False 挂了几小时。GUI 卡死这种事故光看日志无法定位，
+// 所以这里放两件廉价工具（不参与业务逻辑）：
+//
+// - `crumb()`：任何线程都能塞一句「我现在在哪」，环形保留最后 24 条；
+// - 看门狗：每秒让主线程设一次心跳，连续两次没设上就判定主线程卡死，
+//   把最后 24 条面包屑写进 d2.log —— 卡在哪一行、卡前最后发生的事一目了然。
+
+static CRUMBS: std::sync::LazyLock<Mutex<std::collections::VecDeque<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::VecDeque::new()));
+static WATCHDOG_ON: AtomicBool = AtomicBool::new(false);
+static MAIN_BEAT: AtomicU64 = AtomicU64::new(0);
+
+/// 记一句面包屑（环形 24 条）。开销是一次短锁，只在关键步骤调用。
+pub fn crumb(text: impl Into<String>) {
+    let Ok(mut queue) = CRUMBS.lock() else {
+        return;
+    };
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64 % 1_000_000)
+        .unwrap_or(0);
+    queue.push_back(format!(
+        "{}.{:03} {}",
+        millis / 1000,
+        millis % 1000,
+        text.into()
+    ));
+    while queue.len() > 24 {
+        queue.pop_front();
+    }
+}
+
+fn crumbs() -> String {
+    CRUMBS
+        .lock()
+        .map(|queue| queue.iter().cloned().collect::<Vec<_>>().join(" ← "))
+        .unwrap_or_default()
+}
+
+/// 直接写 d2 日志：不依赖浏览器状态表，主线程卡死时也能落盘。
+fn diag(app: &AppHandle, message: &str) {
+    let Ok(cache) = app.path().app_cache_dir() else {
+        return;
+    };
+    let dir = cache.join("d2");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("d2.log"))
+    {
+        use std::io::Write as _;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{stamp}] {message}");
+    }
+}
+
+/// 主线程心跳看门狗（进程内只起一次）。
+pub fn start_watchdog(app: &AppHandle) {
+    if WATCHDOG_ON.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let base = std::time::Instant::now();
+        loop {
+            let before = MAIN_BEAT.load(Ordering::Relaxed);
+            let _ = app.run_on_main_thread(move || {
+                MAIN_BEAT.store(base.elapsed().as_millis() as u64, Ordering::Relaxed);
+            });
+            std::thread::sleep(Duration::from_millis(1_600));
+            let after = MAIN_BEAT.load(Ordering::Relaxed);
+            if after == before {
+                diag(
+                    &app,
+                    &format!(
+                        "⚠ 主线程已 {}ms 没响应；最后面包屑：{}",
+                        base.elapsed().as_millis(),
+                        crumbs()
+                    ),
+                );
+            }
+        }
+    });
+}
+
 /// 浏览器配置。宿主按需填，全部字段都有合理默认。
 pub struct BrowserOptions {
     /// 窗口标题。
@@ -483,11 +575,13 @@ pub fn open(
     std::thread::spawn(move || {
         let label = label_for_thread;
         let run = || -> Result<(), String> {
+            crumb(format!("建窗开始 {label}"));
             let window = tauri::WindowBuilder::new(&app_for_window, &label)
                 .title(opts.title.clone())
                 .inner_size(opts.size.0, opts.size.1)
                 .build()
                 .map_err(|error| format!("打开浏览窗口失败：{error}"))?;
+            crumb("窗口已建好，准备读尺寸");
 
             let scale = window.scale_factor().unwrap_or(1.0);
             let inner = window.inner_size().unwrap_or_default();
@@ -495,6 +589,7 @@ pub fn open(
             let height = inner.height as f64 / scale;
 
             // 工具栏：本仓公共页（真实占位，不遮内容；与引擎走队列契约）。
+            crumb("建工具栏 webview");
             let toolbar = window
                 .add_child(
                     WebviewBuilder::new(
@@ -505,6 +600,7 @@ pub fn open(
                     LogicalSize::new(width, TOOLBAR_HEIGHT),
                 )
                 .map_err(|error| format!("创建工具栏失败：{error}"))?;
+            crumb("工具栏就绪");
 
             let tab_url = url.to_string();
             let mut tab_builder = WebviewBuilder::new(
@@ -520,6 +616,7 @@ pub fn open(
                 tab_builder = tab_builder.initialization_script(script.clone());
             }
 
+            crumb(format!("建内容 webview {tab_url}"));
             let webview = window
                 .add_child(
                     tab_builder,
@@ -527,6 +624,7 @@ pub fn open(
                     LogicalSize::new(width, height - TOOLBAR_HEIGHT),
                 )
                 .map_err(|error| format!("创建内容标签失败：{error}"))?;
+            crumb("内容 webview 就绪");
 
             let state = BrowserState {
                 window: window.clone(),
@@ -547,7 +645,9 @@ pub fn open(
                 opts,
                 last_pushed: String::new(),
             };
+            crumb("注册浏览器状态");
             register_browser(&label, state, &app_for_window);
+            crumb("注册完成，引擎已启动");
             // 快捷键开关按设置初始化（窗口刚建，标签脚本已经跑了默认值）。
             if let Ok(view) = active_webview(&label) {
                 sync_shortcuts_flag(&label, &view);
@@ -580,17 +680,22 @@ pub fn active_webview_of(label: &str) -> Result<Webview, String> {
 /// 激活标签导航到指定地址。
 pub fn navigate_active(label: &str, url: &str) -> Result<(), String> {
     let parsed = Url::parse(url).map_err(|e| format!("网址格式不正确: {e}"))?;
-    with_state(label, |state| {
-        let tab = state
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let webview = with_state(label, |state| {
+        state
             .tabs
-            .iter_mut()
+            .iter()
             .find(|tab| tab.id == state.active)
-            .ok_or("浏览器没有激活标签")?;
-        tab.webview
-            .navigate(parsed)
-            .map_err(|e| format!("导航失败: {e}"))
+            .map(|tab| tab.webview.clone())
     })
     .ok_or_else(|| "浏览器不存在".to_string())?
+    .ok_or_else(|| "浏览器没有激活标签".to_string())?;
+    webview
+        .navigate(parsed)
+        .map_err(|e| format!("导航失败: {e}"))
 }
 
 /// 后退/前进/刷新。
@@ -600,15 +705,24 @@ pub fn navigate_active(label: &str, url: &str) -> Result<(), String> {
 /// 改用 Webview 原生 `reload()`， Tauri 2 的 Webview 本身就支持；
 /// 若是空白页（无 URL）则退回导航到主页，保证一定有可见反馈。
 pub fn history_action(label: &str, action: &str) -> Result<(), String> {
-    with_state(label, |state| {
+    enum Plan {
+        Eval(&'static str),
+        Navigate(Url),
+        Reload,
+    }
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let (webview, plan) = with_state(label, |state| {
         let tab = state
             .tabs
             .iter()
             .find(|tab| tab.id == state.active)
             .ok_or("浏览器没有激活标签")?;
-        match action {
-            "back" => tab.webview.eval("history.back()"),
-            "forward" => tab.webview.eval("history.forward()"),
+        let plan = match action {
+            "back" => Plan::Eval("history.back()"),
+            "forward" => Plan::Eval("history.forward()"),
             "reload" => {
                 if tab.url.trim().is_empty() || tab.url == "about:blank" {
                     // home 是 Url 类型：to_string() 后再判断，别当 String trim。
@@ -618,17 +732,23 @@ pub fn history_action(label: &str, action: &str) -> Result<(), String> {
                     } else {
                         home_str.as_str()
                     };
-                    tab.webview.navigate(Url::parse(target).map_err(|e| format!("主页地址无效: {e}"))?)
+                    Plan::Navigate(Url::parse(target).map_err(|e| format!("主页地址无效: {e}"))?)
                 } else {
                     // 原生 reload：不受页面导航状态/CSP 影响，失败能拿到 Err。
-                    tab.webview.reload()
+                    Plan::Reload
                 }
             }
             _ => return Err("未知的历史动作".to_string()),
-        }
-        .map_err(|e| format!("执行失败: {e}"))
+        };
+        Ok((tab.webview.clone(), plan))
     })
-    .ok_or_else(|| "浏览器不存在".to_string())?
+    .ok_or_else(|| "浏览器不存在".to_string())??;
+    match plan {
+        Plan::Eval(script) => webview.eval(script),
+        Plan::Navigate(url) => webview.navigate(url),
+        Plan::Reload => webview.reload(),
+    }
+    .map_err(|e| format!("执行失败: {e}"))
 }
 
 /// 新建标签（弹窗接管与工具栏「+」共用）。返回标签 id。
@@ -671,6 +791,7 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
             for script in &extra_init {
                 tab_builder = tab_builder.initialization_script(script.clone());
             }
+            crumb(format!("新标签建 webview {url_for_thread}"));
             let webview = window
                 .add_child(
                     tab_builder,
@@ -678,9 +799,14 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                     LogicalSize::new(width, height - TOOLBAR_HEIGHT),
                 )
                 .map_err(|error| format!("创建标签失败：{error}"))?;
+            crumb("新标签 webview 就绪");
 
             let tab_url = url_for_thread.to_string();
-            with_state(&label_for_tab, |state| {
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+            let (to_hide, hide_self): (Vec<_>, Option<_>) = with_state(&label_for_tab, |state| {
                 let record = TabRecord {
                     id: tab_id_for_thread.clone(),
                     webview,
@@ -690,19 +816,24 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                     loading: false,
                 };
                 if activate_for_thread {
-                    for tab in &state.tabs {
-                        let _ = tab.webview.hide();
-                    }
+                    let olds: Vec<_> = state.tabs.iter().map(|tab| tab.webview.clone()).collect();
                     state.tabs.push(record);
                     state.active = tab_id_for_thread.clone();
+                    (olds, None)
                 } else {
                     // 后台标签：先藏起来，激活的还是原来的
-                    let _ = record.webview.hide();
+                    let own = record.webview.clone();
                     state.tabs.push(record);
+                    (Vec::new(), Some(own))
                 }
-                Ok::<(), String>(())
             })
-            .ok_or("浏览器不存在")??;
+            .ok_or("浏览器不存在")?;
+            for old in to_hide {
+                let _ = old.hide();
+            }
+            if let Some(own) = hide_self {
+                let _ = own.hide();
+            }
             // 新标签同样按当前设置初始化快捷键开关。
             if let Some(tab) = with_state(&label_for_tab, |state| {
                 state
@@ -866,57 +997,99 @@ fn start_settings_poller(label: &str, app: &AppHandle) {
 }
 
 pub fn switch_tab(label: &str, tab_id: &str) -> Result<(), String> {
-    with_state(label, |state| {
-        for tab in &state.tabs {
-            if tab.id == tab_id {
-                let _ = tab.webview.show();
-                let _ = tab.webview.set_focus();
-            } else {
-                let _ = tab.webview.hide();
-            }
-        }
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let ops = with_state(label, |state| {
         state.active = tab_id.to_string();
-        Ok::<(), String>(())
+        state
+            .tabs
+            .iter()
+            .map(|tab| (tab.webview.clone(), tab.id == tab_id))
+            .collect::<Vec<_>>()
     })
-    .ok_or_else(|| "浏览器不存在".to_string())??;
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    for (webview, target) in ops {
+        if target {
+            let _ = webview.show();
+            let _ = webview.set_focus();
+        } else {
+            let _ = webview.hide();
+        }
+    }
     push_state(label);
     Ok(())
 }
 
 /// 关闭标签；最后一个标签关闭时整个浏览器窗口一起关。
 pub fn close_tab(label: &str, tab_id: &str) -> Result<(), String> {
-    let close_window: bool = with_state(label, |state| {
+    enum Plan {
+        Missing,
+        Tabs {
+            close: Webview,
+            show: Option<Webview>,
+        },
+        Window { close: Webview },
+    }
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let plan = with_state(label, |state| {
         let Some(index) = state.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return false;
+            return Plan::Missing;
         };
         let tab = state.tabs.remove(index);
-        let _ = tab.webview.close();
+        if state.tabs.is_empty() {
+            return Plan::Window { close: tab.webview };
+        }
         if state.active == tab_id {
             state.active = state
                 .tabs
                 .last()
                 .map(|tab| tab.id.clone())
                 .unwrap_or_default();
-            if let Some(active) = state.tabs.iter().find(|tab| tab.id == state.active) {
-                let _ = active.webview.show();
-            }
         }
-        state.tabs.is_empty()
+        let show = state
+            .tabs
+            .iter()
+            .find(|tab| tab.id == state.active)
+            .map(|tab| tab.webview.clone());
+        Plan::Tabs {
+            close: tab.webview,
+            show,
+        }
     })
     .ok_or_else(|| "浏览器不存在".to_string())?;
 
-    if close_window {
-        close_browser(label)?;
-    } else {
-        push_state(label);
+    match plan {
+        Plan::Missing => {}
+        Plan::Window { close } => {
+            let _ = close.close();
+            close_browser(label)?;
+        }
+        Plan::Tabs { close, show } => {
+            let _ = close.close();
+            if let Some(webview) = show {
+                let _ = webview.show();
+            }
+            push_state(label);
+        }
     }
     Ok(())
 }
 
 /// 关闭整个浏览器窗口（状态在销毁事件里清理）。
 pub fn close_browser(label: &str) -> Result<(), String> {
-    with_state(label, |state| state.window.close())
-        .ok_or_else(|| "浏览器不存在".to_string())?
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let window = with_state(label, |state| state.window.clone())
+        .ok_or_else(|| "浏览器不存在".to_string())?;
+    window
+        .close()
         .map_err(|e| format!("关闭浏览器失败: {e}"))
 }
 
@@ -925,18 +1098,26 @@ pub fn set_zoom(label: &str, factor: f64) -> Result<(), String> {
     let factor = factor.clamp(0.25, 4.0);
     // 以前只调了 webview.set_zoom，忘了把值写回 TabRecord —— 重置 100% 后
     // 记录里还是旧缩放，再点一次 + 会从旧值上加（表现：缩放键越点越乱）。
-    let result = with_state(label, |state| {
-        let tab = state
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == state.active)
-            .ok_or("浏览器没有激活标签")?;
-        tab.zoom = factor;
-        tab.webview
-            .set_zoom(factor)
-            .map_err(|e| format!("缩放失败: {e}"))
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let (webview, record_err) = with_state(label, |state| {
+        match state.tabs.iter_mut().find(|tab| tab.id == state.active) {
+            Some(tab) => {
+                tab.zoom = factor;
+                (Some(tab.webview.clone()), None)
+            }
+            None => (None, Some("浏览器没有激活标签")),
+        }
     })
     .ok_or_else(|| "浏览器不存在".to_string())?;
+    let result = match webview {
+        Some(webview) => webview
+            .set_zoom(factor)
+            .map_err(|e| format!("缩放失败: {e}")),
+        None => Err(record_err.unwrap_or_default().to_string()),
+    };
     if result.is_ok() {
         push_state(label);
     }
@@ -944,17 +1125,26 @@ pub fn set_zoom(label: &str, factor: f64) -> Result<(), String> {
 }
 
 fn focus_tab_webview(tab_id: &str) -> Result<(), String> {
-    let mut guard = BROWSERS.lock().map_err(|_| "浏览器状态异常".to_string())?;
-    let map = &mut *guard;
-    for state in map.values_mut() {
-        if let Some(tab) = state.tabs.iter().find(|tab| tab.id == tab_id) {
-            return tab
-                .webview
-                .set_focus()
-                .map_err(|e| format!("聚焦失败: {e}"));
-        }
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let guard = BROWSERS.lock().map_err(|_| "浏览器状态异常".to_string())?;
+    let map = &*guard;
+    let target = map.values().find_map(|state| {
+        state
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.webview.clone())
+    });
+    drop(guard);
+    match target {
+        Some(webview) => webview
+            .set_focus()
+            .map_err(|e| format!("聚焦失败: {e}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// 给内容标签挂钩子：弹窗→开新标签、下载→自动入库（带标签）、导航→记 URL。
@@ -975,11 +1165,14 @@ fn attach_tab_hooks(
         // 而且是个独立小窗，用户基本看不见 → 表现成「点了打包，库裡什么都没有」
         // （2026-11-24 实测复现：第一包进库、第二包被拦）。下载是我们自己在
         // on_download 里接管并入库的，允许即可；其它权限保持浏览器默认。
-        .on_permission_request(|_webview, kind| match kind {
-            tauri::webview::PermissionKind::AutomaticDownloads => {
-                tauri::webview::PermissionResponse::Allow
+        .on_permission_request(|_webview, kind| {
+            crumb(format!("权限请求 {kind:?}"));
+            match kind {
+                tauri::webview::PermissionKind::AutomaticDownloads => {
+                    tauri::webview::PermissionResponse::Allow
+                }
+                _ => tauri::webview::PermissionResponse::Default,
             }
-            _ => tauri::webview::PermissionResponse::Default,
         })
         // 弹窗接管 v2：新窗一律开成新标签（后台建，建好即激活）。
         .on_new_window(move |new_url, _features| {
@@ -1112,6 +1305,7 @@ fn attach_tab_hooks(
             let label_for_navigation = label_for_nav.clone();
             let tab_id_for_navigation = tab_id_for_nav.clone();
             move |url| {
+                crumb(format!("导航 {url}"));
                 note_tab_url(&label_for_navigation, &tab_id_for_navigation, &url.to_string());
                 // 导航一发生就先进「加载中」，工具栏刷新键立刻变成停止键。
                 note_tab_loading(&label_for_navigation, &tab_id_for_navigation, true);
@@ -1131,6 +1325,7 @@ fn attach_tab_hooks(
             let label_for_load = label_for_nav.clone();
             let tab_id_for_load = tab_id_for_nav.clone();
             move |webview, payload| {
+                crumb(format!("加载事件 {:?}", payload.event()));
                 let loading = payload.event() == tauri::webview::PageLoadEvent::Started;
                 note_tab_loading(&label_for_load, &tab_id_for_load, loading);
                 // 只在「加载完成」后写快捷键开关：新文档上下文此时才稳定，
@@ -1838,19 +2033,27 @@ fn address_target(raw: &str, settings: &BrowserSettings) -> String {
 }
 
 fn adjust_zoom(label: &str, delta: f64) -> Result<(), String> {
-    let result = with_state(label, |state| {
-        let tab = state
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == state.active)
-            .ok_or("浏览器没有激活标签")?;
-        tab.zoom = (tab.zoom + delta).clamp(0.25, 4.0);
-        let factor = tab.zoom;
-        tab.webview
-            .set_zoom(factor)
-            .map_err(|e| format!("缩放失败: {e}"))
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let (webview, record_err) = with_state(label, |state| {
+        match state.tabs.iter_mut().find(|tab| tab.id == state.active) {
+            Some(tab) => {
+                let zoom = (tab.zoom + delta).clamp(0.25, 4.0);
+                tab.zoom = zoom;
+                (Some((tab.webview.clone(), zoom)), None)
+            }
+            None => (None, Some("浏览器没有激活标签")),
+        }
     })
     .ok_or_else(|| "浏览器不存在".to_string())?;
+    let result = match webview {
+        Some((webview, factor)) => webview
+            .set_zoom(factor)
+            .map_err(|e| format!("缩放失败: {e}")),
+        None => Err(record_err.unwrap_or_default().to_string()),
+    };
     // 缩放值现在进状态：不推的话工具栏那个百分比永远停在旧值。
     if result.is_ok() {
         push_state(label);
@@ -2543,31 +2746,43 @@ fn push_state(label: &str) {
 
 /// 窗口尺寸变化时重排工具栏与全部内容标签。
 fn reposition(label: &str) {
-    with_state(label, |state| {
-        let scale = state.window.scale_factor().unwrap_or(1.0);
-        let Ok(inner) = state.window.inner_size() else {
-            return;
-        };
-        let width = inner.width as f64 / scale;
-        let height = inner.height as f64 / scale;
-        let _ = state.toolbar.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = state
-            .toolbar
-            .set_size(LogicalSize::new(width, TOOLBAR_HEIGHT));
-        for tab in &state.tabs {
-            let _ = tab
-                .webview
-                .set_position(LogicalPosition::new(0.0, TOOLBAR_HEIGHT));
-            let _ = tab
-                .webview
-                .set_size(LogicalSize::new(width, height - TOOLBAR_HEIGHT));
-        }
-        // 设置浮层铺满整个窗口，窗口拉伸时要跟着长。
-        if let Some(view) = &state.settings_view {
-            let _ = view.set_position(LogicalPosition::new(0.0, 0.0));
-            let _ = view.set_size(LogicalSize::new(width, height));
-        }
-    });
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let Some((window, toolbar, tabs, settings_view)) = with_state(label, |state| {
+        (
+            state.window.clone(),
+            state.toolbar.clone(),
+            state
+                .tabs
+                .iter()
+                .map(|tab| tab.webview.clone())
+                .collect::<Vec<_>>(),
+            state.settings_view.clone(),
+        )
+    })
+    else {
+        return;
+    };
+    // scale_factor / inner_size 同样走主线程，一并放到锁外。
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let Ok(inner) = window.inner_size() else {
+        return;
+    };
+    let width = inner.width as f64 / scale;
+    let height = inner.height as f64 / scale;
+    let _ = toolbar.set_position(LogicalPosition::new(0.0, 0.0));
+    let _ = toolbar.set_size(LogicalSize::new(width, TOOLBAR_HEIGHT));
+    for webview in tabs {
+        let _ = webview.set_position(LogicalPosition::new(0.0, TOOLBAR_HEIGHT));
+        let _ = webview.set_size(LogicalSize::new(width, height - TOOLBAR_HEIGHT));
+    }
+    // 设置浮层铺满整个窗口，窗口拉伸时要跟着长。
+    if let Some(view) = settings_view {
+        let _ = view.set_position(LogicalPosition::new(0.0, 0.0));
+        let _ = view.set_size(LogicalSize::new(width, height));
+    }
 }
 
 #[cfg(test)]

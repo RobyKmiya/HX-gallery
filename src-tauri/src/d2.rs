@@ -1232,6 +1232,9 @@ pub fn d2_open(
     home: Option<String>,
 ) -> Result<(), String> {
     let parsed = normalize_url(&url)?;
+    crate::browser::crumb(format!("d2_open 收到 {parsed}"));
+    // 主线程看门狗：GUI 卡死时能把「卡前最后做了什么」写进日志。
+    crate::browser::start_watchdog(&app);
     // 宿主设置的主页（工具栏 ⌂ 用）；空值不覆盖上一次的设置。
     if let Some(home) = home.as_deref().map(str::trim) {
         if !home.is_empty() {
@@ -1244,6 +1247,7 @@ pub fn d2_open(
     // 浏览器还在且响应正常：激活标签直接导航（保留登录态与历史）。
     // 存活判定在引擎里用回调探针（browser::is_alive），冻住的尸体瞒不过它。
     if let Some(label) = current_label() {
+        crate::browser::crumb(format!("有旧浏览器 {label}，探活"));
         if crate::browser::is_alive(&label) {
             match crate::browser::navigate_active(&label, &parsed.to_string()) {
                 Ok(()) => {
