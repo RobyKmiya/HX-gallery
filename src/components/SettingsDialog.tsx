@@ -49,7 +49,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
 const FIXED_KEYS: { keys: string; action: string }[] = [
   { keys: "空格", action: "下一页 / 播放中暂停（按状态自动切换）" },
   { keys: "Ctrl+1~9 · Ctrl+0", action: "幻灯播放每 N 秒一页 / 关闭幻灯" },
-  { keys: "Ctrl+H · Ctrl+Shift+H", action: "老板键藏窗 / 全局呼回" },
+  // 老板键两项已进上面的自定义表（11-24：管理员要求能改绑定）。
   { keys: "[ · ]", action: "上一本 / 下一本画集" },
   { keys: "Esc", action: "关菜单 / 退出阅读" },
   { keys: "右键", action: "阅读器菜单" },
@@ -72,6 +72,20 @@ export default function SettingsDialog({
 }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
   const [bindings, setBindings] = useState(() => loadShortcuts());
+  // 呼回键的真值在 Rust（注册过的才算数）：打开面板时以 Rust 为准校正一遍，
+  // 避免另一处改过之后 localStorage 与实际注册的键不一致。
+  useEffect(() => {
+    void api
+      .getBossRecall()
+      .then((binding) => {
+        if (!binding) return;
+        setBindings((prev) =>
+          prev.bossRecall === binding ? prev : { ...prev, bossRecall: binding },
+        );
+        saveShortcuts({ ...loadShortcuts(), bossRecall: binding });
+      })
+      .catch(() => {});
+  }, []);
   const [gestures, setGestures] = useState(() => loadGestures());
   /** 双击画集卡片的行为：immersive / normal / off（11-23 需求）。 */
   const [cardDoubleOpen, setCardDoubleOpen] = useState(() => {
@@ -110,6 +124,14 @@ export default function SettingsDialog({
       saveShortcuts(next);
       setRecording(null);
       setKeyHint("");
+      // 呼回键是系统级热键，要推给 Rust 注册；注册失败就回滚并提示。
+      if (recording === "bossRecall") {
+        void api.setBossRecall(binding).catch((error) => {
+          setKeyHint(`呼回键「${binding}」注册失败：${String(error)}`);
+          setBindings((prev) => ({ ...prev, [recording]: bindings[recording] }));
+          saveShortcuts({ ...next, [recording]: bindings[recording] });
+        });
+      }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);

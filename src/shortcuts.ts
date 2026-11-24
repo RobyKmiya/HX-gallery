@@ -29,7 +29,9 @@ export type ShortcutAction =
   | "nextArchive"
   | "favoritePage"
   | "favoriteLeft"
-  | "favoriteRight";
+  | "favoriteRight"
+  | "bossHide"
+  | "bossRecall";
 
 export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   nextPage: "下一页",
@@ -54,6 +56,8 @@ export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   favoritePage: "收藏当前页到散图夹",
   favoriteLeft: "收藏左页到散图夹",
   favoriteRight: "收藏右页到散图夹",
+  bossHide: "老板键：藏窗",
+  bossRecall: "老板键：全局呼回",
 };
 
 export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
@@ -79,6 +83,11 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
   favoritePage: "P",
   favoriteLeft: "[",
   favoriteRight: "]",
+  // 老板键（管理员 11-24：要能自定义绑定）。
+  // bossHide 是应用内按键（前端 matchShortcut）；bossRecall 是窗口藏起来之后的
+  // 系统级全局热键，前端收不到，必须由 Rust 注册——改动会同步推给 Rust。
+  bossHide: "Ctrl+H",
+  bossRecall: "Ctrl+Shift+H",
 };
 
 const STORAGE_KEY = "huaxia.shortcuts";

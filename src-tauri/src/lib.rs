@@ -1471,13 +1471,66 @@ fn set_desktop_wallpaper(
     Ok(())
 }
 
-/// 老板键第一步：把主窗整个藏起来（恢复走全局热键 Ctrl+Shift+H）。
+/// 老板键第一步：把主窗整个藏起来（恢复走全局热键，默认 Ctrl+Shift+H，可在设置里改）。
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "主窗口不存在".to_string())?;
     window.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
+}
+
+/// 老板键呼回键的持久化路径（config/shortcuts.json）。
+fn boss_recall_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("shortcuts.json"))
+}
+
+/// 读当前呼回键绑定；没有存过或读坏了就给默认 Ctrl+Shift+H。
+fn load_boss_recall(app: &tauri::AppHandle) -> String {
+    boss_recall_path(app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value["bossRecall"].as_str().map(str::to_string))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Ctrl+Shift+H".to_string())
+}
+
+/// 注册全局呼回键（注册失败返回 Err，调用方决定怎么提示）。
+fn register_boss_recall(app: &tauri::AppHandle, binding: &str) -> Result<(), String> {
+    let sc = binding.trim().to_lowercase();
+    if sc.is_empty() {
+        return Err("呼回键不能为空".to_string());
+    }
+    // 先摘掉旧的（失败忽略——可能本来就没注册上），再注册新的。
+    let _ = app.global_shortcut().unregister(load_boss_recall(app).to_lowercase().as_str());
+    app.global_shortcut()
+        .register(sc.as_str())
+        .map_err(|e| format!("注册全局热键失败: {e}"))
+}
+
+/// 呼回键当前绑定（设置面板展示用）。
+#[tauri::command]
+fn get_boss_recall(app: tauri::AppHandle) -> String {
+    load_boss_recall(&app)
+}
+
+/// 改呼回键：注册成功才落盘，失败不破坏现有绑定。
+#[tauri::command]
+fn set_boss_recall(app: tauri::AppHandle, binding: String) -> Result<(), String> {
+    register_boss_recall(&app, &binding)?;
+    if let Some(path) = boss_recall_path(&app) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(
+            &path,
+            serde_json::json!({ "bossRecall": binding.trim() }).to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// 窗口几何节流落盘（管理员 11-22：重启保持窗口大小/位置）。
@@ -1756,12 +1809,12 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .setup(move |app| {
             // 上次发布成功后补记基线：之后关窗不会再无脑抬版本
             release::settle_baseline_after_success(app.handle());
-            // 注册老板键呼回（Ctrl+Shift+H）：失败不拦启动，只记日志。
-            if let Err(error) = app
-                .global_shortcut()
-                .register("ctrl+shift+h")
+            // 注册老板键呼回（默认 Ctrl+Shift+H，可在设置里改；失败不拦启动，只记日志）。
             {
-                release::log_close_timing(app.handle(), &format!("注册老板键失败: {error}"), std::time::Duration::ZERO);
+                let binding = load_boss_recall(app.handle());
+                if let Err(error) = register_boss_recall(app.handle(), &binding) {
+                    release::log_close_timing(app.handle(), &format!("注册老板键失败: {error}"), std::time::Duration::ZERO);
+                }
             }
             // 恢复上次窗口几何（管理员 11-22：窗口大小要灵活，重启保持）
             if let Some(window) = app.get_webview_window("main") {
@@ -1803,6 +1856,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .invoke_handler(tauri::generate_handler![            get_library_state,
             set_window_decorations,
             hide_main_window,
+            get_boss_recall,
+            set_boss_recall,
             copy_reader_page,
             reveal_in_explorer,
             set_desktop_wallpaper,

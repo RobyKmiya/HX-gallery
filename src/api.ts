@@ -309,8 +309,15 @@ export const api = {
   setWindowDecorations: (decorated: boolean) =>
     invoke<void>("set_window_decorations", { decorated }),
 
-  /** 老板键第一步：把主窗藏起来。呼回用全局热键 Ctrl+Shift+H。 */
+  /** 老板键第一步：把主窗藏起来。呼回键默认 Ctrl+Shift+H，可在设置里改。 */
   hideMainWindow: () => invoke<void>("hide_main_window"),
+
+  /** 老板键全局呼回键：读当前绑定（Rust 侧持久化 + 注册）。 */
+  getBossRecall: () => invoke<string>("get_boss_recall"),
+
+  /** 改老板键全局呼回键（Rust 注册成功才落盘）。 */
+  setBossRecall: (binding: string) =>
+    invoke<void>("set_boss_recall", { binding }),
 
   /** 当前阅读页解码后写入系统剪贴板（动图取第一帧）。 */
   copyReaderPage: (archiveId: number, pageIndex: number) =>

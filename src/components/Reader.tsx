@@ -1291,15 +1291,15 @@ const archiveEpochRef = useRef(0);
         }
         return;
       }
-      if (
-        event.ctrlKey &&
-        !event.shiftKey &&
-        !event.altKey &&
-        event.key.toLowerCase() === "h"
-      ) {
+      // 老板键藏窗：绑定可在设置里改（默认 Ctrl+H）。
+      // 全局呼回键由 Rust 注册（设置面板里改），窗口藏起之后前端收不到。
+      if (matchShortcut(event, shortcutsRef.current) === "bossHide") {
         event.preventDefault();
         void api.hideMainWindow();
-        onNotify("窗口已隐藏（Ctrl+Shift+H 呼回）", "info");
+        onNotify(
+          `窗口已隐藏（${shortcutsRef.current.bossRecall || "Ctrl+Shift+H"} 呼回）`,
+          "info",
+        );
         return;
       }
 
