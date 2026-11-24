@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type { LibraryState } from "./types";
-import LibraryView from "./components/LibraryView";
 import Welcome from "./components/Welcome";
+import WorkspaceTabs from "./components/WorkspaceTabs";
 import "./App.css";
 
 type BootPhase = "booting" | "welcome" | "library";
@@ -95,8 +95,7 @@ export default function App() {
 
   if (phase === "library" && library?.libraryPath) {
     return (
-      <LibraryView
-        key={library.libraryPath}
+      <WorkspaceTabs
         library={library}
         onLibraryChanged={refreshLibrary}
         onSwitchLibrary={switchLibrary}

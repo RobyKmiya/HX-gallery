@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { notifyModalOpen, notifyModalClose } from "../modalBus";
 import type { LibraryState, ViewMode } from "../types";
 import { formatBytes } from "../format";
 import {
@@ -72,6 +73,12 @@ export default function SettingsDialog({
 }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
   const [bindings, setBindings] = useState(() => loadShortcuts());
+  // 模态让位（P1 工作台）：原生子 webview 盖不住 React 模态，
+  // 打开/关闭时广播，让内建浏览器 host 整体隐藏/恢复。
+  useEffect(() => {
+    notifyModalOpen();
+    return () => notifyModalClose();
+  }, []);
   // 呼回键的真值在 Rust（注册过的才算数）：打开面板时以 Rust 为准校正一遍，
   // 避免另一处改过之后 localStorage 与实际注册的键不一致。
   useEffect(() => {

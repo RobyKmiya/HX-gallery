@@ -319,6 +319,23 @@ export const api = {
   setBossRecall: (binding: string) =>
     invoke<void>("set_boss_recall", { binding }),
 
+  // ---------- 内置浏览器（工作台标签用；方案 docs/浏览器内置阅读器方案.md） ----------
+
+  /** 挂载内置浏览器引擎（宿主 = main 窗），返回 label。 */
+  d2EmbedOpen: (args: { url: string; adblock?: boolean }) =>
+    invoke<string>("d2_embed_open", args),
+
+  /** 同步 React 占位矩形（逻辑像素）。 */
+  d2EmbedSync: (args: { label: string; x: number; y: number; w: number; h: number }) =>
+    invoke<void>("d2_embed_sync", args),
+
+  /** 整体显隐（切标签 / 模态让位）。 */
+  d2EmbedShow: (args: { label: string; visible: boolean }) =>
+    invoke<void>("d2_embed_show", args),
+
+  /** 拆除（只关 webview，不碰主窗）。 */
+  d2EmbedClose: (label: string) => invoke<void>("d2_embed_close", { label }),
+
   /** 当前阅读页解码后写入系统剪贴板（动图取第一帧）。 */
   copyReaderPage: (archiveId: number, pageIndex: number) =>
     invoke<void>("copy_reader_page", { archiveId, pageIndex }),
