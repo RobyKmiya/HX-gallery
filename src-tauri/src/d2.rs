@@ -1287,6 +1287,102 @@ pub fn d2_open(
     Ok(())
 }
 
+// ---------- 内置模式（P0 探针）：浏览器引擎挂进 main 窗 ----------
+
+/// 打开内置浏览器（宿主 = main 窗）。返回引擎 label，前端拿它做 embed 同步。
+#[tauri::command]
+pub fn d2_embed_open(
+    app: AppHandle,
+    url: String,
+    adblock: Option<bool>,
+    home: Option<String>,
+) -> Result<String, String> {
+    let parsed = normalize_url(&url)?;
+    crate::browser::start_watchdog(&app);
+    if let Some(home) = home.as_deref().map(str::trim) {
+        if !home.is_empty() {
+            if let Ok(mut guard) = HOST_HOME.lock() {
+                *guard = Some(home.to_string());
+            }
+        }
+    }
+    let home = HOST_HOME
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| "https://e-hentai.org/".to_string());
+    let host = app
+        .get_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    let label = format!("d2-embed-{}", uuid::Uuid::new_v4().simple());
+    let app_for_thread = app.clone();
+    let label_for_thread = label.clone();
+    let adblock = adblock.unwrap_or(true);
+    // add_child 不能在同步命令回调里跑（会死锁），照旧线程 + 日志回执。
+    std::thread::spawn(move || {
+        match open_browser_window_embedded(
+            &app_for_thread,
+            parsed,
+            label_for_thread,
+            adblock,
+            &home,
+            host,
+        ) {
+            Ok(opened) => log(&app_for_thread, &format!("内置浏览器已挂载：{opened}")),
+            Err(error) => {
+                log(&app_for_thread, &format!("内置挂载失败：{error}"));
+                let _ = app_for_thread.emit("d2://error", error);
+            }
+        }
+    });
+    Ok(label)
+}
+
+/// 内置模式摆位/显隐/拆除（label 由 d2_embed_open 返回）。
+#[tauri::command]
+pub fn d2_embed_sync(label: String, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    crate::browser::embed_sync(&label, x, y, w, h)
+}
+
+#[tauri::command]
+pub fn d2_embed_show(label: String, visible: bool) -> Result<(), String> {
+    crate::browser::embed_show(&label, visible)
+}
+
+#[tauri::command]
+pub fn d2_embed_close(label: String) -> Result<(), String> {
+    crate::browser::embed_close(&label)
+}
+
+/// open_browser_window 的内置版：同一套 opts，宿主换成 main 窗。
+fn open_browser_window_embedded(
+    app: &AppHandle,
+    url: tauri::Url,
+    label: String,
+    adblock: bool,
+    home: &str,
+    host: tauri::Window,
+) -> Result<String, String> {
+    let app_for_log = app.clone();
+    let home_url = tauri::Url::parse(home)
+        .unwrap_or_else(|_| tauri::Url::parse("https://e-hentai.org/").expect("常量 URL 合法"));
+    crate::browser::open_embedded(
+        app,
+        url,
+        label,
+        crate::browser::BrowserOptions {
+            title: "画匣 · 内建浏览器".to_string(),
+            home: home_url,
+            extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
+            userscript_store: crate::userscripts::store_dir(app),
+            size: (900.0, 600.0),
+            adblock,
+            log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),
+        },
+        host,
+    )
+}
+
 /// 读当前浏览窗口的地址（供「抓取当前页」一键使用，免去重新粘贴）。
 #[tauri::command]
 pub fn d2_current_url() -> Result<String, String> {

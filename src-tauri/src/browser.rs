@@ -181,6 +181,11 @@ struct BrowserState {
     settings_view: Option<Webview>,
     /// 上一次推给工具栏的状态 JSON（去重，避免 200ms 空转写穿）。
     last_pushed: String,
+    /// 内置模式（P0 探针）：宿主不是独立窗口而是 main 窗，
+    /// 摆位跟随 React 占位矩形（embed_rect）而非整窗。
+    embedded: bool,
+    /// 内置占位矩形（逻辑像素 x, y, w, h）；None = 前端还没同步过，先不摆位。
+    embed_rect: Option<(f64, f64, f64, f64)>,
 }
 
 struct TabRecord {
@@ -559,12 +564,35 @@ pub fn open(
     label: String,
     opts: BrowserOptions,
 ) -> Result<String, String> {
+    open_hosted(app, url, label, opts, None)
+}
+
+/// 内置模式：宿主为已存在的窗口（P0 = main 窗）。webview 挂进宿主，
+/// 尺寸/显隐由前端占位矩形驱动（d2_embed_sync / d2_embed_show）。
+pub fn open_embedded(
+    app: &AppHandle,
+    url: Url,
+    label: String,
+    opts: BrowserOptions,
+    host: Window,
+) -> Result<String, String> {
+    open_hosted(app, url, label, opts, Some(host))
+}
+
+fn open_hosted(
+    app: &AppHandle,
+    url: Url,
+    label: String,
+    opts: BrowserOptions,
+    host: Option<Window>,
+) -> Result<String, String> {
     if browser_exists(&label) {
         return Err("该浏览器窗口已在运行".to_string());
     }
 
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
     let app_for_window = app.clone();
+    let host_for_thread = host;
     let userscript_store = opts.userscript_store.clone();
     // 广告拦截开关跟随本次打开（设置里改完重开浏览窗口生效）。
     set_adblock_enabled(opts.adblock);
@@ -575,18 +603,31 @@ pub fn open(
     std::thread::spawn(move || {
         let label = label_for_thread;
         let run = || -> Result<(), String> {
-            crumb(format!("建窗开始 {label}"));
-            let window = tauri::WindowBuilder::new(&app_for_window, &label)
-                .title(opts.title.clone())
-                .inner_size(opts.size.0, opts.size.1)
-                .build()
-                .map_err(|error| format!("打开浏览窗口失败：{error}"))?;
+            let embedded = host_for_thread.is_some();
+            let window = match host_for_thread.clone() {
+                Some(host) => {
+                    crumb("内置模式：宿主已存在");
+                    host
+                }
+                None => {
+                    crumb(format!("建窗开始 {label}"));
+                    tauri::WindowBuilder::new(&app_for_window, &label)
+                        .title(opts.title.clone())
+                        .inner_size(opts.size.0, opts.size.1)
+                        .build()
+                        .map_err(|error| format!("打开浏览窗口失败：{error}"))?
+                }
+            };
             crumb("窗口已建好，准备读尺寸");
 
             let scale = window.scale_factor().unwrap_or(1.0);
             let inner = window.inner_size().unwrap_or_default();
-            let width = inner.width as f64 / scale;
-            let height = inner.height as f64 / scale;
+            // 内置模式：React 马上会同步真实占位矩形，先按约定尺寸兜底摆位。
+            let (width, height) = if embedded {
+                (opts.size.0, opts.size.1)
+            } else {
+                (inner.width as f64 / scale, inner.height as f64 / scale)
+            };
 
             // 工具栏：本仓公共页（真实占位，不遮内容；与引擎走队列契约）。
             crumb("建工具栏 webview");
@@ -642,6 +683,8 @@ pub fn open(
                 // 没有文件时沿用宿主传进来的主页（D2 面板设置的那一个）。
                 settings: load_settings_with_fallback(Some(opts.home.as_str())),
                 settings_view: None,
+                embedded,
+                embed_rect: None,
                 opts,
                 last_pushed: String::new(),
             };
@@ -1082,6 +1125,10 @@ pub fn close_tab(label: &str, tab_id: &str) -> Result<(), String> {
 
 /// 关闭整个浏览器窗口（状态在销毁事件里清理）。
 pub fn close_browser(label: &str) -> Result<(), String> {
+    // 内置模式：宿主是 main 窗，绝不能关窗——只拆 webview + 摘状态。
+    if is_embedded(label) {
+        return embed_close(label);
+    }
     // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
     // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
     // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
@@ -2744,15 +2791,25 @@ fn push_state(label: &str) {
     let _ = toolbar.eval(&format!("window.__xkState = {state_json};"));
 }
 
-/// 窗口尺寸变化时重排工具栏与全部内容标签。
-fn reposition(label: &str) {
-    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
-    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
-    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
-    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
-    let Some((window, toolbar, tabs, settings_view)) = with_state(label, |state| {
+fn is_embedded(label: &str) -> bool {
+    with_state(label, |state| state.embedded).unwrap_or(false)
+}
+
+/// 内置模式：同步 React 占位矩形（逻辑像素），随即重摆。
+pub fn embed_sync(label: &str, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    with_state(label, |state| {
+        state.embedded = true;
+        state.embed_rect = Some((x, y, w, h));
+    })
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    reposition(label);
+    Ok(())
+}
+
+/// 内置模式：整体显/隐（切标签、开模态时用；原生子 webview 盖不住 React 模态）。
+pub fn embed_show(label: &str, visible: bool) -> Result<(), String> {
+    let parts = with_state(label, |state| {
         (
-            state.window.clone(),
             state.toolbar.clone(),
             state
                 .tabs
@@ -2762,20 +2819,103 @@ fn reposition(label: &str) {
             state.settings_view.clone(),
         )
     })
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    let (toolbar, tabs, settings_view) = parts;
+    let apply = |webview: &Webview| {
+        if visible {
+            let _ = webview.show();
+        } else {
+            let _ = webview.hide();
+        }
+    };
+    apply(&toolbar);
+    for webview in &tabs {
+        apply(webview);
+    }
+    if let Some(view) = &settings_view {
+        apply(view);
+    }
+    Ok(())
+}
+
+/// 内置模式：整体拆除（只关 webview，绝不碰宿主窗口），并从状态表摘除。
+pub fn embed_close(label: &str) -> Result<(), String> {
+    let parts = with_state(label, |state| {
+        (
+            state.toolbar.clone(),
+            state
+                .tabs
+                .iter()
+                .map(|tab| tab.webview.clone())
+                .collect::<Vec<_>>(),
+            state.settings_view.clone(),
+        )
+    })
+    .ok_or_else(|| "浏览器不存在".to_string())?;
+    let (toolbar, tabs, settings_view) = parts;
+    let _ = toolbar.close();
+    for webview in tabs {
+        let _ = webview.close();
+    }
+    if let Some(view) = settings_view {
+        let _ = view.close();
+    }
+    if let Ok(mut map) = BROWSERS.lock() {
+        map.remove(label);
+    }
+    Ok(())
+}
+
+/// 窗口尺寸变化时重排工具栏与全部内容标签。
+fn reposition(label: &str) {
+    // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
+    // 调用会同步派发到主线程并阻塞等结果；主线程的页面回调此时可能正等着拿
+    // BROWSERS 锁 → 两边互等，整窗白屏卡死。铁律：持锁期间绝不碰 webview，
+    // 锁内只把句柄/数据拿出来，动作全部放到锁外执行。
+    let Some((window, toolbar, tabs, settings_view, rect)) = with_state(label, |state| {
+        (
+            state.window.clone(),
+            state.toolbar.clone(),
+            state
+                .tabs
+                .iter()
+                .map(|tab| tab.webview.clone())
+                .collect::<Vec<_>>(),
+            state.settings_view.clone(),
+            if state.embedded {
+                state.embed_rect
+            } else {
+                None
+            },
+        )
+    })
     else {
         return;
     };
-    // scale_factor / inner_size 同样走主线程，一并放到锁外。
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let Ok(inner) = window.inner_size() else {
-        return;
+    // 内置模式：占位矩形（逻辑像素 x,y,w,h）驱动摆位；没同步过就先不摆。
+    let (origin_x, origin_y, width, height) = match rect {
+        Some((x, y, w, h)) => (x, y, w, h),
+        None => {
+            if is_embedded(label) {
+                return;
+            }
+            // scale_factor / inner_size 同样走主线程，一并放到锁外。
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let Ok(inner) = window.inner_size() else {
+                return;
+            };
+            (
+                0.0,
+                0.0,
+                inner.width as f64 / scale,
+                inner.height as f64 / scale,
+            )
+        }
     };
-    let width = inner.width as f64 / scale;
-    let height = inner.height as f64 / scale;
-    let _ = toolbar.set_position(LogicalPosition::new(0.0, 0.0));
+    let _ = toolbar.set_position(LogicalPosition::new(origin_x, origin_y));
     let _ = toolbar.set_size(LogicalSize::new(width, TOOLBAR_HEIGHT));
     for webview in tabs {
-        let _ = webview.set_position(LogicalPosition::new(0.0, TOOLBAR_HEIGHT));
+        let _ = webview.set_position(LogicalPosition::new(origin_x, origin_y + TOOLBAR_HEIGHT));
         let _ = webview.set_size(LogicalSize::new(width, height - TOOLBAR_HEIGHT));
     }
     // 设置浮层铺满整个窗口，窗口拉伸时要跟着长。
