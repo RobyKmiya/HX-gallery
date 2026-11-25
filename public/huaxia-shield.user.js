@@ -2,7 +2,7 @@
 // @name         画匣盾 · 弹窗/广告跳转过滤
 // @name:zh-CN   画匣盾 · 弹窗/广告跳转过滤
 // @namespace    huaxia://shield
-// @version      1.1.0
+// @version      1.2.0
 // @description  画匣内置：挡广告弹窗/广告弹层、静默 alert/confirm、清明显广告位；轻量无依赖
 // @author       画匣
 // @match        https://*/*
@@ -236,10 +236,23 @@
     var picking = false;
     var current = null;
     var overlay = null;
+    // 全屏透明遮罩：选中模式下由它吃掉所有鼠标事件，<a> 收不到点击就不会跳转
+    // （1.1.61 的坑：直接给 document 挂 click 兜不住链接导航）。
+    var shield = null;
+
+    function pickAt(x, y) {
+      var els = document.elementsFromPoint(x, y);
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (!el || el === shield || el === overlay || el === dot) continue;
+        if (el === document.documentElement || el === document.body) continue;
+        return el;
+      }
+      return null;
+    }
 
     function highlight(el) {
-      if (!el || el === dot) return;
-      if (current === el) return;
+      if (!el || el === current) return;
       current = el;
       if (!overlay) {
         overlay = document.createElement("div");
@@ -261,27 +274,22 @@
 
     function onMove(event) {
       if (!picking) return;
-      var el = document.elementFromPoint(event.clientX, event.clientY);
-      if (el && el !== dot && el !== overlay) highlight(el);
+      var el = pickAt(event.clientX, event.clientY);
+      if (el) highlight(el);
     }
 
-    function stopPicking() {
-      picking = false;
-      current = null;
-      if (overlay) overlay.style.display = "none";
-      dot.style.transform = "";
-      document.removeEventListener("mousemove", onMove, true);
-      document.removeEventListener("click", onClick, true);
-      document.removeEventListener("keydown", onKey, true);
-      document.body.style.cursor = "";
+    function onMouseDown(event) {
+      if (!picking) return;
+      event.preventDefault();
+      event.stopPropagation();
     }
 
     function onClick(event) {
       if (!picking) return;
       event.preventDefault();
       event.stopPropagation();
-      var el = current || document.elementFromPoint(event.clientX, event.clientY);
-      if (!el || el === dot || el === overlay) return;
+      var el = pickAt(event.clientX, event.clientY) || current;
+      if (!el) return;
       var selector = selectorOf(el);
       if (!selector) return;
       el.style.display = "none";
@@ -303,19 +311,45 @@
       }
     }
 
+    function startPicking() {
+      if (picking) return;
+      picking = true;
+      current = null;
+      if (!shield) {
+        shield = document.createElement("div");
+        shield.id = "__hxPickerShield";
+        shield.style.cssText =
+          "position:fixed;inset:0;z-index:2147483645;background:transparent;cursor:crosshair;";
+        shield.addEventListener("mousemove", onMove, true);
+        shield.addEventListener("mousedown", onMouseDown, true);
+        shield.addEventListener("click", onClick, true);
+        document.documentElement.appendChild(shield);
+      }
+      if (overlay) overlay.style.display = "none";
+      document.addEventListener("keydown", onKey, true);
+      dot.style.transform = "scale(1.15)";
+      dot.title = "元素选择中：点元素屏蔽，Esc 退出";
+    }
+
+    function stopPicking() {
+      if (!picking) return;
+      picking = false;
+      current = null;
+      if (shield) {
+        shield.remove();
+        shield = null;
+      }
+      if (overlay) overlay.style.display = "none";
+      dot.style.transform = "";
+      dot.title = "画匣元素选择器：点击后点网页元素永久屏蔽（Esc 退出）";
+      document.removeEventListener("keydown", onKey, true);
+    }
+
     dot.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
-      if (picking) {
-        stopPicking();
-        return;
-      }
-      picking = true;
-      dot.style.transform = "scale(1.15)";
-      document.body.style.cursor = "crosshair";
-      document.addEventListener("mousemove", onMove, true);
-      document.addEventListener("click", onClick, true);
-      document.addEventListener("keydown", onKey, true);
+      if (picking) stopPicking();
+      else startPicking();
     });
 
     function mount() {
