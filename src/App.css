@@ -7959,9 +7959,70 @@ body.is-splitting {
 }
 
 /* ---------- 浏览器新页（React 组件，1.1.49） ---------- */
-.new-tab {
+.new-tab-wrap {
   position: absolute;
   inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.new-tab-toolbar {
+  flex: 0 0 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  background: var(--bg-elev, #1c1c22);
+  border-bottom: 1px solid var(--border, #2c2c34);
+}
+
+.new-tab-toolbar button {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #9a9aa4);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.new-tab-toolbar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.new-tab-toolbar button.is-active {
+  color: #7c93ff;
+}
+
+.new-tab-toolbar-addr {
+  flex: 1 1 auto;
+  margin-left: 4px;
+}
+
+.new-tab-toolbar-addr input {
+  width: 100%;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border, #2c2c34);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text, #e8e8ee);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.new-tab-toolbar-addr input:focus {
+  border-color: #7c93ff;
+}
+
+.new-tab {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -8204,4 +8265,115 @@ body.is-splitting {
   border-radius: 10px;
   border: 1px dashed var(--border);
   background: rgba(0, 0, 0, 0.2);
+}
+
+/* ---------- 新页：网站收藏夹（1.1.52） ---------- */
+.new-tab-bookmarks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.new-tab-bookmark {
+  position: relative;
+}
+
+.new-tab-bookmark-main {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(16, 18, 24, 0.66);
+  color: #e8e8ee;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.new-tab-bookmark-main:hover {
+  border-color: rgba(124, 147, 255, 0.6);
+}
+
+.new-tab-bookmark-glyph {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(124, 147, 255, 0.2);
+  color: #c7d2ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.new-tab-bookmark-name {
+  font-size: 11.5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-tab-bookmark-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.new-tab-bookmark:hover .new-tab-bookmark-remove {
+  opacity: 1;
+}
+
+.new-tab-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.new-tab-add input {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 12px;
+  outline: none;
+}
+
+.new-tab-add input:focus {
+  border-color: #7c93ff;
+}
+
+.new-tab-add > button {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(16, 18, 24, 0.6);
+  color: #cfd3db;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.new-tab-add-btn {
+  border-style: dashed !important;
+  border-color: rgba(255, 255, 255, 0.25) !important;
 }
