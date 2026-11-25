@@ -103,6 +103,8 @@ interface LibraryViewProps {
   /** 新页发来的导航意图；带 token，值变了就触发一次。 */
   navRequest?: (NavIntent & { token: number }) | null;
   onNavHandled?: () => void;
+  /** 打开画集：有它就走「新开 gallery 标签」，不再用主页的 readerCard。 */
+  onOpenGallery?: (card: ArchiveCardData) => void;
   onSwitchLibrary: () => void;
 }
 
@@ -243,6 +245,7 @@ export default function LibraryView({
   startupTarget = null,
   navRequest = null,
   onNavHandled,
+  onOpenGallery,
   onSwitchLibrary,
 }: LibraryViewProps) {
   const [items, setItems] = useState<ArchiveCardData[]>([]);
@@ -303,6 +306,21 @@ export default function LibraryView({
   const importDialogRef = useRef<ImportDialogHandle>(null);
   const [selected, setSelected] = useState<ArchiveCardData | null>(null);
   const [readerCard, setReaderCard] = useState<ArchiveCardData | null>(null);
+
+  /**
+   * 打开画集：优先新开 gallery 标签（主页保持原样）；没有回调时才退回旧的整屏 readerCard。
+   * 内部「连读切本」不经过这里，继续用 setReaderCard，互不干扰。
+   */
+  const openReader = useCallback(
+    (card: ArchiveCardData) => {
+      if (onOpenGallery) {
+        onOpenGallery(card);
+        return;
+      }
+      setReaderCard(card);
+    },
+    [onOpenGallery],
+  );
   /** 合集连读：正在读的合集成员顺序（archiveId 列表）。从合集面板打开时设置。 */
   const [readerSeriesIds, setReaderSeriesIds] = useState<number[] | null>(
     null,
@@ -3398,10 +3416,7 @@ export default function LibraryView({
                             return;
                           }
                           setSelected(null);
-                          setReaderEntryMode(
-                            mode === "normal" ? "normal" : "immersive",
-                          );
-                          setReaderCard(next);
+                          openReader(next);
                         }}
                         selectionMode={selectionMode}
                         selected={selectedIds.includes(card.id)}
@@ -3653,7 +3668,7 @@ export default function LibraryView({
                 collections={collections}
                 onClose={() => setSelected(null)}
                 onRead={() => {
-                  setReaderCard(selected);
+                  if (selected) openReader(selected);
                   setSelected(null);
                 }}
                 onNotify={notify}
@@ -3745,7 +3760,7 @@ export default function LibraryView({
                 setReaderSeriesIds(
                   openSeries.items.map((entry) => entry.archiveId),
                 );
-                setReaderCard(card);
+                openReader(card);
                 setOpenSeries(null);
               } catch (error) {
                 notify(`打开失败：${String(error)}`, "error");
@@ -3975,7 +3990,7 @@ export default function LibraryView({
               <button
                 type="button"
                 onClick={() => {
-                  setReaderCard(cardMenu.card);
+                  openReader(cardMenu.card);
                   closeCardMenu();
                 }}
               >

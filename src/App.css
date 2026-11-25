@@ -8376,3 +8376,28 @@ body.is-splitting {
   border-style: dashed !important;
   border-color: rgba(255, 255, 255, 0.25) !important;
 }
+
+/* ---------- 画廊标签（1.1.54）：Reader 从全屏 fixed 降级为容器内绝对定位 ---------- */
+.gallery-tab {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.gallery-tab .reader {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.gallery-tab-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}

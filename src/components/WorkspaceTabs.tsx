@@ -19,6 +19,7 @@ import { api } from "../api";
 import type { LibraryState, NavIntent } from "../types";
 import LibraryView from "./LibraryView";
 import NewTab from "./NewTab";
+import GalleryTab from "./GalleryTab";
 import {
   TAB_SETTINGS_EVENT,
   readPersistedTabs,
@@ -36,10 +37,13 @@ export interface WorkTab {
   title: string;
   /** 仅浏览器标签用：null/undefined = 新页，有值 = 加载该网址的 webview。 */
   url?: string | null;
+  /** 仅 gallery 标签用：要打开的画集 id。 */
+  archiveId?: number;
 }
 
 export type TabKind =
   | "home"
+  | "gallery"
   | "browser"
   | "tags"
   | "trash"
@@ -52,6 +56,7 @@ const SINGLETON: TabKind[] = ["home", "tags", "trash", "release", "settings"];
 
 const TAB_GLYPH: Record<TabKind, string> = {
   home: "🏠",
+  gallery: "📖",
   browser: "🌐",
   tags: "#️⃣",
   trash: "🗑",
@@ -62,6 +67,7 @@ const TAB_GLYPH: Record<TabKind, string> = {
 
 const TAB_TITLE: Record<TabKind, string> = {
   home: "主页",
+  gallery: "阅读",
   browser: "新页",
   tags: "标签中心",
   trash: "回收站",
@@ -91,7 +97,10 @@ function initialTabs(): WorkTab[] {
     const persisted = readPersistedTabs();
     if (persisted) {
       const kinds = persisted.kinds
-        .filter((kind): kind is TabKind => isTabKind(kind) && kind !== "browser")
+        .filter(
+          (kind): kind is TabKind =>
+            isTabKind(kind) && kind !== "browser" && kind !== "gallery",
+        )
         .filter((kind, index, list) => kind === "home" || list.indexOf(kind) === index);
       const ordered = (["home"] as TabKind[])
         .concat(kinds.filter((kind) => kind !== "home"))
@@ -281,15 +290,24 @@ export default function WorkspaceTabs({
     }
     const kind = tabs.find((tab) => tab.id === activeId)?.kind ?? "home";
     savePersistedTabs({
-      kinds: tabs.filter((tab) => tab.kind !== "browser").map((tab) => tab.kind),
+      kinds: tabs
+        .filter((tab) => tab.kind !== "browser" && tab.kind !== "gallery")
+        .map((tab) => tab.kind),
       active: kind,
     });
   }, [tabs, activeId]);
 
   /** 统一开标签入口：单例已存在则召回；可多开的按「新开页行为」决定新建还是复用。 */
-  const openTab = (kind: TabKind, title?: string, forceNew = false) => {
+  const openTab = (
+    kind: TabKind,
+    title?: string,
+    forceNew = false,
+    archiveId?: number,
+  ) => {
+    // gallery 标签永远新开：每本画集要独立 Reader 实例，不能被「复用」合并。
     const replaceable =
-      SINGLETON.includes(kind) || (!forceNew && settings.newBehavior === "reuse");
+      kind !== "gallery" &&
+      (SINGLETON.includes(kind) || (!forceNew && settings.newBehavior === "reuse"));
     if (!forceNew && replaceable) {
       const existing = tabs.find((tab) => tab.kind === kind);
       if (existing) {
@@ -301,10 +319,16 @@ export default function WorkspaceTabs({
       .toString(36)
       .slice(2, 6)}`;
     const count = tabs.filter((tab) => tab.kind === kind).length;
-    const name = title ?? (count > 0 ? `${TAB_TITLE[kind]} ${count + 1}` : TAB_TITLE[kind]);
-    setTabs((prev) => [...prev, { id, kind, title: name }]);
+    const name =
+      title ?? (count > 0 ? `${TAB_TITLE[kind]} ${count + 1}` : TAB_TITLE[kind]);
+    setTabs((prev) => [...prev, { id, kind, title: name, archiveId }]);
     setActiveId(id);
     return id;
+  };
+
+  /** 点开画集：新开一个 gallery 标签，主页原样保留。 */
+  const openGallery = (card: { id: number; title: string }) => {
+    openTab("gallery", card.title || `画集 ${card.id}`, true, card.id);
   };
 
   const addBrowserTab = () => {
@@ -513,6 +537,7 @@ export default function WorkspaceTabs({
             startupTarget={startupTargetRef.current}
             navRequest={navRequest}
             onNavHandled={() => setNavRequest(null)}
+            onOpenGallery={openGallery}
           />
         </div>
         {/* 浏览器标签：url 空 = React 新页；有 url = 原生子 webview。 */}
@@ -546,6 +571,21 @@ export default function WorkspaceTabs({
                   onBrowse={(url) => setTabUrl(tab.id, url)}
                 />
               )}
+            </div>
+          ))}
+        {/* 画廊标签：每本一个独立 Reader 实例，不共用主页的 readerCard。 */}
+        {tabs
+          .filter((tab) => tab.kind === "gallery")
+          .map((tab) => (
+            <div
+              key={tab.id}
+              style={{
+                position: "absolute",
+                inset: 0,
+                visibility: activeId === tab.id ? "visible" : "hidden",
+              }}
+            >
+              <GalleryTab archiveId={tab.archiveId ?? 0} onClose={() => closeTab(tab.id)} />
             </div>
           ))}
       </div>
