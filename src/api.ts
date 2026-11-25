@@ -71,6 +71,35 @@ export const api = {
   /** 读当前浏览窗口地址，供「抓取当前页」一键使用（没开窗口返回空串）。 */
   d2CurrentUrl: () => invoke<string>("d2_current_url"),
 
+  /** 网络画集：解析作品页（标题 / 标签 / 页数），不下载。 */
+  netDlPreview: (url: string) =>
+    invoke<{
+      running: boolean;
+      finished: boolean;
+      error: string;
+      stage: string;
+      done: number;
+      total: number;
+      title: string;
+      tags: [string, string][];
+      path: string;
+    }>("net_dl_preview", { url }),
+  /** 网络画集：开始下载整本并入库。 */
+  netDlStart: (url: string) => invoke<void>("net_dl_start", { url }),
+  netDlStatus: () =>
+    invoke<{
+      running: boolean;
+      finished: boolean;
+      error: string;
+      stage: string;
+      done: number;
+      total: number;
+      title: string;
+      tags: [string, string][];
+      path: string;
+    }>("net_dl_status"),
+  netDlCancel: () => invoke<void>("net_dl_cancel"),
+
   /** 打开独立的下载面板（范围 / 并发 / 打包都在那儿定）。 */
   dlOpenPanel: () => invoke<void>("dl_open_panel"),
 

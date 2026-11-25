@@ -277,3 +277,14 @@ export function CheckIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** 下载到托盘：向下箭头 + 底部接盘（网络画集入口用）。 */
+export function DownloadIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 3v11" />
+      <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
+      <path d="M4 17v2.5h16V17" />
+    </svg>
+  );
+}

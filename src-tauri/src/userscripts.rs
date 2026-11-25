@@ -824,7 +824,13 @@ pub fn gm_set_script_enabled(app: AppHandle, id: String, enabled: bool) -> Resul
 
 /// 用 Windows 自带 curl 拉一段文本（脚本安装源）。
 fn curl_download_text(url: &str) -> Result<String, String> {
-    let output = std::process::Command::new("curl")
+    let mut cmd = std::process::Command::new("curl");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd
         .arg("-sL")
         .arg("--max-time")
         .arg("60")

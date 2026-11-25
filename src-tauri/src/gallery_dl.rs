@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, Webview};
 
 /// 下载与翻页都用这套 UA：不少图站会按 UA 拒绝 curl 默认值。
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+pub(crate) const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 /// 并发上限。再高只会被图站限速，反而更容易触发风控。
@@ -517,6 +517,17 @@ fn curl_command() -> Command {
         command.creation_flags(0x0800_0000);
     }
     command.arg("-s").arg("-L");
+    // 图站高峰期限速/抖动很常见：单次失败就红叉，观感极差（Edge 里其实也在重试）。
+    // 统一给所有下载请求挂上自动重试与快速连接超时——连不上 20 秒就换一次，
+    // 最多重试 3 回，指数退避由 curl 自己管。
+    command
+        .arg("--retry")
+        .arg("3")
+        .arg("--retry-delay")
+        .arg("2")
+        .arg("--retry-all-errors")
+        .arg("--connect-timeout")
+        .arg("20");
     command
 }
 
@@ -573,7 +584,7 @@ fn curl_file(webview: &Webview, url: &str, referer: &str, dest: &Path) -> Result
 }
 
 /// 从 WebView 里问该 URL 对应的 cookie，并按 host 缓存。
-fn cookie_header(webview: &Webview, url: &str) -> String {
+pub(crate) fn cookie_header(webview: &Webview, url: &str) -> String {
     let host = tauri::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(|host| host.to_string()))

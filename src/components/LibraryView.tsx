@@ -56,11 +56,11 @@ import Reader from "./Reader";
 import Splitter from "./Splitter";
 import ReleasePanel from "./ReleasePanel";
 import D2Panel from "./D2Panel";
+import NetGalleryDialog from "./NetGalleryDialog";
 import TagCenter from "./TagCenter";
 import Toast, { type ToastData, type ToastKind } from "./Toast";
 import TrashCenter from "./TrashCenter";
-import {
-  AlertIcon,
+import {AlertIcon,
   BookIcon,
   CheckIcon,
   ChevronLeftIcon,
@@ -81,8 +81,7 @@ import {
   StarIcon,
   SwapIcon,
   TagIcon,
-  TrashIcon,
-} from "./Icons";
+  TrashIcon, DownloadIcon } from "./Icons";
 
 interface NavSnapshot {
   collectionId: number | null;
@@ -358,6 +357,8 @@ export default function LibraryView({
   const [filterOpen, setFilterOpen] = useState(false);
   const [tagQuery, setTagQuery] = useState("");
   const [tagCenterOpen, setTagCenterOpen] = useState(false);
+  /** 网络画集下载弹窗（管理员 2026-11-25：按链接直接下书）。 */
+  const [netDlOpen, setNetDlOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
@@ -2157,6 +2158,16 @@ export default function LibraryView({
 
           <button
             type="button"
+            className="nav-item"
+            onClick={() => setNetDlOpen(true)}
+            title="贴作品页链接，下载整本并入库"
+          >
+            <DownloadIcon />
+            <span className="nav-label">网络画集</span>
+          </button>
+
+          <button
+            type="button"
             className="nav-item nav-group-toggle"
             onClick={toggleCollectionsCollapsed}
             aria-expanded={!collectionsCollapsed}
@@ -3804,6 +3815,16 @@ export default function LibraryView({
             );
           })()}
         </>
+      )}
+
+      {netDlOpen && (
+        <NetGalleryDialog
+          onClose={() => setNetDlOpen(false)}
+          onDone={() => {
+            setNetDlOpen(false);
+            void onLibraryChanged?.();
+          }}
+        />
       )}
 
       {settingsOpen && (

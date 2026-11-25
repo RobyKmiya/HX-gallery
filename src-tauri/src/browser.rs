@@ -2504,6 +2504,14 @@ fn curl_xhr(
     let head_path = dir.join(format!("{stem}.hdr"));
 
     let mut command = std::process::Command::new("curl");
+    // GUI 子系统进程拉控制台程序，不带 CREATE_NO_WINDOW 每次都会闪一个黑窗口；
+    // 打开网页标签时 GM 请求成片并发，用户看到的就是满屏 curl.exe 窗口。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command
         // -S 才把错误打到 stderr（-s 会连错误一起吞掉），错误文本要给页面。
         .arg("-sS")

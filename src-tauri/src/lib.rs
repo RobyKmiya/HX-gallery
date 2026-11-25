@@ -5,6 +5,7 @@ mod browser;
 mod container;
 mod d2;
 mod gallery_dl;
+mod netdl;
 pub mod db;
 pub mod fsutil;
 pub mod importer;
@@ -1972,7 +1973,11 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             gallery_dl::dl_status,
             gallery_dl::dl_cancel,
             gallery_dl::dl_pick_folder,
-            gallery_dl::dl_open_folder
+            gallery_dl::dl_open_folder,
+            netdl::net_dl_preview,
+            netdl::net_dl_start,
+            netdl::net_dl_status,
+            netdl::net_dl_cancel
         ])
         .on_window_event(|window, event| {
             if matches!(
