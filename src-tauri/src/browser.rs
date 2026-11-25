@@ -385,6 +385,40 @@ pub fn first_alive_label() -> Option<String> {
     None
 }
 
+/// 列出所有「还活着」的浏览器 label。
+///
+/// 用途：抓取流要选一台**登录过目标站点**的浏览器，不能只认 `BROWSER_LABEL`
+/// （那条记录只有独立窗口路径写，工作台标签登录的会被漏掉）。
+pub fn alive_labels() -> Vec<String> {
+    let Ok(mut guard) = BROWSERS.lock() else {
+        return Vec::new();
+    };
+    let map = &mut *guard;
+    map.iter()
+        .filter(|(_, state)| {
+            state
+                .tabs
+                .iter()
+                .find(|tab| tab.id == state.active)
+                .map(|tab| window_is_alive(&tab.webview))
+                .unwrap_or(false)
+        })
+        .map(|(label, _)| label.clone())
+        .collect()
+}
+
+/// 取某浏览器激活标签的 URL（按站点挑浏览器用）。
+pub fn active_tab_url(label: &str) -> Option<String> {
+    with_state(label, |state| {
+        state
+            .tabs
+            .iter()
+            .find(|tab| tab.id == state.active)
+            .map(|tab| tab.url.clone())
+    })
+    .flatten()
+}
+
 /// 取浏览器的激活标签（抓取流直接拿它来 eval/导航）。
 // ── 广告拦截（管理员 11-23：喜欢 AdGuard，WebView2 装不了扩展，
 // 就在 WebView2 的网络请求层做域名拦截——机制同 AdGuard 的网络过滤）──

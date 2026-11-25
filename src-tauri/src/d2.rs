@@ -741,8 +741,22 @@ fn fetch_flow(
 ) -> Result<D2FetchReport, String> {
     // 抓取复用已打开浏览窗口的**激活标签**：用户正在看的作品页直接抓。
     // 浏览器没开就明确报错引导（多标签时代，抓谁要明确，不再后台偷偷开窗）。
-    let label = current_label()
-        .filter(|label| crate::browser::is_alive(label))
+    // 优先挑「已经打开目标站点」的浏览器：管理员在内置浏览器（工作台标签）里登录过
+    // nhentai，但 BROWSER_LABEL 只有独立窗口那条路径会写，登录态被漏掉，抓取就退到
+    // 另一台没登录的窗口上（2026-11-26 反馈：明明登录了还报未登录）。
+    let target_host = parsed.host_str().unwrap_or("").to_string();
+    let by_site = crate::browser::alive_labels().into_iter().find(|label| {
+        crate::browser::active_tab_url(label)
+            .map(|url| {
+                let stripped = url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                !target_host.is_empty() && stripped.contains(&target_host)
+            })
+            .unwrap_or(false)
+    });
+    let label = by_site
+        .or_else(|| current_label().filter(|label| crate::browser::is_alive(label)))
         .or_else(resolve_label)
         .ok_or("浏览窗口还没打开——先在面板里点「打开」，进到作品页再抓取")?;
     if !crate::browser::is_alive(&label) {

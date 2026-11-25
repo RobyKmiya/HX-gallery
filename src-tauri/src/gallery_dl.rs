@@ -612,7 +612,11 @@ pub(crate) fn cookie_header(webview: &Webview, url: &str) -> String {
     };
     if let Ok(mut guard) = COOKIES.lock() {
         if let Some(cache) = guard.as_mut() {
-            cache.insert(host, header.clone());
+            // 空值不缓存：先在未登录时抓过一次、缓存了空串，之后登录了还会一直吃这份空缓存
+            // （管理员 2026-11-26：登录后仍报未登录）。
+            if !header.is_empty() {
+                cache.insert(host, header.clone());
+            }
         }
     }
     header
