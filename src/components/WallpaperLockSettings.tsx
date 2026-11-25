@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, assetUrl } from "../api";
+import { api } from "../api";
 import type {
   ArchiveCardData,
   LooseImage,
@@ -8,44 +8,13 @@ import type {
   WallpaperLockConfig,
   WallpaperSource,
 } from "../types";
-import { describeWallpaper } from "../wallpapers";
+import { describeWallpaper, wallpaperPreviewUrl } from "../wallpapers";
 
 const KIND_LABEL: Record<WallpaperSource["kind"], string> = {
   file: "本地",
   archive: "画廊",
   loose: "散图",
 };
-
-/**
- * 取一张壁纸的「预览用小图」。
- *
- * 关键：**绝不能直接拿 wallpaperUrl 当列表缩略图**。画廊来源走 gallery://page
- * 会触发后端解压整页原图（动图几百帧、几十兆），几张一起就卡死。这里画廊走
- * 后端缩略图接口（很小），散图走 thumb 变体，本地文件才读原图（用户自己选的）。
- */
-async function previewWallpaper(wall: WallpaperSource): Promise<string | null> {
-  if (wall.kind === "archive") {
-    const [idText, pageText] = wall.reference.split(":");
-    const archiveId = Number(idText);
-    const page = Number(pageText);
-    if (!Number.isFinite(archiveId) || archiveId <= 0) return null;
-    try {
-      const thumb = await api.readReaderThumbnail(
-        archiveId,
-        Number.isFinite(page) ? page : 0,
-        560,
-      );
-      return thumb.dataUrl;
-    } catch {
-      return null;
-    }
-  }
-  if (wall.kind === "loose") {
-    const id = Number(wall.reference);
-    return Number.isFinite(id) && id > 0 ? api.looseImageUrl("thumb", id) : null;
-  }
-  return assetUrl(wall.reference);
-}
 
 /**
  * 设置 → 壁纸锁。
@@ -139,7 +108,7 @@ export default function WallpaperLockSettings() {
     }
     let cancelled = false;
     setPreviewBusy(true);
-    void previewWallpaper(wall)
+    void wallpaperPreviewUrl(wall)
       .then((url) => {
         if (!cancelled) {
           setPreviewUrl(url);

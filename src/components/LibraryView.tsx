@@ -24,6 +24,7 @@ import type {
   ImportProgress,
   ImportReport,
   LibraryState,
+  NavIntent,
   Queue,
   ReadStatus,
   SeriesSummary,
@@ -99,6 +100,9 @@ interface LibraryViewProps {
   activeKind?: string;
   /** 启动页指定的目标（指定收藏 / 标签 / 散图）。 */
   startupTarget?: { kind: "collection" | "tag" | "loose"; id: number | null } | null;
+  /** 新页发来的导航意图；带 token，值变了就触发一次。 */
+  navRequest?: (NavIntent & { token: number }) | null;
+  onNavHandled?: () => void;
   onSwitchLibrary: () => void;
 }
 
@@ -237,6 +241,8 @@ export default function LibraryView({
   onActivateTab,
   activeKind = "home",
   startupTarget = null,
+  navRequest = null,
+  onNavHandled,
   onSwitchLibrary,
 }: LibraryViewProps) {
   const [items, setItems] = useState<ArchiveCardData[]>([]);
@@ -1904,6 +1910,30 @@ export default function LibraryView({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 浏览器新页点画匣入口 → 在这里落筛选（新页在标签壳里，碰不到这些 state）。
+  useEffect(() => {
+    if (!navRequest) return;
+    if (navRequest.kind === "home") {
+      setActiveCollectionId(null);
+      setActiveTagIds([]);
+      setActiveQueue(null);
+      setLooseView(false);
+    } else if (navRequest.kind === "collection") {
+      setActiveCollectionId(navRequest.id);
+      setActiveQueue(null);
+      setLooseView(false);
+    } else if (navRequest.kind === "loose") {
+      setLooseView(true);
+    } else if (navRequest.kind === "recent") {
+      setSort("last_read_at");
+      setDirection("desc");
+      setActiveCollectionId(null);
+      setLooseView(false);
+    }
+    onNavHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navRequest]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const hasMore = items.length < total;

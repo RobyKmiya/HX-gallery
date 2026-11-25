@@ -31,6 +31,37 @@ export function wallpaperUrl(source: WallpaperSource): string | null {
   }
 }
 
+/**
+ * 取一张壁纸的「预览用小图」（设置页列表 / 新页背景用）。
+ *
+ * 不要直接拿 wallpaperUrl 当缩略图：画廊来源走 gallery://page 会让后端解压整页原图
+ * （动图几百帧、几十兆），多张一起就卡死。这里画廊走缩略图接口、散图走 thumb，
+ * 只有本地文件读原图（用户自己选的）。
+ */
+export async function wallpaperPreviewUrl(source: WallpaperSource): Promise<string | null> {
+  if (source.kind === "archive") {
+    const [idText, pageText] = source.reference.split(":");
+    const archiveId = Number(idText);
+    const page = Number(pageText);
+    if (!Number.isFinite(archiveId) || archiveId <= 0) return null;
+    try {
+      const thumb = await api.readReaderThumbnail(
+        archiveId,
+        Number.isFinite(page) ? page : 0,
+        720,
+      );
+      return thumb.dataUrl;
+    } catch {
+      return null;
+    }
+  }
+  if (source.kind === "loose") {
+    const id = Number(source.reference);
+    return Number.isFinite(id) && id > 0 ? api.looseImageUrl("thumb", id) : null;
+  }
+  return assetUrl(source.reference);
+}
+
 /** 设置页里给壁纸起个可读名字。 */
 export function describeWallpaper(source: WallpaperSource): string {
   switch (source.kind) {

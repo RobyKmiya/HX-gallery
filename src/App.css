@@ -7957,3 +7957,142 @@ body.is-splitting {
 .toast-close {
   pointer-events: auto;
 }
+
+/* ---------- 浏览器新页（React 组件，1.1.49） ---------- */
+.new-tab {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #0d0f14;
+  background-size: cover;
+  background-position: center;
+  overflow-y: auto;
+}
+
+.new-tab-shade {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 40%, rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0.78));
+  backdrop-filter: blur(1px);
+}
+
+.new-tab-body {
+  position: relative;
+  z-index: 1;
+  width: min(640px, calc(100vw - 80px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 24px;
+}
+
+.new-tab-brand {
+  margin: 0;
+  color: #fff;
+  font-size: 20px;
+  letter-spacing: 0.12em;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+}
+
+.new-tab-address {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.new-tab-address input {
+  flex: 1 1 auto;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(12, 14, 18, 0.72);
+  color: #fff;
+  font-size: 13.5px;
+  outline: none;
+  backdrop-filter: blur(8px);
+}
+
+.new-tab-address input:focus {
+  border-color: #7c93ff;
+  box-shadow: 0 0 0 3px rgba(124, 147, 255, 0.2);
+}
+
+.new-tab-address button {
+  flex: 0 0 auto;
+  padding: 0 18px;
+  border-radius: 12px;
+  border: none;
+  background: #7c93ff;
+  color: #fff;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.new-tab-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.new-tab-grid button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(16, 18, 24, 0.66);
+  color: #e8e8ee;
+  font-size: 12px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.new-tab-grid button:hover {
+  border-color: rgba(124, 147, 255, 0.6);
+  background: rgba(30, 34, 44, 0.8);
+}
+
+.new-tab-glyph {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.new-tab-collections {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.new-tab-collections button {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(16, 18, 24, 0.6);
+  color: #cfd3db;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-tab-collections button:hover {
+  border-color: rgba(124, 147, 255, 0.6);
+  color: #fff;
+}
+
+@media (max-width: 720px) {
+  .new-tab-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

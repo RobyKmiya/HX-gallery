@@ -315,6 +315,18 @@ export interface TagCategory {
   depth: number;
 }
 
+/**
+ * 新页 → 主界面 的导航意图。
+ *
+ * 新页（NewTab）挂在 WorkspaceTabs 里，真正的主界面筛选状态在 LibraryView 里，
+ * 所以新页只发意图，LibraryView 收到后自己切筛选。
+ */
+export type NavIntent =
+  | { kind: "home" }
+  | { kind: "collection"; id: number }
+  | { kind: "loose" }
+  | { kind: "recent" };
+
 /** 壁纸来源（壁纸锁 / 新页背景共用）。 */
 export interface WallpaperSource {
   kind: "loose" | "archive" | "file";

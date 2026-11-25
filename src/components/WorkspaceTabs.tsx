@@ -3,7 +3,7 @@
  *
  * 形态：顶部标签条。主页与「标签中心 / 回收站 / 发版 / 设置 / 网络画集」
  * 都是标签，共用同一个 LibraryView 实例（按 activeKind 内部分发渲染），
- * 浏览器标签各自挂一个原生子 webview（React 只量占位矩形）。
+ * 浏览器标签：url 为空时显示 React 新页（NewTab），有 url 才挂原生子 webview。
  *
  * 关键规则：
  * - 原生子 webview 是独立 HWND，React 模态盖不住 → 任何模态打开时必须
@@ -15,8 +15,9 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
-import type { LibraryState } from "../types";
+import type { LibraryState, NavIntent } from "../types";
 import LibraryView from "./LibraryView";
+import NewTab from "./NewTab";
 import {
   TAB_SETTINGS_EVENT,
   readPersistedTabs,
@@ -32,6 +33,8 @@ export interface WorkTab {
   id: string;
   kind: TabKind;
   title: string;
+  /** 仅浏览器标签用：null/undefined = 新页，有值 = 加载该网址的 webview。 */
+  url?: string | null;
 }
 
 export type TabKind =
@@ -58,7 +61,7 @@ const TAB_GLYPH: Record<TabKind, string> = {
 
 const TAB_TITLE: Record<TabKind, string> = {
   home: "主页",
-  browser: "浏览器",
+  browser: "新页",
   tags: "标签中心",
   trash: "回收站",
   release: "发版",
@@ -72,8 +75,12 @@ function isTabKind(value: string): value is TabKind {
   return (KNOWN_KINDS as string[]).includes(value);
 }
 
-function browserTabTitle(index: number): string {
-  return index === 0 ? "浏览器" : `浏览器 ${index + 1}`;
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
 }
 
 /** 启动时决定初始标签集合：主页 / 上次的非浏览器标签 / 指定收藏（仍是主页）。 */
@@ -110,19 +117,20 @@ function initialActiveId(tabs: WorkTab[]): string {
   return tabs[0]?.id ?? "home";
 }
 
-function BrowserHost({ visible }: { visible: boolean }) {
+function BrowserHost({ url, visible }: { url: string; visible: boolean }) {
   const holderRef = useRef<HTMLDivElement>(null);
   const [label, setLabel] = useState<string | null>(null);
   const modalCount = useRef(0);
   const [modalTick, setModalTick] = useState(0);
 
-  // 引擎生命周期：挂载时开，卸载时拆（切标签不卸载，只切 visible）。
+  // 引擎生命周期：挂载/换址时开，卸载时拆（切标签不卸载，只切 visible）。
   useEffect(() => {
     let dead = false;
     let mine: string | null = null;
+    setLabel(null);
     void (async () => {
       try {
-        const opened = await api.d2EmbedOpen({ url: "https://e-hentai.org/", adblock: true });
+        const opened = await api.d2EmbedOpen({ url, adblock: true });
         if (dead) {
           void api.d2EmbedClose(opened).catch(() => {});
           return;
@@ -137,7 +145,7 @@ function BrowserHost({ visible }: { visible: boolean }) {
       dead = true;
       if (mine) void api.d2EmbedClose(mine).catch(() => {});
     };
-  }, []);
+  }, [url]);
 
   // 摆位：ResizeObserver + resize + 低频兜底（布局抖动不丢跟随）。
   useEffect(() => {
@@ -210,6 +218,8 @@ export default function WorkspaceTabs({
   const startupTargetRef = useRef<StartupTarget | null>(readStartupTarget(readTabSettings()));
   /** 启动遮罩：仅首帧按设置决定，之后点一下揭开。 */
   const [masked, setMasked] = useState(() => readTabSettings().masked);
+  /** 新页发来的导航意图（真正筛选在 LibraryView 里做）。 */
+  const [navRequest, setNavRequest] = useState<(NavIntent & { token: number }) | null>(null);
   const hydratedRef = useRef(false);
 
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0];
@@ -261,9 +271,22 @@ export default function WorkspaceTabs({
 
   const addBrowserTab = () => {
     const id = `browser-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const title = browserTabTitle(browserCount);
-    setTabs((prev) => [...prev, { id, kind: "browser", title }]);
+    const title = browserCount === 0 ? "新页" : `新页 ${browserCount + 1}`;
+    setTabs((prev) => [...prev, { id, kind: "browser", title, url: null }]);
     setActiveId(id);
+  };
+
+  /** 新页里输入网址：当前浏览器标签从新页切到 webview。 */
+  const setTabUrl = (id: string, url: string) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === id ? { ...tab, url, title: hostOf(url) } : tab)),
+    );
+  };
+
+  /** 新页点画匣入口：切回主页并投递筛选意图。 */
+  const navigate = (intent: NavIntent) => {
+    setNavRequest({ ...intent, token: Date.now() });
+    openTab("home");
   };
 
   const closeTab = (id: string) => {
@@ -437,9 +460,11 @@ export default function WorkspaceTabs({
             activeKind={reactKind}
             onActivateTab={activateTab}
             startupTarget={startupTargetRef.current}
+            navRequest={navRequest}
+            onNavHandled={() => setNavRequest(null)}
           />
         </div>
-        {/* 浏览器标签各挂一个原生子 webview。 */}
+        {/* 浏览器标签：url 空 = React 新页；有 url = 原生子 webview。 */}
         {tabs
           .filter((tab) => tab.kind === "browser")
           .map((tab) => (
@@ -451,7 +476,16 @@ export default function WorkspaceTabs({
                 visibility: activeId === tab.id ? "visible" : "hidden",
               }}
             >
-              <BrowserHost visible={activeId === tab.id} />
+              {tab.url ? (
+                <BrowserHost url={tab.url} visible={activeId === tab.id} />
+              ) : (
+                <NewTab
+                  libraryName={library.libraryName ?? undefined}
+                  onNavigate={navigate}
+                  onOpenTab={(kind) => openTab(kind as TabKind)}
+                  onBrowse={(url) => setTabUrl(tab.id, url)}
+                />
+              )}
             </div>
           ))}
       </div>
