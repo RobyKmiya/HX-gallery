@@ -873,12 +873,30 @@ async fn purge_archive(
     run_blocking(state, move |state| {
         with_library(state, |library| {
             let covers_dir = paths::covers_dir(&app, &library.library_id)?;
-            let cover_key = db::purge_archive(&library.conn, archive_id)?;
+            let (cover_key, rel_path) = db::purge_archive(&library.conn, archive_id)?;
             if let Some(key) = cover_key {
                 // 先确认没有其它记录（含回收站）还在用这个封面，再删；
                 // 同时校验 key 形态，避免被篡改的 cover_key 拼出缓存目录之外的路径。
                 if archive::is_cover_key(&key) && !db::cover_key_in_use(&library.conn, &key)? {
                     let _ = fs::remove_file(covers_dir.join(&key));
+                }
+            }
+            // 彻底删除 = 物理文件也移出库根。只删记录的话，下次扫描会按 rel_path 当成
+            // 新文件重新导入（「删了又回来」）。移到 .gallery/trash/，扫描本来就跳过 .gallery。
+            let source = library.root.join(&rel_path);
+            if source.is_file() {
+                let trash_dir = library.root.join(".gallery").join("trash");
+                let _ = fs::create_dir_all(&trash_dir);
+                let file_name = source
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "archive".to_string());
+                let dest = trash_dir.join(format!("{archive_id}-{file_name}"));
+                if fs::rename(&source, &dest).is_err() {
+                    // 跨卷或被占用：退回复制再删。失败也不拦「删除」本身，只是文件还在原位。
+                    if fs::copy(&source, &dest).is_ok() {
+                        let _ = fs::remove_file(&source);
+                    }
                 }
             }
             Ok(())

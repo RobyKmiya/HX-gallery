@@ -1325,26 +1325,31 @@ pub fn restore_archive(conn: &Connection, archive_id: i64) -> Result<(), String>
     Ok(())
 }
 
-pub fn purge_archive(conn: &Connection, archive_id: i64) -> Result<Option<String>, String> {
-    let cover_key: Option<Option<String>> = conn
+/// 彻底删除回收站里的画集，返回 (封面 key, 相对路径)。
+///
+/// 调用方必须据 `rel_path` 把**物理文件**移出库根：只删数据库记录的话，文件还在，
+/// 下次扫描发现 `rel_path` 查不到记录，就会当成新文件重新导入——也就是用户反馈的
+/// 「删掉的画集又自己回来了、根除不了」。
+pub fn purge_archive(conn: &Connection, archive_id: i64) -> Result<(Option<String>, String), String> {
+    let row: Option<(Option<String>, String)> = conn
         .query_row(
-            "SELECT cover_key FROM archives
+            "SELECT cover_key, rel_path FROM archives
              WHERE id = ?1 AND deleted_at IS NOT NULL",
             params![archive_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|e| format!("检查回收站画集失败: {e}"))?;
 
-    let cover_key = match cover_key {
+    let payload = match row {
         None => return Err("只能彻底删除回收站中的画集".to_string()),
-        Some(key) => key,
+        Some(value) => value,
     };
 
     conn.execute("DELETE FROM archives WHERE id = ?1", params![archive_id])
         .map_err(|e| format!("彻底删除画集失败: {e}"))?;
 
-    Ok(cover_key)
+    Ok(payload)
 }
 
 pub fn list_deleted_archives(

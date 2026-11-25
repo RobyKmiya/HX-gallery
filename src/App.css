@@ -2649,9 +2649,14 @@ body.is-splitting {
 
 .toast {
   position: fixed;
-  right: 22px;
-  bottom: 22px;
-  z-index: 60;
+  top: 46px;
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  transform: translateX(-50%);
+  z-index: 3000;
+  /* 通知盖在内容上时不挡鼠标：点击照样穿透，只有关闭按钮可点 */
+  pointer-events: none;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -2667,11 +2672,11 @@ body.is-splitting {
 
 @keyframes toast-in {
   from {
-    transform: translateY(12px);
+    transform: translate(-50%, -12px);
     opacity: 0;
   }
   to {
-    transform: translateY(0);
+    transform: translate(-50%, 0);
     opacity: 1;
   }
 }
@@ -7946,4 +7951,9 @@ body.is-splitting {
   max-height: 240px;
   object-fit: contain;
   border-radius: 6px;
+}
+
+/* Toast 顶部居中后：只有关闭按钮接收点击 */
+.toast-close {
+  pointer-events: auto;
 }
