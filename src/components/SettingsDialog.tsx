@@ -31,12 +31,14 @@ import { AlertIcon, BookIcon, CloseIcon, FolderIcon, RefreshIcon, TagIcon } from
 import WallpaperLockSettings from "./WallpaperLockSettings";
 import BrowserDataSettings from "./BrowserDataSettings";
 import UserscriptSettings from "./UserscriptSettings";
+import AdblockSettings from "./AdblockSettings";
 
 type SettingsTab =
   | "general"
   | "wallpaper"
   | "browser"
   | "userscript"
+  | "adblock"
   | "keys"
   | "gestures"
   | "storage"
@@ -64,6 +66,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: "wallpaper", label: "壁纸锁" },
   { key: "browser", label: "浏览器数据" },
   { key: "userscript", label: "用户脚本" },
+  { key: "adblock", label: "广告拦截" },
   { key: "keys", label: "快捷键" },
   { key: "gestures", label: "鼠标手势" },
   { key: "storage", label: "存储" },
@@ -384,6 +387,8 @@ export default function SettingsDialog({
             {tab === "browser" && <BrowserDataSettings />}
 
             {tab === "userscript" && <UserscriptSettings />}
+
+            {tab === "adblock" && <AdblockSettings />}
 
             {tab === "keys" && (
               <>

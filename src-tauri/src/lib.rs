@@ -923,6 +923,28 @@ pub(crate) fn record_browser_history_async(app: &AppHandle, url: String) {
     });
 }
 
+// ---------- 广告拦截：自定义名单读写 ----------
+#[tauri::command]
+fn adblock_read_custom() -> Result<String, String> {
+    match browser::custom_adblock_path() {
+        Some(path) => Ok(std::fs::read_to_string(path).unwrap_or_default()),
+        None => Ok(String::new()),
+    }
+}
+
+#[tauri::command]
+fn adblock_write_custom(content: String) -> Result<(), String> {
+    let path = browser::custom_adblock_path()
+        .ok_or_else(|| "找不到 LOCALAPPDATA，无法写入拦截名单".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    std::fs::write(&path, content).map_err(|e| format!("写入拦截名单失败: {e}"))?;
+    // 立即刷新缓存：改完就生效，不用重启。
+    browser::reload_custom_adblock();
+    Ok(())
+}
+
 // ---------- 浏览器账号密码：Windows DPAPI ----------
 // 只绑当前 Windows 用户能解，落库是密文，不写明文、不进日志。
 #[cfg(windows)]
@@ -2264,6 +2286,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             browser_credential_save,
             browser_credential_delete,
             browser_credential_reveal,
+            adblock_read_custom,
+            adblock_write_custom,
             list_series,
             create_series,
             update_series,

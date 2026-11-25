@@ -482,33 +482,91 @@ const ADBLOCK_DOMAINS: &[&str] = &[
     "txtrk.net",
     "adcash.com",
     "adcashrevenue.com",
+    // 2026-11-26 补充：常见联盟/重定向/推送网络
+    "googleadservices.com",
+    "adroll.com",
+    "sizmek.com",
+    "adform.net",
+    "adsrvr.org",
+    "zemanta.com",
+    "clickagy.com",
+    "trafficstars.com",
+    "tsyndicate.com",
+    "adspyglass.com",
 ];
 
-/// 读取用户自定义追加名单（可选文件，一行一个域名）。
-fn custom_adblock_domains() -> Vec<String> {
-    static CACHE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = std::env::var("LOCALAPPDATA")
-                .map(|base| {
-                    std::path::PathBuf::from(base)
-                        .join("com.archivegallery.desktop")
-                        .join("browser")
-                        .join("adblock.txt")
-                })
-                .ok();
-            let Some(path) = dir else { return Vec::new() };
-            std::fs::read_to_string(path)
-                .map(|content| {
-                    content
-                        .lines()
-                        .map(|line| line.trim().to_lowercase())
-                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                        .collect()
-                })
-                .unwrap_or_default()
+/// 用户自定义名单文件路径（一行一个域名，# 开头为注释）。
+pub fn custom_adblock_path() -> Option<std::path::PathBuf> {
+    std::env::var("LOCALAPPDATA").ok().map(|base| {
+        std::path::PathBuf::from(base)
+            .join("com.archivegallery.desktop")
+            .join("browser")
+            .join("adblock.txt")
+    })
+}
+
+fn load_custom_adblock() -> Vec<String> {
+    let Some(path) = custom_adblock_path() else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(path)
+        .map(|content| {
+            content
+                .lines()
+                .map(|line| line.trim().to_lowercase())
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect()
         })
-        .clone()
+        .unwrap_or_default()
+}
+
+/// 自定义名单缓存：设置页改完调 `reload_custom_adblock` 立即生效，不用重启。
+static CUSTOM_ADBLOCK: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+pub fn reload_custom_adblock() {
+    if let Ok(mut guard) = CUSTOM_ADBLOCK.lock() {
+        *guard = None;
+    }
+}
+
+fn custom_adblock_domains() -> Vec<String> {
+    if let Ok(guard) = CUSTOM_ADBLOCK.lock() {
+        if let Some(list) = guard.as_ref() {
+            return list.clone();
+        }
+    }
+    let list = load_custom_adblock();
+    if let Ok(mut guard) = CUSTOM_ADBLOCK.lock() {
+        *guard = Some(list.clone());
+    }
+    list
+}
+
+/// URL 级拦截：域名命中，或带联盟/追踪参数（推广跳转）都算广告。
+///
+/// 只看域名会把 trip.com 这类正常站点一起封掉；看参数更精准——管理员给的
+/// 广告链接是 `?allianceid=…&SID=…&utm_campaign=…&trip_sub…`，正常访问没有这些。
+/// 刻意**不**收 `sid=`：太多站点拿它当会话 id，会大面积误伤。
+fn adblock_url_blocked(uri: &tauri::http::Uri) -> bool {
+    if let Some(host) = uri.host() {
+        if adblock_host_blocked(host) {
+            return true;
+        }
+    }
+    const TRACKING_PARAMS: &[&str] = &[
+        "allianceid=",
+        "utm_campaign=",
+        "utm_source=",
+        "utm_medium=",
+        "trip_sub",
+        "gclid=",
+        "fbclid=",
+        "aff_id=",
+        "affiliate_id=",
+        "click_id=",
+    ];
+    let query = uri.query().unwrap_or("").to_lowercase();
+    !query.is_empty() && TRACKING_PARAMS.iter().any(|param| query.contains(param))
 }
 
 fn adblock_host_blocked(host: &str) -> bool {
@@ -532,10 +590,7 @@ fn attach_adblock(
         if !adblock_enabled() {
             return;
         }
-        let Some(host) = request.uri().host() else {
-            return;
-        };
-        if adblock_host_blocked(host) {
+        if adblock_url_blocked(request.uri()) {
             *response.status_mut() = tauri::http::StatusCode::NOT_FOUND;
         }
     })

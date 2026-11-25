@@ -8401,3 +8401,29 @@ body.is-splitting {
   color: var(--muted);
   font-size: 13px;
 }
+
+/* ---------- 设置：自定义拦截名单文本域（1.1.57） ---------- */
+.settings-textarea {
+  width: 100%;
+  min-height: 160px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.settings-textarea:focus {
+  border-color: var(--accent, #7c93ff);
+}
+
+.settings-panel h4 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: var(--text);
+}

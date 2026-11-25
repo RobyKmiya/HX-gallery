@@ -384,6 +384,11 @@ export const api = {
   setDesktopWallpaper: (archiveId: number, pageIndex: number) =>
     invoke<void>("set_desktop_wallpaper", { archiveId, pageIndex }),
 
+  // ---------- 广告拦截（2026-11-26） ----------
+  adblockReadCustom: () => invoke<string>("adblock_read_custom"),
+  adblockWriteCustom: (content: string) =>
+    invoke<void>("adblock_write_custom", { content }),
+
   // ---------- 浏览器数据（管理员 2026-11-25：历史 / 账号密码） ----------
   browserHistoryList: (search?: string, limit?: number) =>
     invoke<HistoryEntry[]>("browser_history_list", {
