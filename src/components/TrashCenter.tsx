@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, assetUrl } from "../api";
+import { useLibraryActions } from "../libraryActions";
 import { formatBytes, formatDateTime } from "../format";
 import type { Collection, Tag, TrashedArchive } from "../types";
 import { CheckIcon, CloseIcon, LogoIcon, TrashIcon } from "./Icons";
@@ -8,8 +9,10 @@ type TrashTab = "archives" | "collections" | "tags";
 
 interface TrashCenterProps {
   onClose: () => void;
-  onChanged: () => Promise<void>;
-  onNotify: (message: string, kind?: "info" | "success" | "error") => void;
+  onChanged?: () => Promise<void>;
+  onNotify?: (message: string, kind?: "info" | "success" | "error") => void;
+  /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮。 */
+  embedded?: boolean;
 }
 
 const TAB_LABELS: Record<TrashTab, string> = {
@@ -20,9 +23,13 @@ const TAB_LABELS: Record<TrashTab, string> = {
 
 export default function TrashCenter({
   onClose,
-  onChanged,
-  onNotify,
+  onChanged: onChangedProp,
+  onNotify: onNotifyProp,
+  embedded = false,
 }: TrashCenterProps) {
+  const actions = useLibraryActions();
+  const onNotify = onNotifyProp ?? actions.notify;
+  const onChanged = onChangedProp ?? actions.refresh;
   const [tab, setTab] = useState<TrashTab>("archives");
   const [archives, setArchives] = useState<TrashedArchive[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -215,11 +222,16 @@ export default function TrashCenter({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className={embedded ? "panel-embedded" : "modal-backdrop"}
+      onClick={embedded ? undefined : onClose}
+    >
       <div
-        className="collection-editor collection-trash trash-center"
-        role="dialog"
-        aria-modal="true"
+        className={`collection-editor collection-trash trash-center${
+          embedded ? " is-embedded" : ""
+        }`}
+        role={embedded ? "region" : "dialog"}
+        aria-modal={embedded ? undefined : true}
         aria-label="回收站"
         onClick={(event) => event.stopPropagation()}
       >
@@ -240,14 +252,16 @@ export default function TrashCenter({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={onClose}
-            aria-label="关闭回收站"
-          >
-            <CloseIcon width={16} height={16} />
-          </button>
+          {!embedded && (
+            <button
+              type="button"
+              className="icon-button"
+              onClick={onClose}
+              aria-label="关闭回收站"
+            >
+              <CloseIcon width={16} height={16} />
+            </button>
+          )}
         </header>
 
         <div className="trash-tabs" role="tablist" aria-label="回收站分类">

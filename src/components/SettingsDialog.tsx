@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { notifyModalOpen, notifyModalClose } from "../modalBus";
-import type { LibraryState, ViewMode } from "../types";
+import {
+  readTabSettings,
+  saveTabSettings,
+  type TabSettings,
+  type StartupMode,
+  type StartupTargetKind,
+} from "../tabSettings";
+import type { Collection, LibraryState, ViewMode } from "../types";
 import { formatBytes } from "../format";
 import {
   DEFAULT_SHORTCUTS,
@@ -26,6 +33,8 @@ type SettingsTab = "general" | "keys" | "gestures" | "storage" | "guide" | "more
 
 interface SettingsDialogProps {
   library: LibraryState;
+  /** 收藏夹列表：启动页「指定收藏」下拉用。 */
+  collections?: Collection[];
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
   detailDock: "float" | "dock";
@@ -33,6 +42,8 @@ interface SettingsDialogProps {
   onOpenTagCenter: () => void;
   onOpenD2: () => void;
   onOpenRelease: () => void;
+  /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮。 */
+  embedded?: boolean;
   onClose: () => void;
 }
 
@@ -62,6 +73,7 @@ const FIXED_KEYS: { keys: string; action: string }[] = [
  */
 export default function SettingsDialog({
   library,
+  collections = [],
   viewMode,
   onViewModeChange,
   detailDock,
@@ -69,6 +81,7 @@ export default function SettingsDialog({
   onOpenTagCenter,
   onOpenD2,
   onOpenRelease,
+  embedded = false,
   onClose,
 }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
@@ -76,9 +89,10 @@ export default function SettingsDialog({
   // 模态让位（P1 工作台）：原生子 webview 盖不住 React 模态，
   // 打开/关闭时广播，让内建浏览器 host 整体隐藏/恢复。
   useEffect(() => {
+    if (embedded) return;
     notifyModalOpen();
     return () => notifyModalClose();
-  }, []);
+  }, [embedded]);
   // 呼回键的真值在 Rust（注册过的才算数）：打开面板时以 Rust 为准校正一遍，
   // 避免另一处改过之后 localStorage 与实际注册的键不一致。
   useEffect(() => {
@@ -102,6 +116,13 @@ export default function SettingsDialog({
       return "immersive";
     }
   });
+  /** 标签范式三项设置（新开行为 / 启动页 / 启动遮罩），与标签壳共用一份。 */
+  const [tabSettings, setTabSettings] = useState<TabSettings>(() => readTabSettings());
+  const updateTabSettings = (patch: Partial<TabSettings>) => {
+    const next = { ...tabSettings, ...patch };
+    setTabSettings(next);
+    saveTabSettings(next);
+  };
   /** 正在录制的动作；null = 不在录制。 */
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
   const [keyHint, setKeyHint] = useState("");
@@ -145,11 +166,14 @@ export default function SettingsDialog({
   }, [recording, bindings]);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className={embedded ? "panel-embedded" : "modal-backdrop"}
+      onClick={embedded ? undefined : onClose}
+    >
       <section
-        className="modal settings-dialog"
-        role="dialog"
-        aria-modal="true"
+        className={`modal settings-dialog${embedded ? " is-embedded" : ""}`}
+        role={embedded ? "region" : "dialog"}
+        aria-modal={embedded ? undefined : true}
         aria-label="画匣设置"
         onClick={(event) => event.stopPropagation()}
       >
@@ -158,14 +182,16 @@ export default function SettingsDialog({
             <p className="eyebrow">SETTINGS</p>
             <h2>画匣设置</h2>
           </div>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={onClose}
-            aria-label="关闭设置"
-          >
-            <CloseIcon />
-          </button>
+          {!embedded && (
+            <button
+              type="button"
+              className="icon-button"
+              onClick={onClose}
+              aria-label="关闭设置"
+            >
+              <CloseIcon />
+            </button>
+          )}
         </div>
 
         <div className="settings-body">
@@ -229,6 +255,98 @@ export default function SettingsDialog({
                     <option value="dock">停靠（挤开画廊）</option>
                   </select>
                 </label>
+
+                <h3>标签</h3>
+                <label className="settings-row">
+                  <span>打开新页面时</span>
+                  <select
+                    value={tabSettings.newBehavior}
+                    onChange={(event) =>
+                      updateTabSettings({
+                        newBehavior: event.target.value === "reuse" ? "reuse" : "new",
+                      })
+                    }
+                  >
+                    <option value="new">新建标签</option>
+                    <option value="reuse">复用已有标签</option>
+                  </select>
+                </label>
+                <label className="settings-row">
+                  <span>启动时打开</span>
+                  <select
+                    value={tabSettings.startupMode}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      updateTabSettings({
+                        startupMode: (value === "last" || value === "specific"
+                          ? value
+                          : "home") as StartupMode,
+                      });
+                    }}
+                  >
+                    <option value="home">主页</option>
+                    <option value="last">上次的标签</option>
+                    <option value="specific">指定收藏</option>
+                  </select>
+                </label>
+                {tabSettings.startupMode === "specific" && (
+                  <>
+                    <label className="settings-row">
+                      <span>指定类型</span>
+                      <select
+                        value={tabSettings.startupKind}
+                        onChange={(event) =>
+                          updateTabSettings({
+                            startupKind: (event.target.value === "loose"
+                              ? "loose"
+                              : "collection") as StartupTargetKind,
+                            startupId: null,
+                          })
+                        }
+                      >
+                        <option value="collection">收藏夹</option>
+                        <option value="loose">散图收藏夹</option>
+                      </select>
+                    </label>
+                    {tabSettings.startupKind !== "loose" && (
+                      <label className="settings-row">
+                        <span>指定收藏夹</span>
+                        <select
+                          value={tabSettings.startupId ?? ""}
+                          onChange={(event) =>
+                            updateTabSettings({
+                              startupId: event.target.value
+                                ? Number(event.target.value)
+                                : null,
+                            })
+                          }
+                        >
+                          <option value="">未选择（回主页）</option>
+                          {collections.map((collection) => (
+                            <option key={collection.id} value={collection.id}>
+                              {collection.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  </>
+                )}
+                <label className="settings-row">
+                  <span>启动时盖住内容</span>
+                  <select
+                    value={tabSettings.masked ? "1" : "0"}
+                    onChange={(event) =>
+                      updateTabSettings({ masked: event.target.value === "1" })
+                    }
+                  >
+                    <option value="0">不盖，直接显示</option>
+                    <option value="1">先盖住，点一下才显示</option>
+                  </select>
+                </label>
+                <p className="settings-hint">
+                  指定收藏在下次启动时生效；浏览器标签不随重启恢复（重新打开会新开）。
+                </p>
               </>
             )}
 

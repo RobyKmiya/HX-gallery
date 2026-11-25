@@ -13,6 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, assetUrl } from "../api";
+import { LibraryActionsContext } from "../libraryActions";
 import { usePersistentFlag, usePersistentSize } from "../layout";
 import { formatBytes } from "../format";
 import type {
@@ -85,15 +86,19 @@ import {AlertIcon,
 
 interface NavSnapshot {
   collectionId: number | null;
-  tagCenter: boolean;
-  trash: boolean;
 }
 
 interface LibraryViewProps {
   library: LibraryState;
   onLibraryChanged: () => Promise<LibraryState>;
-  /** 开新标签（标签范式：面板后续迁到标签，先保留接口）。 */
+  /** 开新标签：面板已迁到标签范式，各入口统一走这里。 */
   onOpenTab?: (kind: string, title?: string) => void;
+  /** 切到某个已有标签（面板里「跳到标签中心」用）。 */
+  onActivateTab?: (kind: string) => void;
+  /** 当前激活的标签类型：非 home 时本组件改为渲染对应的嵌入式面板。 */
+  activeKind?: string;
+  /** 启动页指定的目标（指定收藏 / 标签 / 散图）。 */
+  startupTarget?: { kind: "collection" | "tag" | "loose"; id: number | null } | null;
   onSwitchLibrary: () => void;
 }
 
@@ -228,8 +233,11 @@ function trimPageCache(cache: Map<number, ArchivePage>, current: number) {
 export default function LibraryView({
   library,
   onLibraryChanged,
+  onOpenTab,
+  onActivateTab,
+  activeKind = "home",
+  startupTarget = null,
   onSwitchLibrary,
-  // onOpenTab 预留给标签范式迁移（面板逐个迁过去后启用）
 }: LibraryViewProps) {
   const [items, setItems] = useState<ArchiveCardData[]>([]);
   /** 合集卡：只在纯浏览第 1 页有值，其余情况为空数组。 */
@@ -241,8 +249,6 @@ export default function LibraryView({
   >(null);
   const [seriesCreateOpen, setSeriesCreateOpen] = useState(false);
   const [seriesBusy, setSeriesBusy] = useState(false);
-  /** 统一设置对话框。 */
-  const [settingsOpen, setSettingsOpen] = useState(false);
   /** 主目录空白处右键菜单。 */
   const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
   /** 收藏夹样式编辑弹窗（图标形状 + 填充色）。 */
@@ -359,9 +365,6 @@ export default function LibraryView({
   const [tagFilterOpen, setTagFilterOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [tagQuery, setTagQuery] = useState("");
-  const [tagCenterOpen, setTagCenterOpen] = useState(false);
-  /** 网络画集下载弹窗（管理员 2026-11-25：按链接直接下书）。 */
-  const [netDlOpen, setNetDlOpen] = useState(false);
 
   // 每次进主页自动刷一次库：网页端织机下完包、网络画集入库后，
   // 回到主页就能立刻看到新内容，不用手动刷新（管理员 2026-11-25 要求）。
@@ -369,7 +372,6 @@ export default function LibraryView({
     void onLibraryChanged?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
   /** 布局尺寸：侧栏宽度与停靠详情宽度，拖动分界线改、存在本机。 */
@@ -417,7 +419,6 @@ export default function LibraryView({
       return next;
     });
   }, []);
-  const [releasePanelOpen, setReleasePanelOpen] = useState(false);
   const [d2PanelOpen, setD2PanelOpen] = useState(false);
   /**
    * 正在浏览的待看目录。非空时列表只显示这个目录的成员；
@@ -471,10 +472,7 @@ export default function LibraryView({
     activeCollectionId,
     activeQueue?.id,
     looseView,
-    tagCenterOpen,
     queuePanelOpen,
-    trashOpen,
-    settingsOpen,
     viewMode,
   ]);
 
@@ -530,23 +528,14 @@ export default function LibraryView({
   const [, refreshNav] = useReducer((value: number) => value + 1, 0);
 
   const navSnapshot = useMemo<NavSnapshot>(
-    () => ({
-      collectionId: activeCollectionId,
-      tagCenter: tagCenterOpen,
-      trash: trashOpen,
-    }),
-    [activeCollectionId, tagCenterOpen, trashOpen],
+    () => ({ collectionId: activeCollectionId }),
+    [activeCollectionId],
   );
 
   useEffect(() => {
     const history = navHistoryRef.current;
     const current = history[navIndexRef.current];
-    if (
-      current &&
-      current.collectionId === navSnapshot.collectionId &&
-      current.tagCenter === navSnapshot.tagCenter &&
-      current.trash === navSnapshot.trash
-    ) {
+    if (current && current.collectionId === navSnapshot.collectionId) {
       return;
     }
 
@@ -559,8 +548,6 @@ export default function LibraryView({
 
   const applyNavSnapshot = useCallback((snapshot: NavSnapshot) => {
     setActiveCollectionId(snapshot.collectionId);
-    setTagCenterOpen(snapshot.tagCenter);
-    setTrashOpen(snapshot.trash);
   }, []);
 
   /**
@@ -1882,11 +1869,40 @@ export default function LibraryView({
     [activeTagIds],
   );
 
-  const browseTag = useCallback((tagId: number) => {
-    setTagCenterOpen(false);
-    setTagFilterOpen(false);
-    setActiveCollectionId(null);
-    setActiveTagIds([tagId]);
+  const browseTag = useCallback(
+    (tagId: number) => {
+      setTagFilterOpen(false);
+      setActiveCollectionId(null);
+      setActiveTagIds([tagId]);
+      // 从标签中心跳过来时切回主页看筛选结果。
+      onActivateTab?.("home");
+    },
+    [onActivateTab],
+  );
+
+  /** 库级动作桥：面板迁到标签后通过 context 取这三件事，不再层层传 props。 */
+  const refreshLibrary = useCallback(async () => {
+    await Promise.all([loadTags(), loadCollections()]);
+    await loadPage(1, true, true);
+    await onLibraryChanged();
+  }, [loadTags, loadCollections, loadPage, onLibraryChanged]);
+
+  const libraryActions = useMemo(
+    () => ({ notify, refresh: refreshLibrary, browseTag }),
+    [notify, refreshLibrary, browseTag],
+  );
+
+  // 启动页目标：只应用一次（指定收藏 / 标签 / 散图）。
+  useEffect(() => {
+    if (!startupTarget) return;
+    if (startupTarget.kind === "collection" && startupTarget.id != null) {
+      setActiveCollectionId(startupTarget.id);
+    } else if (startupTarget.kind === "tag" && startupTarget.id != null) {
+      setActiveTagIds([startupTarget.id]);
+    } else if (startupTarget.kind === "loose") {
+      setLooseView(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -1923,8 +1939,6 @@ export default function LibraryView({
     selected !== null ||
     readerCard !== null ||
     quickEditCard !== null ||
-    tagCenterOpen ||
-    trashOpen ||
     tagFilterOpen ||
     filterOpen ||
     selectionMode ||
@@ -2082,14 +2096,16 @@ export default function LibraryView({
   ]);
 
   return (
-    <div
-      className="app-shell"
-      style={{
-        gridTemplateColumns: `${
-          sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth
-        }px 6px minmax(0, 1fr)`,
-      }}
-    >
+    <LibraryActionsContext.Provider value={libraryActions}>
+      <div
+        className="app-shell"
+        style={{
+          display: activeKind === "home" ? "grid" : "none",
+          gridTemplateColumns: `${
+            sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth
+          }px 6px minmax(0, 1fr)`,
+        }}
+      >
       <aside
         className={`sidebar${sidebarCollapsed ? " is-collapsed" : ""}${
           !sidebarCollapsed && sidebarWidth < 224 ? " is-tight" : ""
@@ -2169,7 +2185,7 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
-            onClick={() => setNetDlOpen(true)}
+            onClick={() => onOpenTab?.("net")}
             title="贴作品页链接，下载整本并入库"
           >
             <DownloadIcon />
@@ -2339,7 +2355,7 @@ export default function LibraryView({
             className="nav-item nav-item-tags"
             onClick={() => {
               setLooseView(false);
-              setTagCenterOpen(true);
+              onOpenTab?.("tags");
             }}
             title="管理标签、搜索标签、生成标签导图"
           >
@@ -2376,7 +2392,7 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
-            onClick={() => setReleasePanelOpen(true)}
+            onClick={() => onOpenTab?.("release")}
             title="检查更新并立即安装"
           >
             <RefreshIcon width={16} height={16} />
@@ -2386,7 +2402,7 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => onOpenTab?.("settings")}
             title="统一设置：视图 / 快捷键 / 存储 / 各面板入口"
           >
             <SwapIcon width={16} height={16} />
@@ -2434,7 +2450,7 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
-            onClick={() => setTrashOpen(true)}
+            onClick={() => onOpenTab?.("trash")}
             title="恢复或彻底删除画集、收藏夹与标签"
           >
             <TrashIcon width={16} height={16} />
@@ -3189,7 +3205,7 @@ export default function LibraryView({
                 </button>
                 <button
                   className="btn btn-ghost btn-large"
-                  onClick={() => setTagCenterOpen(true)}
+                  onClick={() => onOpenTab?.("tags")}
                 >
                   <TagIcon />
                   打开标签中心
@@ -3728,16 +3744,16 @@ export default function LibraryView({
                 detailDock === "dock" ? "详情浮层改为浮动" : "详情浮层改为停靠",
               onClick: () => setDetailDock(detailDock === "dock" ? "float" : "dock"),
             },
-            { label: "打开标签中心", dividerBefore: true, onClick: () => setTagCenterOpen(true) },
+            { label: "打开标签中心", dividerBefore: true, onClick: () => onOpenTab?.("tags") },
             { label: "打开网页抓取", onClick: () => setD2PanelOpen(true) },
-            { label: "打开更新面板", onClick: () => setReleasePanelOpen(true) },
+            { label: "打开更新面板", onClick: () => onOpenTab?.("release") },
             {
               label: "在资源管理器中显示库目录",
               onClick: () => {
                 if (library.libraryPath) void api.revealInExplorer(library.libraryPath);
               },
             },
-            { label: "设置…", dividerBefore: true, onClick: () => setSettingsOpen(true) },
+            { label: "设置…", dividerBefore: true, onClick: () => onOpenTab?.("settings") },
           ]}
           onClose={() => setBgMenu(null)}
         />
@@ -3827,39 +3843,6 @@ export default function LibraryView({
         </>
       )}
 
-      {netDlOpen && (
-        <NetGalleryDialog
-          onClose={() => setNetDlOpen(false)}
-          onDone={() => {
-            setNetDlOpen(false);
-            void onLibraryChanged?.();
-          }}
-        />
-      )}
-
-      {settingsOpen && (
-        <SettingsDialog
-          library={library}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          detailDock={detailDock}
-          onDetailDockChange={setDetailDock}
-          onOpenTagCenter={() => {
-            setSettingsOpen(false);
-            setTagCenterOpen(true);
-          }}
-          onOpenD2={() => {
-            setSettingsOpen(false);
-            setD2PanelOpen(true);
-          }}
-          onOpenRelease={() => {
-            setSettingsOpen(false);
-            setReleasePanelOpen(true);
-          }}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
-
       {readerCard && (
         <Reader
           card={readerCard}
@@ -3937,23 +3920,6 @@ export default function LibraryView({
             <small>会先列出清单与标签，确认之后才写入库</small>
           </div>
         </div>
-      )}
-
-      {tagCenterOpen && (
-        <TagCenter
-          onClose={() => setTagCenterOpen(false)}
-          onNotify={notify}
-          onChanged={loadTags}
-          onBrowseTag={browseTag}
-        />
-      )}
-
-      {trashOpen && (
-        <TrashCenter
-          onClose={() => setTrashOpen(false)}
-          onChanged={refreshAfterTrashChange}
-          onNotify={notify}
-        />
       )}
 
         {cardMenu && (
@@ -4041,13 +4007,6 @@ export default function LibraryView({
         />
       )}
 
-      {releasePanelOpen && (
-        <ReleasePanel
-          onClose={() => setReleasePanelOpen(false)}
-          onNotify={notify}
-        />
-      )}
-
       {d2PanelOpen && (
         <D2Panel
           onClose={() => setD2PanelOpen(false)}
@@ -4094,8 +4053,62 @@ export default function LibraryView({
         />
       )}
 
+      </div>
+
+      {/* 非 home 标签：在这里统一分发嵌入式面板，标签壳只管激活哪个 kind。 */}
+      {activeKind !== "home" && (
+        <div className="panel-tab-host">
+          {activeKind === "tags" && (
+            <TagCenter
+              embedded
+              onClose={() => onActivateTab?.("home")}
+              onNotify={notify}
+              onChanged={loadTags}
+              onBrowseTag={browseTag}
+            />
+          )}
+          {activeKind === "trash" && (
+            <TrashCenter
+              embedded
+              onClose={() => onActivateTab?.("home")}
+              onChanged={refreshAfterTrashChange}
+              onNotify={notify}
+            />
+          )}
+          {activeKind === "release" && (
+            <ReleasePanel
+              embedded
+              onClose={() => onActivateTab?.("home")}
+              onNotify={notify}
+            />
+          )}
+          {activeKind === "settings" && (
+            <SettingsDialog
+              embedded
+              library={library}
+              collections={collections}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              detailDock={detailDock}
+              onDetailDockChange={setDetailDock}
+              onOpenTagCenter={() => onOpenTab?.("tags")}
+              onOpenD2={() => setD2PanelOpen(true)}
+              onOpenRelease={() => onOpenTab?.("release")}
+              onClose={() => onActivateTab?.("home")}
+            />
+          )}
+          {activeKind === "net" && (
+            <NetGalleryDialog
+              embedded
+              onClose={() => onActivateTab?.("home")}
+              onDone={() => void onLibraryChanged?.()}
+            />
+          )}
+        </div>
+      )}
+
       {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
-    </div>
+    </LibraryActionsContext.Provider>
   );
 }
 

@@ -14,6 +14,8 @@ interface NetGalleryDialogProps {
   onClose: () => void;
   /** 下载完成回调：让外层刷新库列表。 */
   onDone?: () => void;
+  /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮、不占用模态让位。 */
+  embedded?: boolean;
 }
 
 interface NetDlStatus {
@@ -40,7 +42,11 @@ const EMPTY: NetDlStatus = {
   path: "",
 };
 
-export default function NetGalleryDialog({ onClose, onDone }: NetGalleryDialogProps) {
+export default function NetGalleryDialog({
+  onClose,
+  onDone,
+  embedded = false,
+}: NetGalleryDialogProps) {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<NetDlStatus>(EMPTY);
   const [busy, setBusy] = useState(false);
@@ -48,12 +54,12 @@ export default function NetGalleryDialog({ onClose, onDone }: NetGalleryDialogPr
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    notifyModalOpen();
+    if (!embedded) notifyModalOpen();
     return () => {
-      notifyModalClose();
+      if (!embedded) notifyModalClose();
       if (timerRef.current !== null) window.clearInterval(timerRef.current);
     };
-  }, []);
+  }, [embedded]);
 
   const stopPolling = () => {
     if (timerRef.current !== null) {
@@ -128,10 +134,13 @@ export default function NetGalleryDialog({ onClose, onDone }: NetGalleryDialogPr
     status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className={embedded ? "panel-embedded" : "modal-backdrop"}
+      onClick={embedded ? undefined : onClose}
+    >
       <div
-        className="modal net-dl-dialog"
-        style={{ width: "min(620px, 92vw)" }}
+        className={`modal net-dl-dialog${embedded ? " is-embedded" : ""}`}
+        style={embedded ? undefined : { width: "min(620px, 92vw)" }}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="modal-title-row">
@@ -141,9 +150,11 @@ export default function NetGalleryDialog({ onClose, onDone }: NetGalleryDialogPr
               贴作品页链接（exhentai / e-hentai），抓全书图片和标签，打包进画匣。
             </p>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-            <CloseIcon />
-          </button>
+          {!embedded && (
+            <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+              <CloseIcon />
+            </button>
+          )}
         </header>
 
         <div style={{ padding: "0 18px 8px" }}>

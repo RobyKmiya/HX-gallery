@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, assetUrl } from "../api";
+import { useLibraryActions } from "../libraryActions";
 import { formatDateTime } from "../format";
 import type {
   ArchiveCardData,
@@ -30,19 +31,27 @@ import TagGraph from "./TagGraph";
 
 interface TagCenterProps {
   onClose: () => void;
-  onNotify: (message: string, kind?: "info" | "success" | "error") => void;
-  onChanged: () => Promise<void>;
-  onBrowseTag: (tagId: number) => void;
+  onNotify?: (message: string, kind?: "info" | "success" | "error") => void;
+  onChanged?: () => Promise<void>;
+  onBrowseTag?: (tagId: number) => void;
+  /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮（标签条负责关）。 */
+  embedded?: boolean;
 }
 
 type TagTab = "active" | "categories" | "deleted";
 
 export default function TagCenter({
   onClose,
-  onNotify,
-  onChanged,
-  onBrowseTag,
+  onNotify: onNotifyProp,
+  onChanged: onChangedProp,
+  onBrowseTag: onBrowseTagProp,
+  embedded = false,
 }: TagCenterProps) {
+  // 标签里没有外层传 props 时，用 LibraryView 注入的库级动作桥兜底。
+  const actions = useLibraryActions();
+  const onNotify = onNotifyProp ?? actions.notify;
+  const onChanged = onChangedProp ?? actions.refresh;
+  const onBrowseTag = onBrowseTagProp ?? actions.browseTag;
   const [tags, setTags] = useState<Tag[]>([]);
   const [deletedTags, setDeletedTags] = useState<Tag[]>([]);
   const [categories, setCategories] = useState<TagCategory[]>([]);
@@ -511,11 +520,14 @@ export default function TagCenter({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className={embedded ? "panel-embedded" : "modal-backdrop"}
+      onClick={embedded ? undefined : onClose}
+    >
       <div
-        className="tag-center"
-        role="dialog"
-        aria-modal="true"
+        className={`tag-center${embedded ? " is-embedded" : ""}`}
+        role={embedded ? "region" : "dialog"}
+        aria-modal={embedded ? undefined : true}
         aria-label="标签中心"
         onClick={(event) => event.stopPropagation()}
       >
@@ -557,14 +569,16 @@ export default function TagCenter({
               <GraphIcon width={15} height={15} />
               {graphLoading ? "生成中…" : "一键导图"}
             </button>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={onClose}
-              aria-label="关闭标签中心"
-            >
-              <CloseIcon />
-            </button>
+            {!embedded && (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={onClose}
+                aria-label="关闭标签中心"
+              >
+                <CloseIcon />
+              </button>
+            )}
           </div>
         </header>
 

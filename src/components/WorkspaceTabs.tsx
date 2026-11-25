@@ -1,20 +1,32 @@
 /**
  * 工作台多标签（P1，方案见 docs/浏览器内置阅读器方案.md）。
  *
- * 形态：顶部标签条，主页标签 = 库主目录界面（LibraryView 原样保留），
- * 其余标签 = 内建浏览器（原生子 webview 挂 main 窗，React 只量占位矩形）。
+ * 形态：顶部标签条。主页与「标签中心 / 回收站 / 发版 / 设置 / 网络画集」
+ * 都是标签，共用同一个 LibraryView 实例（按 activeKind 内部分发渲染），
+ * 浏览器标签各自挂一个原生子 webview（React 只量占位矩形）。
  *
  * 关键规则：
  * - 原生子 webview 是独立 HWND，React 模态盖不住 → 任何模态打开时必须
  *   notifyModalOpen() 让浏览器 host 整体隐藏，关掉再恢复；
  * - 引擎切标签只隐藏不销毁，回来原样（登录态/滚动都在）；
- * - 关浏览器标签 = d2_embed_close，绝不碰宿主窗。
+ * - 关浏览器标签 = d2_embed_close，绝不碰宿主窗；
+ * - 非浏览器标签共享一个 LibraryView，切标签只换 activeKind，状态不丢。
  */
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import type { LibraryState } from "../types";
 import LibraryView from "./LibraryView";
+import {
+  TAB_SETTINGS_EVENT,
+  readPersistedTabs,
+  readStartupTarget,
+  readTabSettings,
+  savePersistedTabs,
+  type StartupTarget,
+  type TabSettings,
+} from "../tabSettings";
+import { EVENT_MODAL } from "../modalBus";
 
 export interface WorkTab {
   id: string;
@@ -54,10 +66,48 @@ const TAB_TITLE: Record<TabKind, string> = {
   net: "网络画集",
 };
 
-import { EVENT_MODAL } from "../modalBus";
+const KNOWN_KINDS = Object.keys(TAB_TITLE) as TabKind[];
+
+function isTabKind(value: string): value is TabKind {
+  return (KNOWN_KINDS as string[]).includes(value);
+}
 
 function browserTabTitle(index: number): string {
   return index === 0 ? "浏览器" : `浏览器 ${index + 1}`;
+}
+
+/** 启动时决定初始标签集合：主页 / 上次的非浏览器标签 / 指定收藏（仍是主页）。 */
+function initialTabs(): WorkTab[] {
+  const settings = readTabSettings();
+  if (settings.startupMode === "last") {
+    const persisted = readPersistedTabs();
+    if (persisted) {
+      const kinds = persisted.kinds
+        .filter((kind): kind is TabKind => isTabKind(kind) && kind !== "browser")
+        .filter((kind, index, list) => kind === "home" || list.indexOf(kind) === index);
+      const ordered = (["home"] as TabKind[])
+        .concat(kinds.filter((kind) => kind !== "home"))
+        .slice(0, 8);
+      return ordered.map((kind) => ({
+        id: kind,
+        kind,
+        title: TAB_TITLE[kind],
+      }));
+    }
+  }
+  return [{ id: "home", kind: "home", title: TAB_TITLE.home }];
+}
+
+function initialActiveId(tabs: WorkTab[]): string {
+  const settings = readTabSettings();
+  if (settings.startupMode === "last") {
+    const persisted = readPersistedTabs();
+    if (persisted) {
+      const match = tabs.find((tab) => tab.kind === persisted.active);
+      if (match) return match.id;
+    }
+  }
+  return tabs[0]?.id ?? "home";
 }
 
 function BrowserHost({ visible }: { visible: boolean }) {
@@ -153,20 +203,55 @@ export default function WorkspaceTabs({
   onLibraryChanged: () => Promise<LibraryState>;
   onSwitchLibrary: () => void;
 }) {
-  const [tabs, setTabs] = useState<WorkTab[]>([{ id: "home", kind: "home", title: "主页" }]);
-  const [activeId, setActiveId] = useState("home");
+  const [settings, setSettings] = useState<TabSettings>(() => readTabSettings());
+  const [tabs, setTabs] = useState<WorkTab[]>(() => initialTabs());
+  const [activeId, setActiveId] = useState(() => initialActiveId(initialTabs()));
+  /** 启动目标只在首帧算一次。 */
+  const startupTargetRef = useRef<StartupTarget | null>(readStartupTarget(readTabSettings()));
+  /** 启动遮罩：仅首帧按设置决定，之后点一下揭开。 */
+  const [masked, setMasked] = useState(() => readTabSettings().masked);
+  const hydratedRef = useRef(false);
+
+  const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0];
+  const libraryVisible = activeTab?.kind !== "browser";
+  /** LibraryView 内部据此分发：browser 激活时它被隐藏，给个 home 占位即可。 */
+  const reactKind = activeTab && activeTab.kind !== "browser" ? activeTab.kind : "home";
   const browserCount = tabs.filter((tab) => tab.kind === "browser").length;
 
-  /** 统一开标签入口：单例已存在则召回；可多开的每次新建。 */
+  // 设置面板改完 → 壳重读（新开标签行为 / 启动页立即对后续生效）。
+  useEffect(() => {
+    const onSettings = () => setSettings(readTabSettings());
+    window.addEventListener(TAB_SETTINGS_EVENT, onSettings);
+    return () => window.removeEventListener(TAB_SETTINGS_EVENT, onSettings);
+  }, []);
+
+  // 标签集合落盘（跳过首帧，避免用默认主页覆盖「上次的标签」）。
+  useEffect(() => {
+    if (!hydratedRef.current) {
+      hydratedRef.current = true;
+      return;
+    }
+    const kind = tabs.find((tab) => tab.id === activeId)?.kind ?? "home";
+    savePersistedTabs({
+      kinds: tabs.filter((tab) => tab.kind !== "browser").map((tab) => tab.kind),
+      active: kind,
+    });
+  }, [tabs, activeId]);
+
+  /** 统一开标签入口：单例已存在则召回；可多开的按「新开页行为」决定新建还是复用。 */
   const openTab = (kind: TabKind, title?: string, forceNew = false) => {
-    if (!forceNew && SINGLETON.includes(kind)) {
+    const replaceable =
+      SINGLETON.includes(kind) || (!forceNew && settings.newBehavior === "reuse");
+    if (!forceNew && replaceable) {
       const existing = tabs.find((tab) => tab.kind === kind);
       if (existing) {
         setActiveId(existing.id);
         return existing.id;
       }
     }
-    const id = `${kind}-${Date.now().toString(36)}`;
+    const id = `${kind}-${Date.now().toString(36)}${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
     const count = tabs.filter((tab) => tab.kind === kind).length;
     const name = title ?? (count > 0 ? `${TAB_TITLE[kind]} ${count + 1}` : TAB_TITLE[kind]);
     setTabs((prev) => [...prev, { id, kind, title: name }]);
@@ -175,7 +260,7 @@ export default function WorkspaceTabs({
   };
 
   const addBrowserTab = () => {
-    const id = `browser-${Date.now().toString(36)}`;
+    const id = `browser-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const title = browserTabTitle(browserCount);
     setTabs((prev) => [...prev, { id, kind: "browser", title }]);
     setActiveId(id);
@@ -188,6 +273,12 @@ export default function WorkspaceTabs({
       if (activeId === id) setActiveId(next[next.length - 1]?.id ?? "home");
       return next;
     });
+  };
+
+  /** 面板里的「跳到该标签」走这里；home 关不掉，直接切过去。 */
+  const activateTab = (kind: string) => {
+    if (!isTabKind(kind)) return;
+    openTab(kind);
   };
 
   return (
@@ -211,6 +302,7 @@ export default function WorkspaceTabs({
             <div
               key={tab.id}
               onClick={() => setActiveId(tab.id)}
+              className={`workspace-tab${active ? " is-active" : ""}`}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -220,14 +312,15 @@ export default function WorkspaceTabs({
                 cursor: "pointer",
                 fontSize: 12.5,
                 whiteSpace: "nowrap",
-                maxWidth: 180,
-                minWidth: 74,
+                // 视觉统一：定宽 + 省略，主页与浏览器标签不再长短不一。
+                width: 148,
+                flex: "0 0 148px",
                 overflow: "hidden",
                 background: active ? "var(--bg, #14141a)" : "transparent",
                 color: active ? "var(--text, #e8e8ee)" : "var(--text-dim, #9a9aa4)",
                 borderTop: active ? "2px solid var(--accent, #7c93ff)" : "2px solid transparent",
               }}
-              title={tab.kind === "home" ? "库主目录（不可关闭）" : "内建浏览器标签"}
+              title={tab.kind === "home" ? "库主目录（不可关闭）" : tab.title}
             >
               <span style={{ flex: "0 0 auto" }}>{TAB_GLYPH[tab.kind]}</span>
               <span
@@ -328,31 +421,55 @@ export default function WorkspaceTabs({
         </div>
       </div>
       <div style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}>
-        {tabs.map((tab) => {
-          const active = tab.id === activeId;
-          return (
+        {/* 非浏览器标签共用一份 LibraryView：切标签只换 activeKind，状态不丢。 */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            visibility: libraryVisible ? "visible" : "hidden",
+          }}
+        >
+          <LibraryView
+            library={library}
+            onLibraryChanged={onLibraryChanged}
+            onSwitchLibrary={onSwitchLibrary}
+            onOpenTab={(kind, title) => openTab(kind as TabKind, title)}
+            activeKind={reactKind}
+            onActivateTab={activateTab}
+            startupTarget={startupTargetRef.current}
+          />
+        </div>
+        {/* 浏览器标签各挂一个原生子 webview。 */}
+        {tabs
+          .filter((tab) => tab.kind === "browser")
+          .map((tab) => (
             <div
               key={tab.id}
               style={{
                 position: "absolute",
                 inset: 0,
-                visibility: active ? "visible" : "hidden",
+                visibility: activeId === tab.id ? "visible" : "hidden",
               }}
             >
-              {tab.kind === "home" ? (
-                <LibraryView
-                  library={library}
-                  onLibraryChanged={onLibraryChanged}
-                  onSwitchLibrary={onSwitchLibrary}
-                  onOpenTab={(kind, title) => openTab(kind as TabKind, title)}
-                />
-              ) : (
-                <BrowserHost visible={active} />
-              )}
+              <BrowserHost visible={activeId === tab.id} />
             </div>
-          );
-        })}
+          ))}
       </div>
+      {/* 启动遮罩：盖住内容，点一下才显示（--masked 的本地雏形）。 */}
+      {masked && (
+        <div
+          className="startup-mask"
+          role="presentation"
+          onClick={() => setMasked(false)}
+          title="点击显示画匣"
+        >
+          <div className="startup-mask-card">
+            <span className="startup-mask-dot" aria-hidden="true" />
+            <strong>画匣已盖住</strong>
+            <p>点击任意处继续</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

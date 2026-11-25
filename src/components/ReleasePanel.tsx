@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { useLibraryActions } from "../libraryActions";
 import type { ReleaseState } from "../types";
 import { CloseIcon, RefreshIcon } from "./Icons";
 
 interface ReleasePanelProps {
   onClose: () => void;
-  onNotify: (message: string, kind?: "info" | "success" | "error") => void;
+  onNotify?: (message: string, kind?: "info" | "success" | "error") => void;
+  /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮。 */
+  embedded?: boolean;
 }
 
 /**
@@ -15,7 +18,13 @@ interface ReleasePanelProps {
  * 发布必须在本程序退出后才跑（脚本要结束 archive-gallery.exe 并覆盖它），
  * 所以这里做的是「登记源码目录 + 安排一次退出后发布」，而不是当场构建。
  */
-export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
+export default function ReleasePanel({
+  onClose,
+  onNotify: onNotifyProp,
+  embedded = false,
+}: ReleasePanelProps) {
+  const actions = useLibraryActions();
+  const onNotify = onNotifyProp ?? actions.notify;
   const [state, setState] = useState<ReleaseState | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -129,11 +138,15 @@ export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
           : "还没有更新过";
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div
+      className={embedded ? "panel-embedded" : "modal-backdrop"}
+      role={embedded ? undefined : "presentation"}
+      onClick={embedded ? undefined : onClose}
+    >
       <div
-        className="release-panel"
-        role="dialog"
-        aria-modal="true"
+        className={`release-panel${embedded ? " is-embedded" : ""}`}
+        role={embedded ? "region" : "dialog"}
+        aria-modal={embedded ? undefined : true}
         aria-label="更新画匣"
         onClick={(event) => event.stopPropagation()}
       >
@@ -152,14 +165,16 @@ export default function ReleasePanel({ onClose, onNotify }: ReleasePanelProps) {
             >
               <RefreshIcon width={16} height={16} />
             </button>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={onClose}
-              aria-label="关闭"
-            >
-              <CloseIcon width={16} height={16} />
-            </button>
+            {!embedded && (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={onClose}
+                aria-label="关闭"
+              >
+                <CloseIcon width={16} height={16} />
+              </button>
+            )}
           </div>
         </header>
 
