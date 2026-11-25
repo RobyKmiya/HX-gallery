@@ -2192,6 +2192,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .setup(move |app| {
             // 上次发布成功后补记基线：之后关窗不会再无脑抬版本
             release::settle_baseline_after_success(app.handle());
+            // 内置「画匣盾」用户脚本：首次启动写入脚本仓库，之后不覆盖（用户可停用）。
+            userscripts::ensure_builtin_scripts(app.handle());
             // 注册老板键呼回（默认 Ctrl+Shift+H，可在设置里改；失败不拦启动，只记日志）。
             {
                 let binding = load_boss_recall(app.handle());

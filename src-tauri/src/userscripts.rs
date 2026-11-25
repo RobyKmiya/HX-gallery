@@ -846,6 +846,26 @@ fn curl_download_text(url: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// 画匣盾脚本源码（编译时嵌入，发布包不依赖外部文件）。
+const BUILTIN_SHIELD: &str = include_str!("../../public/huaxia-shield.user.js");
+
+/// 启动时确保「画匣盾」在脚本仓库里。
+///
+/// store 在 `app_cache_dir`（系统可能清理），所以每次启动都检查；**已存在就不动**，
+/// 用户停用或改过都不覆盖。脚本注入在浏览窗口创建时烘焙，装好后重开浏览窗口生效。
+pub fn ensure_builtin_scripts(app: &AppHandle) {
+    let Some(dir) = store_dir(app) else {
+        return;
+    };
+    let path = dir.join("huaxia-shield.user.js");
+    if path.exists() {
+        return;
+    }
+    if let Err(error) = fs::write(&path, BUILTIN_SHIELD) {
+        eprintln!("[userscripts] 写入内置画匣盾失败: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
