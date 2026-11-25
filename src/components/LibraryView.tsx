@@ -92,6 +92,8 @@ interface NavSnapshot {
 interface LibraryViewProps {
   library: LibraryState;
   onLibraryChanged: () => Promise<LibraryState>;
+  /** 开新标签（标签范式：面板后续迁到标签，先保留接口）。 */
+  onOpenTab?: (kind: string, title?: string) => void;
   onSwitchLibrary: () => void;
 }
 
@@ -227,6 +229,7 @@ export default function LibraryView({
   library,
   onLibraryChanged,
   onSwitchLibrary,
+  // onOpenTab 预留给标签范式迁移（面板逐个迁过去后启用）
 }: LibraryViewProps) {
   const [items, setItems] = useState<ArchiveCardData[]>([]);
   /** 合集卡：只在纯浏览第 1 页有值，其余情况为空数组。 */

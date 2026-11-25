@@ -18,9 +18,41 @@ import LibraryView from "./LibraryView";
 
 export interface WorkTab {
   id: string;
-  kind: "home" | "browser";
+  kind: TabKind;
   title: string;
 }
+
+export type TabKind =
+  | "home"
+  | "browser"
+  | "tags"
+  | "trash"
+  | "release"
+  | "settings"
+  | "net";
+
+/** 单例标签：已存在时再开就召回，不重复开。其余（browser / net）可多开。 */
+const SINGLETON: TabKind[] = ["home", "tags", "trash", "release", "settings"];
+
+const TAB_GLYPH: Record<TabKind, string> = {
+  home: "🏠",
+  browser: "🌐",
+  tags: "#️⃣",
+  trash: "🗑",
+  release: "🚀",
+  settings: "⚙️",
+  net: "⬇️",
+};
+
+const TAB_TITLE: Record<TabKind, string> = {
+  home: "主页",
+  browser: "浏览器",
+  tags: "标签中心",
+  trash: "回收站",
+  release: "发版",
+  settings: "设置",
+  net: "网络画集",
+};
 
 import { EVENT_MODAL } from "../modalBus";
 
@@ -125,6 +157,23 @@ export default function WorkspaceTabs({
   const [activeId, setActiveId] = useState("home");
   const browserCount = tabs.filter((tab) => tab.kind === "browser").length;
 
+  /** 统一开标签入口：单例已存在则召回；可多开的每次新建。 */
+  const openTab = (kind: TabKind, title?: string, forceNew = false) => {
+    if (!forceNew && SINGLETON.includes(kind)) {
+      const existing = tabs.find((tab) => tab.kind === kind);
+      if (existing) {
+        setActiveId(existing.id);
+        return existing.id;
+      }
+    }
+    const id = `${kind}-${Date.now().toString(36)}`;
+    const count = tabs.filter((tab) => tab.kind === kind).length;
+    const name = title ?? (count > 0 ? `${TAB_TITLE[kind]} ${count + 1}` : TAB_TITLE[kind]);
+    setTabs((prev) => [...prev, { id, kind, title: name }]);
+    setActiveId(id);
+    return id;
+  };
+
   const addBrowserTab = () => {
     const id = `browser-${Date.now().toString(36)}`;
     const title = browserTabTitle(browserCount);
@@ -171,15 +220,28 @@ export default function WorkspaceTabs({
                 cursor: "pointer",
                 fontSize: 12.5,
                 whiteSpace: "nowrap",
+                maxWidth: 180,
+                minWidth: 74,
+                overflow: "hidden",
                 background: active ? "var(--bg, #14141a)" : "transparent",
                 color: active ? "var(--text, #e8e8ee)" : "var(--text-dim, #9a9aa4)",
                 borderTop: active ? "2px solid var(--accent, #7c93ff)" : "2px solid transparent",
               }}
               title={tab.kind === "home" ? "库主目录（不可关闭）" : "内建浏览器标签"}
             >
-              <span>{tab.kind === "home" ? "🏠" : "🌐"}</span>
-              <span>{tab.title}</span>
-              {tab.kind === "browser" && (
+              <span style={{ flex: "0 0 auto" }}>{TAB_GLYPH[tab.kind]}</span>
+              <span
+                style={{
+                  flex: "1 1 auto",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  textAlign: "left",
+                }}
+              >
+                {tab.title}
+              </span>
+              {tab.kind !== "home" && (
                 <button
                   type="button"
                   onClick={(event) => {
@@ -282,6 +344,7 @@ export default function WorkspaceTabs({
                   library={library}
                   onLibraryChanged={onLibraryChanged}
                   onSwitchLibrary={onSwitchLibrary}
+                  onOpenTab={(kind, title) => openTab(kind as TabKind, title)}
                 />
               ) : (
                 <BrowserHost visible={active} />
