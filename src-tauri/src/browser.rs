@@ -1900,21 +1900,40 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
             };
             // 读取与清空放在同一次 eval 里完成（原子取走），避免执行期间新点的
             // 动作被误清，也避免同一批动作重复执行。
-            let raw = match eval_json(
-                &toolbar,
-                "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())",
-                Duration::from_secs(2),
-            ) {
-                Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
-                _ => {
-                    push_state(&label);
-                    continue;
+            // 队列有两个来源：工具栏 webview（按钮）和**当前内容页**（快捷键 / 鼠标侧键 /
+            // 右键菜单）。以前只读工具栏，内容页写的动作永远没人消费——Ctrl+R / F5 /
+            // Alt+←→ / Ctrl+滚轮缩放全部静默失效（管理员 2026-11-26 反馈的「快捷键无用」）。
+            const QUEUE_JS: &str =
+                "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())";
+            let mut reqs: Vec<serde_json::Value> = Vec::new();
+            if let Ok(raw) = eval_json(&toolbar, QUEUE_JS, Duration::from_secs(2)) {
+                if !raw.trim().is_empty() && raw != "[]" {
+                    if let Ok(mut list) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                        reqs.append(&mut list);
+                    }
                 }
-            };
-            let reqs: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
+            }
+            let active_webview = with_state(&label, |state| {
+                state
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == state.active)
+                    .map(|tab| tab.webview.clone())
+            })
+            .flatten();
+            if let Some(active) = active_webview {
+                if let Ok(raw) = eval_json(&active, QUEUE_JS, Duration::from_millis(800)) {
+                    if !raw.trim().is_empty() && raw != "[]" {
+                        if let Ok(mut list) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                            reqs.append(&mut list);
+                        }
+                    }
+                }
+            }
+            if reqs.is_empty() {
+                push_state(&label);
+                continue;
+            }
             for req in reqs {
                 let action = req
                     .get("action")
