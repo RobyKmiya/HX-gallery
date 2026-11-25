@@ -621,7 +621,7 @@ pub(crate) fn cookie_header(webview: &Webview, url: &str) -> String {
 /// 从图片页 HTML 里抠出原图地址。
 ///
 /// 先认 `id="original"` 的原图链接，再退回 `id="img"` 的 src / data-src。
-fn extract_image_url(html: &str) -> Option<String> {
+pub(crate) fn extract_image_url(html: &str) -> Option<String> {
     if let Some(tag) = tag_with_id(html, "original") {
         if let Some(href) = attr_value(tag, "href") {
             return Some(unescape_html(&href));

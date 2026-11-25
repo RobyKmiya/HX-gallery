@@ -94,10 +94,22 @@ fn curl_base() -> std::process::Command {
 }
 
 fn cookie_for(app: &AppHandle, url: &str) -> String {
-    let Some(webview) = app.get_webview_window("main") else {
+    // 直接问主窗要 cookie：与织机下载器同一份登录态，用户在内置浏览器里登录过
+    // 就不必再来一遍。
+    let Some(window) = app.get_webview_window("main") else {
         return String::new();
     };
-    crate::gallery_dl::cookie_header(&webview, url)
+    let Ok(parsed) = tauri::Url::parse(url) else {
+        return String::new();
+    };
+    match window.cookies_for_url(parsed) {
+        Ok(list) => list
+            .iter()
+            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+            .collect::<Vec<_>>()
+            .join("; "),
+        Err(_) => String::new(),
+    }
 }
 
 /// 抓一段文本（页面 HTML）。
@@ -129,7 +141,7 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
         .arg("--max-time")
         .arg("300")
         .arg("--retry")
-        .arg(3);
+        .arg("3");
     let cookie = cookie_for(app, url);
     if !cookie.is_empty() {
         command.arg("-H").arg(format!("Cookie: {cookie}"));
@@ -284,9 +296,7 @@ fn collect_page_links(app: &AppHandle, gallery_url: &str, total: usize) -> Resul
 
 /// 图片页里的原图地址。
 fn parse_image_url(html: &str) -> Option<String> {
-    let tag = between(html, "<img id=\"img\"", ">")?;
-    let src = between(tag, "src=\"", "\"")?;
-    Some(html_unescape(src))
+    crate::gallery_dl::extract_image_url(html)
 }
 
 fn extension_of(url: &str) -> &'static str {
