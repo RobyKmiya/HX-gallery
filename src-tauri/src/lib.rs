@@ -2221,9 +2221,13 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                                     if let (Some(x), Some(y)) =
                                         (value["x"].as_f64(), value["y"].as_f64())
                                     {
-                                        // 至少留 80px 在屏内，避免整窗跑到屏幕外找不回来。
-                                        let cx = x.clamp(mon_x - width + 80.0, mon_x + max_w - 80.0);
-                                        let cy = y.clamp(mon_y, mon_y + max_h - 80.0);
+                                        // 窗口必须**整体**落在屏幕工作区里：上限 = 屏幕右下 - 窗口尺寸。
+                                        // 以前只限制「起点别太靠下」，size 大时下半截仍在屏外，
+                                        // 表现为窗口跑到屏幕最底下、只剩一条黑边拖不动（1.1.54 事故）。
+                                        let max_cx = (mon_x + max_w - width).max(mon_x);
+                                        let max_cy = (mon_y + max_h - height).max(mon_y);
+                                        let cx = x.clamp(mon_x, max_cx);
+                                        let cy = y.clamp(mon_y, max_cy);
                                         let _ = window.set_position(tauri::PhysicalPosition::new(
                                             cx.round() as i32,
                                             cy.round() as i32,
