@@ -329,9 +329,238 @@ fn migrate(conn: &Connection, gallery_dir: &Path) -> Result<(), String> {
             .map_err(|e| format!("提交升级事务失败: {e}"))?;
     }
 
+    ensure_browser_tables(conn)?;
     unify_dictionary_tags(conn)?;
     ensure_full_text(conn)?;
     backfill_dictionary_translations(conn)
+}
+
+/// 浏览器历史 / 账号簿。都放库 DB，随库走；用 IF NOT EXISTS 幂等建表，不动 user_version。
+fn ensure_browser_tables(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS browser_history (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             url TEXT NOT NULL,
+             title TEXT NOT NULL DEFAULT '',
+             visited_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_browser_history_visited
+             ON browser_history(visited_at DESC);
+         CREATE TABLE IF NOT EXISTS browser_credential (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             site TEXT NOT NULL,
+             username TEXT NOT NULL,
+             password_enc BLOB NOT NULL,
+             note TEXT NOT NULL DEFAULT '',
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_browser_credential_site
+             ON browser_credential(site COLLATE NOCASE);",
+    )
+    .map_err(|e| format!("建浏览器数据表失败: {e}"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub id: i64,
+    pub url: String,
+    pub title: String,
+    pub visited_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialEntry {
+    pub id: i64,
+    pub site: String,
+    pub username: String,
+    pub note: String,
+    pub updated_at: i64,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 记一条浏览历史。
+///
+/// 10 分钟内同 URL 只更新时间，避免刷新 / 前进后退把历史刷爆；`about:` 与
+/// `huaxia:`（画匣新页标记）不入库。只留最近 3000 条。
+pub fn record_history(conn: &Connection, url: &str, title: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.starts_with("about:") || trimmed.starts_with("huaxia:") {
+        return Ok(());
+    }
+    let now = now_ms();
+    let recent: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM browser_history WHERE url = ?1 AND visited_at > ?2
+             ORDER BY visited_at DESC LIMIT 1",
+            params![trimmed, now - 10 * 60 * 1000],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("查询历史失败: {e}"))?;
+    if let Some(id) = recent {
+        conn.execute(
+            "UPDATE browser_history
+             SET visited_at = ?1, title = CASE WHEN ?2 = '' THEN title ELSE ?2 END
+             WHERE id = ?3",
+            params![now, title, id],
+        )
+        .map_err(|e| format!("更新历史失败: {e}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO browser_history (url, title, visited_at) VALUES (?1, ?2, ?3)",
+            params![trimmed, title, now],
+        )
+        .map_err(|e| format!("写入历史失败: {e}"))?;
+    }
+    conn.execute(
+        "DELETE FROM browser_history WHERE id NOT IN
+         (SELECT id FROM browser_history ORDER BY visited_at DESC LIMIT 3000)",
+        [],
+    )
+    .map_err(|e| format!("清理历史失败: {e}"))?;
+    Ok(())
+}
+
+/// 标题晚到时补到最近一条同 URL 记录上。
+pub fn update_history_title(conn: &Connection, url: &str, title: &str) -> Result<(), String> {
+    if title.trim().is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE browser_history SET title = ?1 WHERE id = (
+            SELECT id FROM browser_history WHERE url = ?2 ORDER BY visited_at DESC LIMIT 1
+         )",
+        params![title, url],
+    )
+    .map_err(|e| format!("补历史标题失败: {e}"))?;
+    Ok(())
+}
+
+pub fn list_history(
+    conn: &Connection,
+    search: Option<&str>,
+    limit: i64,
+) -> Result<Vec<HistoryEntry>, String> {
+    let limit = limit.clamp(1, 500);
+    let pattern = search
+        .map(|value| format!("%{}%", value.trim()))
+        .unwrap_or_default();
+    let mut statement = conn
+        .prepare(
+            "SELECT id, url, title, visited_at FROM browser_history
+             WHERE (?1 = '' OR url LIKE ?1 OR title LIKE ?1)
+             ORDER BY visited_at DESC LIMIT ?2",
+        )
+        .map_err(|e| format!("准备历史查询失败: {e}"))?;
+    let rows = statement
+        .query_map(params![pattern, limit], |row| {
+            Ok(HistoryEntry {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                visited_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("查询历史失败: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取历史失败: {e}"))
+}
+
+pub fn delete_history(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM browser_history WHERE id = ?1", params![id])
+        .map_err(|e| format!("删除历史失败: {e}"))?;
+    Ok(())
+}
+
+pub fn clear_history(conn: &Connection) -> Result<(), String> {
+    conn.execute("DELETE FROM browser_history", [])
+        .map_err(|e| format!("清空历史失败: {e}"))?;
+    Ok(())
+}
+
+pub fn list_credentials(conn: &Connection) -> Result<Vec<CredentialEntry>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, site, username, note, updated_at FROM browser_credential
+             ORDER BY site COLLATE NOCASE, username COLLATE NOCASE",
+        )
+        .map_err(|e| format!("准备账号查询失败: {e}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(CredentialEntry {
+                id: row.get(0)?,
+                site: row.get(1)?,
+                username: row.get(2)?,
+                note: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| format!("查询账号失败: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取账号失败: {e}"))
+}
+
+/// 新增或更新一条账号。`password_enc` 为 None 表示「不改密码」。
+pub fn upsert_credential(
+    conn: &Connection,
+    id: Option<i64>,
+    site: &str,
+    username: &str,
+    password_enc: Option<&[u8]>,
+    note: &str,
+) -> Result<i64, String> {
+    let now = now_ms();
+    if let Some(id) = id {
+        match password_enc {
+            Some(enc) => conn.execute(
+                "UPDATE browser_credential
+                 SET site = ?1, username = ?2, password_enc = ?3, note = ?4, updated_at = ?5
+                 WHERE id = ?6",
+                params![site, username, enc, note, now, id],
+            ),
+            None => conn.execute(
+                "UPDATE browser_credential
+                 SET site = ?1, username = ?2, note = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![site, username, note, now, id],
+            ),
+        }
+        .map_err(|e| format!("更新账号失败: {e}"))?;
+        return Ok(id);
+    }
+    let enc: &[u8] = password_enc.unwrap_or(&[]);
+    conn.execute(
+        "INSERT INTO browser_credential (site, username, password_enc, note, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![site, username, enc, note, now],
+    )
+    .map_err(|e| format!("写入账号失败: {e}"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_credential(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM browser_credential WHERE id = ?1", params![id])
+        .map_err(|e| format!("删除账号失败: {e}"))?;
+    Ok(())
+}
+
+/// 取密码密文（由调用方解密）。
+pub fn credential_password(conn: &Connection, id: i64) -> Result<Vec<u8>, String> {
+    conn.query_row(
+        "SELECT password_enc FROM browser_credential WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .map_err(|e| format!("读取账号密码失败: {e}"))
 }
 
 /// 标签归一：把「中文固定词」或「非规范拼写」的标签改到词典的英文规范名上。

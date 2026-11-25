@@ -1360,8 +1360,11 @@ fn attach_tab_hooks(
         .on_navigation({
             let label_for_navigation = label_for_nav.clone();
             let tab_id_for_navigation = tab_id_for_nav.clone();
+            let app_for_history = app.clone();
             move |url| {
                 crumb(format!("导航 {url}"));
+                // 浏览历史：异步落库，别在主线程抢锁。
+                crate::record_browser_history_async(&app_for_history, url.to_string());
                 note_tab_url(&label_for_navigation, &tab_id_for_navigation, &url.to_string());
                 // 导航一发生就先进「加载中」，工具栏刷新键立刻变成停止键。
                 note_tab_loading(&label_for_navigation, &tab_id_for_navigation, true);

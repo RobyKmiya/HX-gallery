@@ -905,6 +905,191 @@ async fn purge_archive(
     .await
 }
 
+/// webview 导航时记一条历史。**必须异步**：on_navigation 跑在主线程，
+/// 同步抢库锁会和别的线程互等（browser.rs 注释里的死锁铁律）。
+pub(crate) fn record_browser_history_async(app: &AppHandle, url: String) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let inner = state.inner().clone();
+        let Ok(guard) = inner.lock() else {
+            return;
+        };
+        if let Some(library) = guard.library.as_ref() {
+            let _ = db::record_history(&library.conn, &url, "");
+        }
+    });
+}
+
+// ---------- 浏览器账号密码：Windows DPAPI ----------
+// 只绑当前 Windows 用户能解，落库是密文，不写明文、不进日志。
+#[cfg(windows)]
+fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: data.len() as u32,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = CryptProtectData(
+            &input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        );
+        if ok == 0 {
+            return Err("DPAPI 加密失败".to_string());
+        }
+        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        let _ = LocalFree(output.pbData as *mut core::ffi::c_void);
+        Ok(bytes)
+    }
+}
+
+#[cfg(windows)]
+fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: data.len() as u32,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        );
+        if ok == 0 {
+            return Err("DPAPI 解密失败".to_string());
+        }
+        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        let _ = LocalFree(output.pbData as *mut core::ffi::c_void);
+        Ok(bytes)
+    }
+}
+
+#[cfg(not(windows))]
+fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(data.to_vec())
+}
+
+#[cfg(not(windows))]
+fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(data.to_vec())
+}
+
+#[tauri::command]
+async fn browser_history_list(
+    state: State<'_, AppState>,
+    search: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<db::HistoryEntry>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::list_history(&library.conn, search.as_deref(), limit.unwrap_or(200))
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn browser_history_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::delete_history(&library.conn, id))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn browser_history_clear(state: State<'_, AppState>) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::clear_history(&library.conn))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn browser_credential_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<db::CredentialEntry>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::list_credentials(&library.conn))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn browser_credential_save(
+    state: State<'_, AppState>,
+    id: Option<i64>,
+    site: String,
+    username: String,
+    password: Option<String>,
+    note: Option<String>,
+) -> Result<i64, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            // 空密码 = 不改；非空 = DPAPI 加密后落库。
+            let enc = match password.as_deref() {
+                Some(value) if !value.is_empty() => Some(dpapi_protect(value.as_bytes())?),
+                _ => None,
+            };
+            db::upsert_credential(
+                &library.conn,
+                id,
+                site.trim(),
+                username.trim(),
+                enc.as_deref(),
+                note.as_deref().unwrap_or(""),
+            )
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn browser_credential_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::delete_credential(&library.conn, id))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn browser_credential_reveal(state: State<'_, AppState>, id: i64) -> Result<String, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let enc = db::credential_password(&library.conn, id)?;
+            let plain = dpapi_unprotect(&enc)?;
+            Ok(String::from_utf8_lossy(&plain).to_string())
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 async fn list_deleted_archives(
     app: AppHandle,
@@ -2068,6 +2253,13 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             save_wallpaper_lock,
             set_wallpaper_password,
             verify_wallpaper_password,
+            browser_history_list,
+            browser_history_delete,
+            browser_history_clear,
+            browser_credential_list,
+            browser_credential_save,
+            browser_credential_delete,
+            browser_credential_reveal,
             list_series,
             create_series,
             update_series,

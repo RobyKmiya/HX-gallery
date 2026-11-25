@@ -29,6 +29,8 @@ import type {
   TagTranslationInput,
   TrashedArchive,
   WallpaperLockConfig,
+  HistoryEntry,
+  CredentialEntry,
 } from "./types";
 
 export const api = {
@@ -381,6 +383,28 @@ export const api = {
   /** 当前阅读页导出 PNG 并设为桌面壁纸。 */
   setDesktopWallpaper: (archiveId: number, pageIndex: number) =>
     invoke<void>("set_desktop_wallpaper", { archiveId, pageIndex }),
+
+  // ---------- 浏览器数据（管理员 2026-11-25：历史 / 账号密码） ----------
+  browserHistoryList: (search?: string, limit?: number) =>
+    invoke<HistoryEntry[]>("browser_history_list", {
+      search: search ?? null,
+      limit: limit ?? null,
+    }),
+  browserHistoryDelete: (id: number) => invoke<void>("browser_history_delete", { id }),
+  browserHistoryClear: () => invoke<void>("browser_history_clear"),
+  browserCredentialList: () => invoke<CredentialEntry[]>("browser_credential_list"),
+  /** id 传 null = 新增；password 传 null/空 = 不改密码。 */
+  browserCredentialSave: (args: {
+    id?: number | null;
+    site: string;
+    username: string;
+    password?: string | null;
+    note?: string | null;
+  }) => invoke<number>("browser_credential_save", args),
+  browserCredentialDelete: (id: number) => invoke<void>("browser_credential_delete", { id }),
+  /** 按需解密取密码明文（DPAPI 绑当前 Windows 用户）。 */
+  browserCredentialReveal: (id: number) =>
+    invoke<string>("browser_credential_reveal", { id }),
 
   // ---------- 壁纸锁（管理员 2026-11-25；防君子不防小人） ----------
   /** 读壁纸锁配置（哈希/盐不下发，只给开关、壁纸列表、轮换间隔）。 */

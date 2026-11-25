@@ -327,6 +327,23 @@ export type NavIntent =
   | { kind: "loose" }
   | { kind: "recent" };
 
+/** 浏览历史一条。 */
+export interface HistoryEntry {
+  id: number;
+  url: string;
+  title: string;
+  visitedAt: number;
+}
+
+/** 账号簿一条（密码不随列表下发，点「显示」才单独解密取）。 */
+export interface CredentialEntry {
+  id: number;
+  site: string;
+  username: string;
+  note: string;
+  updatedAt: number;
+}
+
 /** 壁纸来源（壁纸锁 / 新页背景共用）。 */
 export interface WallpaperSource {
   kind: "loose" | "archive" | "file";

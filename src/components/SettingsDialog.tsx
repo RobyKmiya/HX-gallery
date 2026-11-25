@@ -29,10 +29,12 @@ import {
 } from "../gestures";
 import { AlertIcon, BookIcon, CloseIcon, FolderIcon, RefreshIcon, TagIcon } from "./Icons";
 import WallpaperLockSettings from "./WallpaperLockSettings";
+import BrowserDataSettings from "./BrowserDataSettings";
 
 type SettingsTab =
   | "general"
   | "wallpaper"
+  | "browser"
   | "keys"
   | "gestures"
   | "storage"
@@ -58,6 +60,7 @@ interface SettingsDialogProps {
 const TABS: { key: SettingsTab; label: string }[] = [
   { key: "general", label: "通用" },
   { key: "wallpaper", label: "壁纸锁" },
+  { key: "browser", label: "浏览器数据" },
   { key: "keys", label: "快捷键" },
   { key: "gestures", label: "鼠标手势" },
   { key: "storage", label: "存储" },
@@ -374,6 +377,8 @@ export default function SettingsDialog({
             )}
 
             {tab === "wallpaper" && <WallpaperLockSettings />}
+
+            {tab === "browser" && <BrowserDataSettings />}
 
             {tab === "keys" && (
               <>
