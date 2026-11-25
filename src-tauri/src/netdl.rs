@@ -81,6 +81,32 @@ fn proxy_arg() -> Option<String> {
             }
         }
     }
+    // 环境变量没有（双击启动的 GUI 进程不继承 shell 的代理变量）时，
+    // 读 Windows 系统代理——Edge 能用就是靠它。
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        if let Ok(key) = winreg::RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        {
+            let enabled: u32 = key.get_value("ProxyEnable").unwrap_or(0);
+            if enabled == 1 {
+                if let Ok(server) = key.get_value::<String, _>("ProxyServer") {
+                    if let Some(first) = server.split(';').next() {
+                        let first = first.trim();
+                        if !first.is_empty() {
+                            let with_scheme = if first.starts_with("http") {
+                                first.to_string()
+                            } else {
+                                format!("http://{first}")
+                            };
+                            return Some(with_scheme);
+                        }
+                    }
+                }
+            }
+        }
+    }
     None
 }
 
@@ -145,7 +171,7 @@ fn fetch_text(app: &AppHandle, url: &str) -> Result<String, String> {
         .map_err(|e| format!("调用 curl 失败：{e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "拉取页面失败（curl 退出码 {:?}）：{url}",
+            "拉取页面失败（curl 退出码 {:?}，28=超时，未走代理或站点连不上）：{url}",
             output.status.code()
         ));
     }
