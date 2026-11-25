@@ -7852,3 +7852,98 @@ body.is-splitting {
 .wallpaper-item-remove:hover {
   background: #c4362f;
 }
+
+/* 壁纸列表：默认不加载图片，点条目才预览（修多图并发解压卡死） */
+.wallpaper-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wallpaper-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wallpaper-row-main {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12.5px;
+}
+
+.wallpaper-row.is-selected .wallpaper-row-main {
+  border-color: var(--accent, #7c93ff);
+  background: rgba(124, 147, 255, 0.12);
+}
+
+.wallpaper-row-index {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  line-height: 22px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+}
+
+.wallpaper-row-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallpaper-row-kind {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.wallpaper-row-remove {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.wallpaper-row-remove:hover {
+  border-color: #c4362f;
+  color: #e46a63;
+}
+
+.wallpaper-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.wallpaper-preview img {
+  max-width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: 6px;
+}

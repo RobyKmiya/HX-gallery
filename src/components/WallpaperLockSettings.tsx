@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api } from "../api";
+import { api, assetUrl } from "../api";
 import type {
   ArchiveCardData,
   LooseImage,
@@ -8,13 +8,50 @@ import type {
   WallpaperLockConfig,
   WallpaperSource,
 } from "../types";
-import { describeWallpaper, wallpaperUrl } from "../wallpapers";
+import { describeWallpaper } from "../wallpapers";
+
+const KIND_LABEL: Record<WallpaperSource["kind"], string> = {
+  file: "本地",
+  archive: "画廊",
+  loose: "散图",
+};
+
+/**
+ * 取一张壁纸的「预览用小图」。
+ *
+ * 关键：**绝不能直接拿 wallpaperUrl 当列表缩略图**。画廊来源走 gallery://page
+ * 会触发后端解压整页原图（动图几百帧、几十兆），几张一起就卡死。这里画廊走
+ * 后端缩略图接口（很小），散图走 thumb 变体，本地文件才读原图（用户自己选的）。
+ */
+async function previewWallpaper(wall: WallpaperSource): Promise<string | null> {
+  if (wall.kind === "archive") {
+    const [idText, pageText] = wall.reference.split(":");
+    const archiveId = Number(idText);
+    const page = Number(pageText);
+    if (!Number.isFinite(archiveId) || archiveId <= 0) return null;
+    try {
+      const thumb = await api.readReaderThumbnail(
+        archiveId,
+        Number.isFinite(page) ? page : 0,
+        560,
+      );
+      return thumb.dataUrl;
+    } catch {
+      return null;
+    }
+  }
+  if (wall.kind === "loose") {
+    const id = Number(wall.reference);
+    return Number.isFinite(id) && id > 0 ? api.looseImageUrl("thumb", id) : null;
+  }
+  return assetUrl(wall.reference);
+}
 
 /**
  * 设置 → 壁纸锁。
  *
  * 配置落在 Rust 的 settings.json（这样安装目录的「关闭壁纸锁.cmd」才救得了急），
- * 这里只做 UI。壁纸三种来源：本地文件 / 画廊页 / 散图，取图统一走 wallpapers.ts。
+ * 这里只做 UI。列表**不自动加载图片**，点某一条才预览一张，避免多图并发解压卡死。
  */
 export default function WallpaperLockSettings() {
   const [config, setConfig] = useState<WallpaperLockConfig | null>(null);
@@ -30,6 +67,11 @@ export default function WallpaperLockSettings() {
   const [looseCollectionId, setLooseCollectionId] = useState<number | "">("");
   const [looseImages, setLooseImages] = useState<LooseImage[]>([]);
   const [looseImageId, setLooseImageId] = useState<number | "">("");
+
+  /** 选中某条壁纸才加载它的预览；selected 是列表下标。 */
+  const [selected, setSelected] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -84,6 +126,37 @@ export default function WallpaperLockSettings() {
     })();
   }, [looseCollectionId]);
 
+  // 预览：只有被选中的那一条才请求，且画廊走缩略图接口。
+  useEffect(() => {
+    if (selected === null || !config) {
+      setPreviewUrl(null);
+      return;
+    }
+    const wall = config.walls[selected];
+    if (!wall) {
+      setPreviewUrl(null);
+      return;
+    }
+    let cancelled = false;
+    setPreviewBusy(true);
+    void previewWallpaper(wall)
+      .then((url) => {
+        if (!cancelled) {
+          setPreviewUrl(url);
+          setPreviewBusy(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreviewUrl(null);
+          setPreviewBusy(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, config]);
+
   if (!config) {
     return <p className="settings-hint">正在读取壁纸锁…</p>;
   }
@@ -110,6 +183,11 @@ export default function WallpaperLockSettings() {
   };
 
   const removeWall = (index: number) => {
+    setSelected((current) => {
+      if (current === null) return null;
+      if (current === index) return null;
+      return current > index ? current - 1 : current;
+    });
     void persist(
       { ...config, walls: config.walls.filter((_, current) => current !== index) },
       "已移除",
@@ -216,33 +294,49 @@ export default function WallpaperLockSettings() {
       {hint && <p className="settings-hint">{hint}</p>}
 
       <h3>壁纸（{config.walls.length}）</h3>
-      <div className="wallpaper-grid">
-        {config.walls.map((wall, index) => {
-          const url = wallpaperUrl(wall);
-          return (
-            <div className="wallpaper-item" key={`${wall.kind}-${wall.reference}-${index}`}>
-              {url ? (
-                <img src={url} alt="" />
-              ) : (
-                <span className="wallpaper-item-missing">无法预览</span>
-              )}
-              <span className="wallpaper-item-name" title={wall.reference}>
+      <div className="wallpaper-list">
+        {config.walls.map((wall, index) => (
+          <div
+            className={`wallpaper-row${selected === index ? " is-selected" : ""}`}
+            key={`${wall.kind}-${wall.reference}-${index}`}
+          >
+            <button
+              type="button"
+              className="wallpaper-row-main"
+              onClick={() => setSelected(selected === index ? null : index)}
+              title="点一下预览"
+            >
+              <span className="wallpaper-row-index">{index + 1}</span>
+              <span className="wallpaper-row-name" title={wall.reference}>
                 {describeWallpaper(wall)}
               </span>
-              <button
-                type="button"
-                className="wallpaper-item-remove"
-                onClick={() => removeWall(index)}
-                disabled={busy}
-                title="移除"
-              >
-                ×
-              </button>
-            </div>
-          );
-        })}
+              <span className="wallpaper-row-kind">{KIND_LABEL[wall.kind]}</span>
+            </button>
+            <button
+              type="button"
+              className="wallpaper-row-remove"
+              onClick={() => removeWall(index)}
+              disabled={busy}
+              title="移除"
+            >
+              ×
+            </button>
+          </div>
+        ))}
         {config.walls.length === 0 && <p className="settings-hint">还没有壁纸，先在下面加一张。</p>}
       </div>
+
+      {selected !== null && config.walls[selected] && (
+        <div className="wallpaper-preview">
+          {previewBusy ? (
+            <span className="settings-hint">加载预览…</span>
+          ) : previewUrl ? (
+            <img src={previewUrl} alt="" />
+          ) : (
+            <span className="settings-hint">预览失败（文件可能已被移动/删除）</span>
+          )}
+        </div>
+      )}
 
       <h3>添加壁纸</h3>
       <label className="settings-row">

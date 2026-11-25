@@ -1695,6 +1695,37 @@ fn set_boss_recall(app: tauri::AppHandle, binding: String) -> Result<(), String>
 static GEOMETRY_SAVE_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 直接读当前窗口几何写盘（**物理像素**，与读取侧保持一致）。
+///
+/// 关闭时会同步调它：防抖 900ms，如果用户拖完窗就关，最后一笔还没来得及落盘，
+/// 下次启动就回到老位置——这就是「记不住上次位置」的直接原因。
+fn write_window_geometry(window: &tauri::Window) -> bool {
+    let Ok(config_dir) = window.app_handle().path().app_config_dir() else {
+        return false;
+    };
+    let _ = std::fs::create_dir_all(&config_dir);
+    // 最小化时 Windows 把窗口挪到 (-32000,-32000) 并缩成 0x0，这些垃圾几何
+    // 一旦落盘，下次启动就是离屏小窗（1.0.67 事故）。一律不写。
+    if window.is_minimized().unwrap_or(false) {
+        return false;
+    }
+    let maximized = window.is_maximized().unwrap_or(false);
+    let mut value = serde_json::json!({ "maximized": maximized });
+    if !maximized {
+        let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else {
+            return false;
+        };
+        if position.x < -10000 || position.y < -10000 || size.width < 400 || size.height < 300 {
+            return false;
+        }
+        value["x"] = position.x.into();
+        value["y"] = position.y.into();
+        value["width"] = size.width.into();
+        value["height"] = size.height.into();
+    }
+    std::fs::write(config_dir.join("window.json"), value.to_string()).is_ok()
+}
+
 fn persist_window_geometry_debounced(app: tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if GEOMETRY_SAVE_PENDING.swap(true, Ordering::SeqCst) {
@@ -1703,38 +1734,9 @@ fn persist_window_geometry_debounced(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(900));
         GEOMETRY_SAVE_PENDING.store(false, Ordering::SeqCst);
-        let Some(window) = app.get_webview_window("main") else {
-            return;
-        };
-        let Ok(config_dir) = app.path().app_config_dir() else {
-            return;
-        };
-        let _ = std::fs::create_dir_all(&config_dir);
-        // 防护（1.0.67 恶性 bug）：最小化时 Windows 把窗口挪到 (-32000,-32000)
-        // 并缩成 0x0，这些垃圾几何一旦落盘，下次启动就恢复成离屏小窗，
-        // 用户「找不到画匣」。最小化/离屏/零尺寸一律不写，保留上一份好几何。
-        if window.is_minimized().unwrap_or(false) {
-            return;
+        if let Some(window) = app.get_window("main") {
+            write_window_geometry(&window);
         }
-        let maximized = window.is_maximized().unwrap_or(false);
-        let mut value = serde_json::json!({ "maximized": maximized });
-        if !maximized {
-            let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else {
-                return;
-            };
-            if position.x < -10000
-                || position.y < -10000
-                || size.width < 400
-                || size.height < 300
-            {
-                return;
-            }
-            value["x"] = position.x.into();
-            value["y"] = position.y.into();
-            value["width"] = size.width.into();
-            value["height"] = size.height.into();
-        }
-        let _ = std::fs::write(config_dir.join("window.json"), value.to_string());
     });
 }
 
@@ -1990,12 +1992,39 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                                     y > -10000.0 && y < 20000.0
                                 });
                                 if w >= 400.0 && h >= 300.0 && on_screen {
-                                    let _ = window.set_size(tauri::LogicalSize::new(w, h));
+                                    // 落盘的是**物理像素**（见 write_window_geometry），这里必须用
+                                    // Physical 还原：以前用 Logical，150% 缩放下尺寸和坐标被放大 1.5 倍，
+                                    // 于是「一开就特别大、位置也记不对」。
+                                    // 再按当前显示器 clamp，换屏/改缩放后也不会超出屏幕。
+                                    let monitor = window.current_monitor().ok().flatten();
+                                    let (max_w, max_h, mon_x, mon_y) = monitor
+                                        .map(|monitor| {
+                                            let size = monitor.size();
+                                            let position = monitor.position();
+                                            (
+                                                size.width as f64,
+                                                size.height as f64,
+                                                position.x as f64,
+                                                position.y as f64,
+                                            )
+                                        })
+                                        .unwrap_or((1280.0, 820.0, 0.0, 0.0));
+                                    let width = w.min(max_w * 0.95).max(640.0);
+                                    let height = h.min(max_h * 0.95).max(460.0);
+                                    let _ = window.set_size(tauri::PhysicalSize::new(
+                                        width.round() as u32,
+                                        height.round() as u32,
+                                    ));
                                     if let (Some(x), Some(y)) =
                                         (value["x"].as_f64(), value["y"].as_f64())
                                     {
-                                        let _ = window
-                                            .set_position(tauri::LogicalPosition::new(x, y));
+                                        // 至少留 80px 在屏内，避免整窗跑到屏幕外找不回来。
+                                        let cx = x.clamp(mon_x - width + 80.0, mon_x + max_w - 80.0);
+                                        let cy = y.clamp(mon_y, mon_y + max_h - 80.0);
+                                        let _ = window.set_position(tauri::PhysicalPosition::new(
+                                            cx.round() as i32,
+                                            cy.round() as i32,
+                                        ));
                                     }
                                 }
                             }
@@ -2158,6 +2187,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                 // 接管关闭：只要还有子窗（D2 浏览器）活着，默认行为就是进程不退、
                 // 单实例锁不释放，下次点快捷方式只会把旧窗口唤起来。
                 // 这里显式接管，保证「关主窗 = 整个画匣退出」。
+                // 关窗瞬间同步落一次几何：防抖还没到点就被关掉的话，
+                // 位置/大小就白记了（用户反馈「记不住上次位置」）。
+                write_window_geometry(window);
                 api.prevent_close();
                 let _ = window.hide();
                 let handle = window.app_handle().clone();
