@@ -281,6 +281,20 @@ export default function SettingsDialog({
                   </select>
                 </label>
                 <label className="settings-row">
+                  <span>新标签打开</span>
+                  <select
+                    value={tabSettings.newTabPage}
+                    onChange={(event) =>
+                      updateTabSettings({
+                        newTabPage: event.target.value === "bing" ? "bing" : "huaxia",
+                      })
+                    }
+                  >
+                    <option value="huaxia">画匣新页（默认）</option>
+                    <option value="bing">Bing</option>
+                  </select>
+                </label>
+                <label className="settings-row">
                   <span>启动时打开</span>
                   <select
                     value={tabSettings.startupMode}

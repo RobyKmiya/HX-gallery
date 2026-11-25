@@ -13,6 +13,7 @@
  * - 非浏览器标签共享一个 LibraryView，切标签只换 activeKind，状态不丢。
  */
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import type { LibraryState, NavIntent } from "../types";
@@ -117,11 +118,25 @@ function initialActiveId(tabs: WorkTab[]): string {
   return tabs[0]?.id ?? "home";
 }
 
-function BrowserHost({ url, visible }: { url: string; visible: boolean }) {
+function BrowserHost({
+  url,
+  visible,
+  home,
+  onHome,
+}: {
+  url: string;
+  visible: boolean;
+  /** 工具栏 ⌂ 指向：huaxia:newtab（回画匣新页）或 bing 网址。 */
+  home: string;
+  onHome: () => void;
+}) {
   const holderRef = useRef<HTMLDivElement>(null);
   const [label, setLabel] = useState<string | null>(null);
   const modalCount = useRef(0);
   const [modalTick, setModalTick] = useState(0);
+  /** onHome 每次渲染都是新函数，用 ref 挡住重复订阅。 */
+  const onHomeRef = useRef(onHome);
+  onHomeRef.current = onHome;
 
   // 引擎生命周期：挂载/换址时开，卸载时拆（切标签不卸载，只切 visible）。
   useEffect(() => {
@@ -130,7 +145,13 @@ function BrowserHost({ url, visible }: { url: string; visible: boolean }) {
     setLabel(null);
     void (async () => {
       try {
-        const opened = await api.d2EmbedOpen({ url, adblock: true });
+        // home 按设置走：默认 huaxia:newtab（⌂ 发事件 → 主窗切回新页），
+        // 而不是把 e-hentai 当成主页（管理员 2026-11-25 反馈的小房子问题）。
+        const opened = await api.d2EmbedOpen({
+          url,
+          adblock: true,
+          home,
+        });
         if (dead) {
           void api.d2EmbedClose(opened).catch(() => {});
           return;
@@ -146,6 +167,23 @@ function BrowserHost({ url, visible }: { url: string; visible: boolean }) {
       if (mine) void api.d2EmbedClose(mine).catch(() => {});
     };
   }, [url]);
+
+  // 工具栏 ⌂ → 主窗把该标签切回「画匣新页」（卸载 webview，由 React 接管）。
+  useEffect(() => {
+    if (!label) return;
+    let dead = false;
+    let unlisten: (() => void) | null = null;
+    void listen<string>("huaxia://newtab", (event) => {
+      if (event.payload === label) onHomeRef.current();
+    }).then((un) => {
+      if (dead) un();
+      else unlisten = un;
+    });
+    return () => {
+      dead = true;
+      if (unlisten) unlisten();
+    };
+  }, [label]);
 
   // 摆位：ResizeObserver + resize + 低频兜底（布局抖动不丢跟随）。
   useEffect(() => {
@@ -271,15 +309,28 @@ export default function WorkspaceTabs({
 
   const addBrowserTab = () => {
     const id = `browser-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const title = browserCount === 0 ? "新页" : `新页 ${browserCount + 1}`;
-    setTabs((prev) => [...prev, { id, kind: "browser", title, url: null }]);
+    // 「新标签打开」设为 Bing 就直接开 bing，否则开画匣新页（默认）。
+    const bing = settings.newTabPage === "bing";
+    const title = bing
+      ? "bing.com"
+      : browserCount === 0
+        ? "新页"
+        : `新页 ${browserCount + 1}`;
+    setTabs((prev) => [
+      ...prev,
+      { id, kind: "browser", title, url: bing ? "https://www.bing.com/" : null },
+    ]);
     setActiveId(id);
   };
 
-  /** 新页里输入网址：当前浏览器标签从新页切到 webview。 */
-  const setTabUrl = (id: string, url: string) => {
+  /** 新页里输入网址 / 小房子回新页：url=null 时退回 React 新页。 */
+  const setTabUrl = (id: string, url: string | null) => {
     setTabs((prev) =>
-      prev.map((tab) => (tab.id === id ? { ...tab, url, title: hostOf(url) } : tab)),
+      prev.map((tab) =>
+        tab.id === id
+          ? { ...tab, url, title: url ? hostOf(url) : TAB_TITLE.browser }
+          : tab,
+      ),
     );
   };
 
@@ -477,7 +528,16 @@ export default function WorkspaceTabs({
               }}
             >
               {tab.url ? (
-                <BrowserHost url={tab.url} visible={activeId === tab.id} />
+                <BrowserHost
+                  url={tab.url}
+                  visible={activeId === tab.id}
+                  home={
+                    settings.newTabPage === "bing"
+                      ? "https://www.bing.com/"
+                      : "huaxia:newtab"
+                  }
+                  onHome={() => setTabUrl(tab.id, null)}
+                />
               ) : (
                 <NewTab
                   libraryName={library.libraryName ?? undefined}

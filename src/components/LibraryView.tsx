@@ -1926,10 +1926,14 @@ export default function LibraryView({
     } else if (navRequest.kind === "loose") {
       setLooseView(true);
     } else if (navRequest.kind === "recent") {
+      // 先把其它筛选清干净，否则可能被残留的收藏夹/标签筛成空列表，
+      // 看着就像「最近阅读不存在、只回了主页」。
+      setActiveCollectionId(null);
+      setActiveTagIds([]);
+      setActiveQueue(null);
+      setLooseView(false);
       setSort("last_read_at");
       setDirection("desc");
-      setActiveCollectionId(null);
-      setLooseView(false);
     }
     onNavHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps

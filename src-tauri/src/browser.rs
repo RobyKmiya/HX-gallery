@@ -35,6 +35,10 @@ use crate::userscripts::{self, ScriptMeta};
 
 /// 工具栏条的逻辑高度（像素）。内容 webview 从这条线以下开始铺。
 const TOOLBAR_HEIGHT: f64 = 38.0;
+
+/// 特殊「主页」标记：工具栏 ⌂ 看到它不导航，改为发事件让主窗把该标签切回画匣新页。
+/// 画匣新页是主窗里的 React 组件，webview 没法直接显示（管理员 2026-11-25：⌂ 不该回 e-hentai）。
+pub const HUAXIA_NEWTAB: &str = "huaxia:newtab";
 /// 建窗口最多等这么久；超时说明 WebView2 初始化卡住，直接报错收场。
 const WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
 /// 工具栏请求队列 / 状态推送的轮询间隔。
@@ -1972,7 +1976,15 @@ fn handle_toolbar_action(
             let url = if arg.trim().is_empty() {
                 with_state(label, |state| match state.settings.new_tab.as_str() {
                     "blank" => "about:blank".to_string(),
-                    _ => state.settings.home.clone(),
+                    _ => {
+                        let home = state.settings.home.clone();
+                        // 主页是画匣新页时 webview 开不了，退回空白页。
+                        if home.trim().starts_with(HUAXIA_NEWTAB) {
+                            "about:blank".to_string()
+                        } else {
+                            home
+                        }
+                    }
                 })
                 .unwrap_or_else(|| "about:blank".to_string())
             } else {
@@ -1983,7 +1995,11 @@ fn handle_toolbar_action(
         "home" => {
             let home = with_state(label, |state| state.settings.home.clone())
                 .unwrap_or_default();
-            if home.trim().is_empty() {
+            if home.trim().starts_with(HUAXIA_NEWTAB) {
+                // 画匣新页由主窗渲染：通知它把本标签切回新页，webview 随卸载退出。
+                let _ = tauri::Emitter::emit(app, "huaxia://newtab", label.to_string());
+                Ok(())
+            } else if home.trim().is_empty() {
                 Err("主页还没设置（点 ⚙ 配一个）".to_string())
             } else {
                 navigate_active(label, &home)

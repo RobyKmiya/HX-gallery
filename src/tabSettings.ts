@@ -9,6 +9,8 @@
  * 同标签页的 storage 事件不触发，所以改完手动派发自定义事件通知壳重读。
  */
 export type NewTabBehavior = "new" | "reuse";
+/** 浏览器新标签打开什么：画匣自己的新页（默认），或直接 Bing。 */
+export type NewTabPage = "huaxia" | "bing";
 export type StartupMode = "home" | "last" | "specific";
 export type StartupTargetKind = "collection" | "tag" | "loose";
 
@@ -19,6 +21,8 @@ export interface StartupTarget {
 
 export interface TabSettings {
   newBehavior: NewTabBehavior;
+  /** 新标签显示画匣新页还是 Bing；默认画匣新页。 */
+  newTabPage: NewTabPage;
   startupMode: StartupMode;
   startupKind: StartupTargetKind;
   startupId: number | null;
@@ -33,6 +37,7 @@ export const TAB_SETTINGS_EVENT = "huaxia:tabs-settings";
 
 const DEFAULTS: TabSettings = {
   newBehavior: "new",
+  newTabPage: "huaxia",
   startupMode: "home",
   startupKind: "collection",
   startupId: null,
@@ -46,6 +51,7 @@ export function readTabSettings(): TabSettings {
     const parsed = JSON.parse(raw) as Partial<TabSettings>;
     return {
       newBehavior: parsed.newBehavior === "reuse" ? "reuse" : "new",
+      newTabPage: parsed.newTabPage === "bing" ? "bing" : "huaxia",
       startupMode:
         parsed.startupMode === "last" || parsed.startupMode === "specific"
           ? parsed.startupMode
