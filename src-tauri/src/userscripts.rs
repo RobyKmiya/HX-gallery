@@ -858,8 +858,12 @@ pub fn ensure_builtin_scripts(app: &AppHandle) {
         return;
     };
     let path = dir.join("huaxia-shield.user.js");
-    if path.exists() {
-        return;
+    // 内容相同就跳过；程序升级带新脚本时覆盖（内置脚本要跟着版本走，
+    // 不能因为「文件已存在」就永远停在旧版——管理员 2026-11-26 反馈弹层没被新规则拦住）。
+    if let Ok(existing) = fs::read_to_string(&path) {
+        if existing == BUILTIN_SHIELD {
+            return;
+        }
     }
     if let Err(error) = fs::write(&path, BUILTIN_SHIELD) {
         eprintln!("[userscripts] 写入内置画匣盾失败: {error}");
