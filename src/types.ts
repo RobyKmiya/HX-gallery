@@ -315,6 +315,20 @@ export interface TagCategory {
   depth: number;
 }
 
+/** 壁纸来源（壁纸锁 / 新页背景共用）。 */
+export interface WallpaperSource {
+  kind: "loose" | "archive" | "file";
+  /** loose: 图片 id；archive: "archiveId:pageIndex"；file: 绝对路径。 */
+  reference: string;
+}
+
+export interface WallpaperLockConfig {
+  enabled: boolean;
+  walls: WallpaperSource[];
+  /** 轮换间隔秒；0 或只有一张不轮换。 */
+  intervalSecs: number;
+}
+
 export interface ArchiveQuery {
   page?: number;
   pageSize?: number;

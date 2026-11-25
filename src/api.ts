@@ -28,6 +28,7 @@ import type {
   TagGraph,
   TagTranslationInput,
   TrashedArchive,
+  WallpaperLockConfig,
 } from "./types";
 
 export const api = {
@@ -380,6 +381,17 @@ export const api = {
   /** 当前阅读页导出 PNG 并设为桌面壁纸。 */
   setDesktopWallpaper: (archiveId: number, pageIndex: number) =>
     invoke<void>("set_desktop_wallpaper", { archiveId, pageIndex }),
+
+  // ---------- 壁纸锁（管理员 2026-11-25；防君子不防小人） ----------
+  /** 读壁纸锁配置（哈希/盐不下发，只给开关、壁纸列表、轮换间隔）。 */
+  getWallpaperLock: () => invoke<WallpaperLockConfig>("get_wallpaper_lock"),
+  saveWallpaperLock: (config: WallpaperLockConfig) =>
+    invoke<WallpaperLockConfig>("save_wallpaper_lock", { config }),
+  /** 设置/修改密码；空串 = 清除密码（默认无密码）。 */
+  setWallpaperPassword: (password: string) =>
+    invoke<WallpaperLockConfig>("set_wallpaper_password", { password }),
+  verifyWallpaperPassword: (password: string) =>
+    invoke<boolean>("verify_wallpaper_password", { password }),
 
   // ---------- 合集（连载盒子） ----------
   listSeries: () => invoke<SeriesSummary[]>("list_series"),

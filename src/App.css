@@ -7679,3 +7679,176 @@ body.is-splitting {
   box-shadow: 0 0 26px rgba(124, 147, 255, 0.45);
   margin-bottom: 8px;
 }
+
+/* ---------- 壁纸锁（启动锁屏，1.1.46） ---------- */
+.wallpaper-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #0b0d12;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.wallpaper-lock-shade {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 45%, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.72));
+  backdrop-filter: blur(1.5px);
+}
+
+.wallpaper-lock-body {
+  position: relative;
+  z-index: 1;
+  animation: lock-in 0.28s ease;
+}
+
+.wallpaper-lock-body.is-error {
+  animation: lock-shake 0.38s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+@keyframes lock-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes lock-shake {
+  10%, 90% { transform: translateX(-2px); }
+  20%, 80% { transform: translateX(4px); }
+  30%, 50%, 70% { transform: translateX(-7px); }
+  40%, 60% { transform: translateX(7px); }
+}
+
+.wallpaper-lock-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: min(320px, calc(100vw - 48px));
+  padding: 26px 24px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(18, 20, 26, 0.72);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.9);
+  color: #e8e8ee;
+}
+
+.wallpaper-lock-mark {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid #7c93ff;
+  box-shadow: 0 0 26px rgba(124, 147, 255, 0.45);
+}
+
+.wallpaper-lock-title {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.18em;
+}
+
+.wallpaper-lock-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.32);
+  color: #fff;
+  font-size: 14px;
+  text-align: center;
+  outline: none;
+}
+
+.wallpaper-lock-input:focus {
+  border-color: #7c93ff;
+  box-shadow: 0 0 0 3px rgba(124, 147, 255, 0.18);
+}
+
+.wallpaper-lock-card.is-error .wallpaper-lock-input {
+  border-color: #c4362f;
+}
+
+/* ---------- 设置：壁纸锁 ---------- */
+.settings-inline-input {
+  width: 160px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2, #16161c);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.wallpaper-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.wallpaper-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.wallpaper-item img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0d0f14;
+}
+
+.wallpaper-item-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 10;
+  border-radius: 6px;
+  background: #0d0f14;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.wallpaper-item-name {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallpaper-item-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  line-height: 1;
+  font-size: 13px;
+}
+
+.wallpaper-item-remove:hover {
+  background: #c4362f;
+}

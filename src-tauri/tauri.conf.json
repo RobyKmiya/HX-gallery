@@ -28,7 +28,12 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPCACHE/**"
+          "$APPCACHE/**",
+          "$HOME/**",
+          "$DESKTOP/**",
+          "$DOWNLOAD/**",
+          "$PICTURE/**",
+          "$DOCUMENT/**"
         ]
       }
     }

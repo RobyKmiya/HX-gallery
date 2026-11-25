@@ -48,6 +48,9 @@ const STAGE_DUPLICATE_LIMIT: usize = 300;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AppSettings {
     library_path: Option<String>,
+    /// 壁纸锁配置（管理员 2026-11-25）。旧配置文件没有这段时按 None 处理。
+    #[serde(default)]
+    wallpaper_lock: Option<WallpaperLock>,
 }
 
 struct AppInner {
@@ -190,6 +193,160 @@ fn write_settings(app: &AppHandle, settings: &AppSettings) {
     }
 }
 
+// ---------- 壁纸锁（管理员 2026-11-25 16:41） ----------
+//
+// 定位：防君子不防小人。不是安全锁，不做防破解。核心是「打开先看到自己的壁纸，
+// 输密码才进库」。
+//
+// 救急：安装目录放 `关闭壁纸锁.cmd`，它只创建一个 `wallpaper-lock-off.flag`
+// 标记文件；启动读配置时看到这个标记就把锁视为关闭，绕开密码。不碰 JSON、
+// 不调 PowerShell，最不容易坏。要重新开启：设置 → 壁纸锁 关一次再开，
+// 开启时会删掉这个标记。
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperSource {
+    /// loose（散图）| archive（画廊页）| file（本地文件）
+    #[serde(default)]
+    pub kind: String,
+    /// loose: 图片 id；archive: "archiveId:pageIndex"；file: 绝对路径
+    #[serde(default)]
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperLock {
+    #[serde(default)]
+    pub enabled: bool,
+    /// FNV-1a 64 + 盐。空串 = 无密码，点一下即进（默认无密码）。
+    #[serde(default)]
+    pub password_hash: String,
+    #[serde(default)]
+    pub salt: String,
+    #[serde(default)]
+    pub walls: Vec<WallpaperSource>,
+    /// 轮换间隔秒；0 或只有一张时不轮换。
+    #[serde(default)]
+    pub interval_secs: u64,
+}
+
+/// FNV-1a 64：够「防君子」，不引第三方依赖。
+fn hash_password(password: &str, salt: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in salt.as_bytes().iter().chain(password.as_bytes()) {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn wallpaper_lock_flag_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("wallpaper-lock-off.flag")))
+}
+
+/// 救急脚本：只写一个标记文件，不需要 PowerShell / 改 JSON，最不容易出错。
+fn ensure_lock_rescue_script() {
+    let Some(flag) = wallpaper_lock_flag_path() else {
+        return;
+    };
+    let Some(dir) = flag.parent() else {
+        return;
+    };
+    let script = dir.join("关闭壁纸锁.cmd");
+    if script.exists() {
+        return;
+    }
+    let body = "@echo off\r\n\
+> \"%~dp0wallpaper-lock-off.flag\" echo disabled\r\n\
+echo 已关闭壁纸锁，下次启动画匣会直接进入。\r\n\
+echo 想重新开启：打开画匣 - 设置 - 壁纸锁，关掉再开一次即可。\r\n\
+pause\r\n";
+    let _ = std::fs::write(&script, body.as_bytes());
+}
+
+#[tauri::command]
+fn get_wallpaper_lock(app: AppHandle) -> WallpaperLock {
+    let settings = read_settings(&app);
+    let mut lock = settings.wallpaper_lock.unwrap_or_default();
+    if wallpaper_lock_flag_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+    {
+        lock.enabled = false;
+    }
+    // 哈希与盐不下发前端。
+    lock.password_hash.clear();
+    lock.salt.clear();
+    lock
+}
+
+#[tauri::command]
+fn save_wallpaper_lock(app: AppHandle, config: WallpaperLock) -> Result<WallpaperLock, String> {
+    let mut settings = read_settings(&app);
+    let existing = settings.wallpaper_lock.clone().unwrap_or_default();
+    let next = WallpaperLock {
+        enabled: config.enabled,
+        // 密码只走 set_wallpaper_password，这里原样保留。
+        password_hash: existing.password_hash,
+        salt: existing.salt,
+        walls: config.walls,
+        interval_secs: config.interval_secs,
+    };
+    if next.enabled {
+        // 开启锁 = 删掉救急标记：用户明确要锁，就不再绕过。
+        if let Some(flag) = wallpaper_lock_flag_path() {
+            let _ = std::fs::remove_file(flag);
+        }
+        ensure_lock_rescue_script();
+    }
+    settings.wallpaper_lock = Some(next.clone());
+    write_settings(&app, &settings);
+    let mut out = next;
+    out.password_hash.clear();
+    out.salt.clear();
+    Ok(out)
+}
+
+#[tauri::command]
+fn set_wallpaper_password(app: AppHandle, password: String) -> Result<WallpaperLock, String> {
+    let mut settings = read_settings(&app);
+    let mut lock = settings.wallpaper_lock.clone().unwrap_or_default();
+    if password.is_empty() {
+        lock.password_hash.clear();
+        lock.salt.clear();
+    } else {
+        let salt = format!(
+            "{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        lock.password_hash = hash_password(&password, &salt);
+        lock.salt = salt;
+    }
+    settings.wallpaper_lock = Some(lock.clone());
+    write_settings(&app, &settings);
+    let mut out = lock;
+    out.password_hash.clear();
+    out.salt.clear();
+    Ok(out)
+}
+
+#[tauri::command]
+fn verify_wallpaper_password(app: AppHandle, password: String) -> bool {
+    let settings = read_settings(&app);
+    let lock = settings.wallpaper_lock.unwrap_or_default();
+    // 没有密码时，任何输入（包括空）都算通过——「默认无密码」。
+    if lock.password_hash.is_empty() {
+        return true;
+    }
+    hash_password(&password, &lock.salt) == lock.password_hash
+}
+
 fn build_library_state(state: &AppState) -> Result<LibraryState, String> {
     let inner = state.lock()?;
 
@@ -305,12 +462,10 @@ async fn open_library(
             inner.startup_error = None;
         }
 
-        write_settings(
-            &app,
-            &AppSettings {
-                library_path: Some(display_path),
-            },
-        );
+        // 读-改-写：只更新 library_path，别把壁纸锁等其它设置一起冲掉。
+        let mut settings = read_settings(&app);
+        settings.library_path = Some(display_path);
+        write_settings(&app, &settings);
 
         build_library_state(&state_handle)
     })
@@ -1862,6 +2017,10 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             copy_reader_page,
             reveal_in_explorer,
             set_desktop_wallpaper,
+            get_wallpaper_lock,
+            save_wallpaper_lock,
+            set_wallpaper_password,
+            verify_wallpaper_password,
             list_series,
             create_series,
             update_series,

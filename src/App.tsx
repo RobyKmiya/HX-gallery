@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import type { LibraryState } from "./types";
+import type { LibraryState, WallpaperLockConfig } from "./types";
 import Welcome from "./components/Welcome";
 import WorkspaceTabs from "./components/WorkspaceTabs";
+import WallpaperLock from "./components/WallpaperLock";
 import "./App.css";
 
 type BootPhase = "booting" | "welcome" | "library";
@@ -14,35 +15,58 @@ export default function App() {
   const [lastLibraryPath, setLastLibraryPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 壁纸锁：锁着时先停在锁屏，**不加载库**，输对密码才进。 */
+  const [locked, setLocked] = useState(false);
+  const [lockConfig, setLockConfig] = useState<WallpaperLockConfig | null>(null);
+
+  const bootLibrary = useCallback(async () => {
+    setPhase("booting");
+    try {
+      const state = await api.getLibraryState();
+      setLastLibraryPath(state.lastLibraryPath);
+      setError(state.error);
+      if (state.libraryPath) {
+        setLibrary(state);
+        setPhase("library");
+      } else {
+        setPhase("welcome");
+      }
+    } catch (bootError) {
+      setError(`启动失败：${String(bootError)}`);
+      setPhase("welcome");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
+      // 先看壁纸锁：开着就停在锁屏，等输密码；不开才正常加载库。
       try {
-        const state = await api.getLibraryState();
+        const config = await api.getWallpaperLock();
         if (cancelled) return;
-
-        setLastLibraryPath(state.lastLibraryPath);
-        setError(state.error);
-
-        if (state.libraryPath) {
-          setLibrary(state);
-          setPhase("library");
-        } else {
+        if (config.enabled) {
+          setLockConfig(config);
+          setLocked(true);
           setPhase("welcome");
+          return;
         }
-      } catch (bootError) {
-        if (cancelled) return;
-        setError(`启动失败：${String(bootError)}`);
-        setPhase("welcome");
+      } catch {
+        // 读不到锁配置就当没开锁，不影响进库。
       }
+      if (!cancelled) await bootLibrary();
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bootLibrary]);
+
+  const unlock = useCallback(() => {
+    setLocked(false);
+    setLockConfig(null);
+    void bootLibrary();
+  }, [bootLibrary]);
 
   const chooseLibrary = useCallback(async () => {
     setBusy(true);
@@ -83,6 +107,11 @@ export default function App() {
   const switchLibrary = useCallback(() => {
     setPhase("welcome");
   }, []);
+
+  // 锁屏优先：锁着时什么都不加载、不显示。
+  if (locked && lockConfig) {
+    return <WallpaperLock config={lockConfig} onUnlock={unlock} />;
+  }
 
   if (phase === "booting") {
     return (

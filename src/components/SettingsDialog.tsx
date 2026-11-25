@@ -28,8 +28,16 @@ import {
   type GestureSlot,
 } from "../gestures";
 import { AlertIcon, BookIcon, CloseIcon, FolderIcon, RefreshIcon, TagIcon } from "./Icons";
+import WallpaperLockSettings from "./WallpaperLockSettings";
 
-type SettingsTab = "general" | "keys" | "gestures" | "storage" | "guide" | "more";
+type SettingsTab =
+  | "general"
+  | "wallpaper"
+  | "keys"
+  | "gestures"
+  | "storage"
+  | "guide"
+  | "more";
 
 interface SettingsDialogProps {
   library: LibraryState;
@@ -49,6 +57,7 @@ interface SettingsDialogProps {
 
 const TABS: { key: SettingsTab; label: string }[] = [
   { key: "general", label: "通用" },
+  { key: "wallpaper", label: "壁纸锁" },
   { key: "keys", label: "快捷键" },
   { key: "gestures", label: "鼠标手势" },
   { key: "storage", label: "存储" },
@@ -349,6 +358,8 @@ export default function SettingsDialog({
                 </p>
               </>
             )}
+
+            {tab === "wallpaper" && <WallpaperLockSettings />}
 
             {tab === "keys" && (
               <>
