@@ -7702,8 +7702,7 @@ body.is-splitting {
 .wallpaper-lock-shade {
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at 50% 45%, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.72));
-  backdrop-filter: blur(1.5px);
+  background: radial-gradient(circle at 50% 45%, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0.6));
 }
 
 .wallpaper-lock-body {
@@ -8032,11 +8031,11 @@ body.is-splitting {
   overflow-y: auto;
 }
 
+/* 背景图整张铺满（cover），只压一层暗化保证文字可读；不要模糊，模糊看着很脏。 */
 .new-tab-shade {
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at 50% 40%, rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0.78));
-  backdrop-filter: blur(1px);
+  background: radial-gradient(circle at 50% 40%, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.62));
 }
 
 .new-tab-body {

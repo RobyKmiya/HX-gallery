@@ -1671,6 +1671,13 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
       push("nextTab");
     }
   }, true);
+  // 鼠标侧键：XButton1(button 3)=后退，XButton2(button 4)=前进。
+  // 只挂 auxclick：mousedown 也会收到侧键，两处都挂会一次后退两步。
+  window.addEventListener("auxclick", function (e) {
+    if (window.__xkShortcuts === false) return;
+    if (e.button === 3) { e.preventDefault(); push("back"); }
+    else if (e.button === 4) { e.preventDefault(); push("forward"); }
+  }, true);
 })();
 "###;
 

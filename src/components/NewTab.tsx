@@ -46,15 +46,7 @@ function NewTabToolbar({ onBrowse }: { onBrowse: (url: string) => void }) {
 
   return (
     <div className="new-tab-toolbar">
-      <button type="button" disabled title="后退（新页没有历史）">
-        ←
-      </button>
-      <button type="button" disabled title="前进">
-        →
-      </button>
-      <button type="button" disabled title="刷新">
-        ⟳
-      </button>
+      {/* 新页没有历史，不放灰着的 ← → ⟳（看着像坏了）；进网页后由内置工具栏接管。 */}
       <button type="button" className="is-active" title="画匣新页">
         ⌂
       </button>
