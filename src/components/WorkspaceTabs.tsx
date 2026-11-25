@@ -160,6 +160,8 @@ function BrowserHost({
           url,
           adblock: true,
           home,
+          // 设置→广告拦截 里的「显示元素选择圆点」开关（默认开）。
+          picker: window.localStorage.getItem("huaxia.d2.picker") !== "0",
         });
         if (dead) {
           void api.d2EmbedClose(opened).catch(() => {});

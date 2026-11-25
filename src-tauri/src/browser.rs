@@ -324,6 +324,8 @@ pub struct BrowserOptions {
     pub size: (f64, f64),
     /// 广告拦截开关（管理员 11-23；标签页创建时读一次）。
     pub adblock: bool,
+    /// 网页元素选择器悬浮圆点开关（管理员 2026-11-26）。
+    pub picker: bool,
     /// 宿主日志回调（弹窗/下载/导航/油猴事件都走它）。
     pub log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
 }
@@ -339,6 +341,7 @@ impl Default for BrowserOptions {
             userscript_store: None,
             size: (1180.0, 860.0),
             adblock: true,
+            picker: true,
             log: None,
         }
     }
@@ -754,6 +757,11 @@ fn open_hosted(
             for script in &opts.extra_init_scripts {
                 tab_builder = tab_builder.initialization_script(script.clone());
             }
+            // 元素选择器悬浮圆点开关：脚本读这个全局标志决定要不要画圆点。
+            tab_builder = tab_builder.initialization_script(format!(
+                "window.__hxPicker = {};",
+                if opts.picker { "true" } else { "false" }
+            ));
 
             crumb(format!("建内容 webview {tab_url}"));
             let webview = window

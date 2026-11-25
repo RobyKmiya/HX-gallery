@@ -493,6 +493,7 @@ fn open_browser_window(
             userscript_store: crate::userscripts::store_dir(app),
             size: (1180.0, 860.0),
             adblock,
+            picker: true,
             log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),
         },
     )?;
@@ -1310,6 +1311,7 @@ pub fn d2_embed_open(
     url: String,
     adblock: Option<bool>,
     home: Option<String>,
+    picker: Option<bool>,
 ) -> Result<String, String> {
     let parsed = normalize_url(&url)?;
     crate::browser::start_watchdog(&app);
@@ -1332,6 +1334,7 @@ pub fn d2_embed_open(
     let app_for_thread = app.clone();
     let label_for_thread = label.clone();
     let adblock = adblock.unwrap_or(true);
+    let picker = picker.unwrap_or(true);
     // add_child 不能在同步命令回调里跑（会死锁），照旧线程 + 日志回执。
     std::thread::spawn(move || {
         match open_browser_window_embedded(
@@ -1340,6 +1343,7 @@ pub fn d2_embed_open(
             label_for_thread,
             adblock,
             &home,
+            picker,
             host,
         ) {
             Ok(opened) => log(&app_for_thread, &format!("内置浏览器已挂载：{opened}")),
@@ -1375,6 +1379,7 @@ fn open_browser_window_embedded(
     label: String,
     adblock: bool,
     home: &str,
+    picker: bool,
     host: tauri::Window,
 ) -> Result<String, String> {
     let app_for_log = app.clone();
@@ -1391,6 +1396,7 @@ fn open_browser_window_embedded(
             userscript_store: crate::userscripts::store_dir(app),
             size: (900.0, 600.0),
             adblock,
+            picker,
             log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),
         },
         host,

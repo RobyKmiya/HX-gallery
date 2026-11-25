@@ -170,7 +170,11 @@
   // 5) 元素选择器（管理员 2026-11-26）：右下角小圆点 → 点网页元素 → 永久屏蔽。
   var pickerEnabled = true;
   try {
-    if (typeof GM_getValue === "function") {
+    // 引擎注入的开关优先（设置→广告拦截 里的「显示元素选择圆点」）；
+    // 没有注入时退回脚本自己的 GM 存值。
+    if (typeof window.__hxPicker === "boolean") {
+      pickerEnabled = window.__hxPicker;
+    } else if (typeof GM_getValue === "function") {
       pickerEnabled = GM_getValue("huaxia.shield.picker", "1") !== "0";
     }
   } catch (e) {}

@@ -16,6 +16,9 @@ export default function AdblockSettings() {
   const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<BlockedEntry[]>([]);
+  const [pickerOn, setPickerOn] = useState(
+    () => window.localStorage.getItem("huaxia.d2.picker") !== "0",
+  );
 
   const loadBlocked = async () => {
     try {
@@ -84,6 +87,21 @@ export default function AdblockSettings() {
           type="checkbox"
           checked={enabled}
           onChange={(event) => toggle(event.target.checked)}
+        />
+      </label>
+
+      <label className="settings-row">
+        <span>显示元素选择圆点（网页右下角 ⊘）</span>
+        <input
+          type="checkbox"
+          checked={pickerOn}
+          onChange={(event) => {
+            setPickerOn(event.target.checked);
+            window.localStorage.setItem(
+              "huaxia.d2.picker",
+              event.target.checked ? "1" : "0",
+            );
+          }}
         />
       </label>
 
