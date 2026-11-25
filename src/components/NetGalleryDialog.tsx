@@ -61,33 +61,8 @@ export default function NetGalleryDialog({
     };
   }, [embedded]);
 
-  const stopPolling = () => {
-    if (timerRef.current !== null) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-  };
-
-  const startPolling = () => {
-    stopPolling();
-    timerRef.current = window.setInterval(async () => {
-      try {
-        const next = await api.netDlStatus();
-        setStatus(next);
-        if (!next.running) {
-          stopPolling();
-          setBusy(false);
-          if (next.finished) onDone?.();
-        }
-      } catch {
-        stopPolling();
-        setBusy(false);
-      }
-    }, 700);
-  };
-
   const preview = async () => {
-    const target = url.trim();
+    const target = url.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
     if (!target) {
       setError("先把作品页链接贴进来");
       return;
@@ -104,22 +79,48 @@ export default function NetGalleryDialog({
     }
   };
 
+  /**
+   * 多链接队列：一行一个，逐个下（引擎的抓取是复用同一个浏览器窗口，
+   * 并行会互相抢标签，所以串行更稳）。每本打完后接着下一本。
+   */
   const start = async () => {
-    const target = url.trim();
-    if (!target) {
+    const targets = url
+      .split(/\r?\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!targets.length) {
       setError("先把作品页链接贴进来");
       return;
     }
     setError("");
     setBusy(true);
-    setStatus({ ...EMPTY, running: true, stage: "准备中…" });
-    try {
-      await api.netDlStart(target);
-      startPolling();
-    } catch (e) {
-      setError(String(e));
-      setBusy(false);
+    for (let index = 0; index < targets.length; index++) {
+      const label = `第 ${index + 1}/${targets.length} 本`;
+      try {
+        setStatus({ ...EMPTY, running: true, stage: `${label}：准备中…` });
+        await api.netDlStart(targets[index]);
+        await new Promise<void>((resolve) => {
+          const timer = window.setInterval(async () => {
+            try {
+              const next = await api.netDlStatus();
+              setStatus({ ...next, stage: `${label} · ${next.stage}` });
+              if (!next.running) {
+                window.clearInterval(timer);
+                resolve();
+              }
+            } catch {
+              window.clearInterval(timer);
+              resolve();
+            }
+          }, 700);
+        });
+      } catch (e) {
+        setError(`${label} 失败：${String(e)}`);
+      }
     }
+    setBusy(false);
+    setStatus((prev) => ({ ...prev, running: false, finished: true }));
+    onDone?.();
   };
 
   const cancel = async () => {
@@ -158,12 +159,12 @@ export default function NetGalleryDialog({
         </header>
 
         <div style={{ padding: "0 18px 8px" }}>
-          <input
-            type="text"
+          <textarea
             value={url}
             onChange={(event) => setUrl(event.target.value)}
-            placeholder="https://exhentai.org/g/1234567/abcdef1234/"
+            placeholder={"一行一个作品页链接，例如：\nhttps://exhentai.org/g/1234567/abcdef1234/\nhttps://nhentai.net/g/615034/"}
             spellCheck={false}
+            rows={3}
             style={{
               width: "100%",
               padding: "9px 11px",
@@ -172,13 +173,18 @@ export default function NetGalleryDialog({
               background: "var(--panel-2, #16161c)",
               color: "var(--text, #e6e6ea)",
               fontSize: 13,
+              resize: "vertical",
+              fontFamily: "inherit",
             }}
             onKeyDown={(event) => {
-              if (event.key === "Enter") void preview();
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                void preview();
+              }
             }}
           />
           <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--text-dim, #9a9aa4)" }}>
-            提示：需要先在内置浏览器里登录该站点，下载会沿用那套 cookie。
+            支持多行：一行一个，会按顺序逐本下载。需要先在内置浏览器里登录该站点，下载会沿用那套 cookie。
           </p>
         </div>
 
