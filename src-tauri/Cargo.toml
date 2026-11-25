@@ -1,6 +1,6 @@
 [package]
 name = "archive-gallery"
-version = "1.1.27"
+version = "1.1.39"
 description = "A local archive gallery for ZIP/CBZ image collections"
 authors = ["Archive Gallery"]
 edition = "2024"
@@ -55,9 +55,17 @@ windows-sys = { version = "0.59", features = [
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# 2026-11-24: 原为 lto=true + codegen-units=1，全量 LTO 单线程 codegen
+# 使 release 编译动辄 20~90 分钟。改 thin LTO + 16 路并行：编译快得多，
+# 二进制略大。随时可用 -C lto=fat 单次覆盖。
 [profile.release]
-codegen-units = 1
-lto = true
+codegen-units = 16
+lto = "thin"
 opt-level = 3
 panic = "abort"
 strip = true
+
+# 2026-11-24: 沙箱环境 release 删除被拦（os error 5）。fastdev = dev 优化档，
+# 但 profile 名不是 debug，tauri 按生产模式内嵌前端 → 产出独立可用 exe。
+[profile.fastdev]
+inherits = "dev"

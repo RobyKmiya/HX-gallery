@@ -9,6 +9,12 @@
 // 连点（连点放大、切标签后立刻刷新）后一次会直接覆盖前一次，表现就是
 // 「点了没反应」；现在 push 到 `__xkReqQ`，引擎一次取走整批。
 (function () {
+  // 内嵌模式（工作台统一标签条接管）：内层标签条收掉，只留地址栏/导航/缩放/设置。
+  if (location.search.indexOf("embedded=1") >= 0) {
+    var inner = document.getElementById("tabs");
+    if (inner) inner.style.display = "none";
+  }
+
   var state = null;
   var lastStateJson = "";
   var addrFocused = false;

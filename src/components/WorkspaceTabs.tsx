@@ -11,6 +11,7 @@
  * - 关浏览器标签 = d2_embed_close，绝不碰宿主窗。
  */
 import { useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import type { LibraryState } from "../types";
 import LibraryView from "./LibraryView";
@@ -217,6 +218,52 @@ export default function WorkspaceTabs({
         >
           ＋
         </button>
+        {/* 自定义窗条拖拽区 + 窗口控制（原生标题栏已永久去除） */}
+        <div
+          data-tauri-drag-region
+          style={{ flex: "1 1 auto", height: "100%", minHeight: 24, cursor: "default" }}
+        />
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 2, flex: "0 0 auto" }}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
+          {(
+            [
+              ["—", "最小化", () => void getCurrentWindow().minimize()],
+              ["□", "最大化/还原", () => void getCurrentWindow().toggleMaximize()],
+              ["✕", "关闭", () => void getCurrentWindow().close()],
+            ] as [string, string, () => void][]
+          ).map(([glyph, tip, act]) => (
+            <button
+              key={tip}
+              type="button"
+              title={tip}
+              onClick={act}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: "var(--text-dim, #9a9aa4)",
+                cursor: "pointer",
+                fontSize: 13,
+                width: 34,
+                height: 26,
+                lineHeight: "26px",
+                padding: 0,
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background =
+                  tip === "关闭" ? "#c4362f" : "var(--bg, #14141a)";
+                e.currentTarget.style.color = "#fff";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.color = "var(--text-dim, #9a9aa4)";
+              }}
+            >
+              {glyph}
+            </button>
+          ))}
+        </div>
       </div>
       <div style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}>
         {tabs.map((tab) => {

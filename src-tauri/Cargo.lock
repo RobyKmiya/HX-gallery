@@ -169,15 +169,13 @@ dependencies = [
 
 [[package]]
 name = "archive-gallery"
-version = "1.1.27"
+version = "1.1.39"
 dependencies = [
  "base64 0.23.1",
  "blake3",
  "clap",
  "cookie",
- "gif",
  "image",
- "image-webp",
  "natord",
  "rusqlite",
  "serde",

@@ -635,7 +635,12 @@ fn open_hosted(
                 .add_child(
                     WebviewBuilder::new(
                         format!("{label}-toolbar"),
-                        WebviewUrl::App("browser-toolbar.html".into()),
+                        // 内嵌模式：外壳工作台标签条接管多标签，内层标签条收掉。
+                        WebviewUrl::App(if embedded {
+                            "browser-toolbar.html?embedded=1".into()
+                        } else {
+                            "browser-toolbar.html".into()
+                        }),
                     ),
                     LogicalPosition::new(0.0, 0.0),
                     LogicalSize::new(width, TOOLBAR_HEIGHT),

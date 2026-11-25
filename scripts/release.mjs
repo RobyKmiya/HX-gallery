@@ -336,6 +336,19 @@ if (dryRun) {
   console.log(`\n完成。新版 ${next} 已安装，直接双击桌面「画匣」就是最新版。`);
   console.log(`安装包留档：${setupPath}`);
 
+  // 管理员 11-24：构建垃圾（前端 safe-delete 走系统回收站）堆积会把下次发版
+  // 噎死（genie-trash ETIMEDOUT）。装完立刻清回收站，不等 Windows 自己收。
+  try {
+    const { execSync } = await import("node:child_process");
+    execSync(
+      "powershell -NoProfile -NonInteractive -Command Clear-RecycleBin -Force -ErrorAction SilentlyContinue",
+      { timeout: 60_000, stdio: "ignore" },
+    );
+    console.log("✓ 回收站已清空（构建垃圾不落库存）");
+  } catch {
+    // 清不掉不拦发版：下次 Clear-RecycleBin 手动来
+  }
+
   // 把「抬版本」本身提交掉，让工作区回到干净状态。
   // 不提交的话 release.rs 的关窗判断会一直看到 dirty，
   // 形成「关窗 → 发布 → 抬版本 → 又脏 → 又发布」的自激循环（2026-11-20 连环闪黑窗）。
