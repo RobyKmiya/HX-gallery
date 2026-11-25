@@ -1320,7 +1320,7 @@ fn attach_tab_hooks(
                                         match outcome {
                                             Ok(message) => {
                                                 log_for(&label_import, &format!("自动入库：{message}"));
-                                                toast_toolbar(&label_import, &message, "ok");
+                                                toast_toolbar(&label_import, &format!("✅ 已入库：{message}（不用再下一次）"), "ok");
                                                 // 导入是「复制临时文件再改名」，源文件还留在
                                                 // d2/downloads 里。库在别的盘时这就是每本多一份
                                                 // 副本（管理员库在 F:，缓存会在 C: 越堆越大）。

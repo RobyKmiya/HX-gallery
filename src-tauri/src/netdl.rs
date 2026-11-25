@@ -70,6 +70,20 @@ pub fn net_dl_cancel() {
     set_status(|s| s.stage = "正在取消…".to_string());
 }
 
+/// 本机代理：优先环境变量，其次读注册表里的系统代理。
+/// 站点点不开多半是没走代理（curl 默认只认环境变量，不认 Windows 系统代理）。
+fn proxy_arg() -> Option<String> {
+    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
 fn curl_base() -> std::process::Command {
     let mut command = std::process::Command::new("curl");
     #[cfg(windows)]
@@ -87,7 +101,9 @@ fn curl_base() -> std::process::Command {
         .arg("1")
         .arg("--retry-all-errors")
         .arg("--connect-timeout")
-        .arg("20")
+        .arg("30")
+        .arg("--max-time")
+        .arg("120")
         .arg("-A")
         .arg(crate::gallery_dl::UA);
     command
@@ -120,6 +136,9 @@ fn fetch_text(app: &AppHandle, url: &str) -> Result<String, String> {
     if !cookie.is_empty() {
         command.arg("-H").arg(format!("Cookie: {cookie}"));
     }
+    if let Some(proxy) = proxy_arg() {
+        command.arg("--proxy").arg(proxy);
+    }
     command.arg(url);
     let output = command
         .output()
@@ -148,6 +167,9 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
     }
     if !referer.is_empty() {
         command.arg("-e").arg(referer);
+    }
+    if let Some(proxy) = proxy_arg() {
+        command.arg("--proxy").arg(proxy);
     }
     command.arg("-o").arg(dest).arg(url);
     let output = command

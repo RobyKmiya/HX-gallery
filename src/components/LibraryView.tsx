@@ -359,6 +359,13 @@ export default function LibraryView({
   const [tagCenterOpen, setTagCenterOpen] = useState(false);
   /** 网络画集下载弹窗（管理员 2026-11-25：按链接直接下书）。 */
   const [netDlOpen, setNetDlOpen] = useState(false);
+
+  // 每次进主页自动刷一次库：网页端织机下完包、网络画集入库后，
+  // 回到主页就能立刻看到新内容，不用手动刷新（管理员 2026-11-25 要求）。
+  useEffect(() => {
+    void onLibraryChanged?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [trashOpen, setTrashOpen] = useState(false);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const [looseView, setLooseView] = useState(false);
