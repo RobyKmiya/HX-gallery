@@ -344,6 +344,13 @@ export interface CredentialEntry {
   updatedAt: number;
 }
 
+/** 网页元素屏蔽一条（元素选择器选的）。 */
+export interface BlockedEntry {
+  host: string;
+  selector: string;
+  count: number;
+}
+
 /** 壁纸来源（壁纸锁 / 新页背景共用）。 */
 export interface WallpaperSource {
   kind: "loose" | "archive" | "file";

@@ -2,6 +2,7 @@ mod anim;
 mod archive;
 mod asset_protocol;
 mod browser;
+mod blocked_elements;
 mod container;
 mod d2;
 mod gallery_dl;
@@ -921,6 +922,22 @@ pub(crate) fn record_browser_history_async(app: &AppHandle, url: String) {
             let _ = db::record_history(&library.conn, &url, "");
         }
     });
+}
+
+// ---------- 网页元素屏蔽 ----------
+#[tauri::command]
+fn blocked_list(app: AppHandle) -> Vec<blocked_elements::BlockedEntry> {
+    blocked_elements::list_flat(&app)
+}
+
+#[tauri::command]
+fn blocked_remove(app: AppHandle, host: String, selector: String) -> Result<(), String> {
+    blocked_elements::remove(&app, &host, &selector)
+}
+
+#[tauri::command]
+fn blocked_clear(app: AppHandle) -> Result<(), String> {
+    blocked_elements::clear(&app)
 }
 
 // ---------- 广告拦截：自定义名单读写 ----------
@@ -2290,6 +2307,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             browser_credential_reveal,
             adblock_read_custom,
             adblock_write_custom,
+            blocked_list,
+            blocked_remove,
+            blocked_clear,
             list_series,
             create_series,
             update_series,

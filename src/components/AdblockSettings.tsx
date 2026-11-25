@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import type { BlockedEntry } from "../types";
 
 /**
  * 设置 → 广告拦截。
@@ -14,13 +15,42 @@ export default function AdblockSettings() {
   const [custom, setCustom] = useState("");
   const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
+  const [blocked, setBlocked] = useState<BlockedEntry[]>([]);
+
+  const loadBlocked = async () => {
+    try {
+      setBlocked(await api.blockedList());
+    } catch (error) {
+      setHint(String(error));
+    }
+  };
 
   useEffect(() => {
     void api
       .adblockReadCustom()
       .then(setCustom)
       .catch(() => {});
+    void loadBlocked();
   }, []);
+
+  const removeBlocked = async (item: BlockedEntry) => {
+    try {
+      await api.blockedRemove(item.host, item.selector);
+      await loadBlocked();
+    } catch (error) {
+      setHint(String(error));
+    }
+  };
+
+  const clearBlocked = async () => {
+    if (!window.confirm("恢复全部已屏蔽元素？")) return;
+    try {
+      await api.blockedClear();
+      await loadBlocked();
+    } catch (error) {
+      setHint(String(error));
+    }
+  };
 
   const toggle = (next: boolean) => {
     setEnabled(next);
@@ -89,6 +119,38 @@ export default function AdblockSettings() {
         </button>
         {hint && <span className="settings-hint">{hint}</span>}
       </div>
+
+      <h4>已屏蔽的元素</h4>
+      <p className="settings-hint">
+        浏览器页面右下角有个小圆点（⊘）：点它，再点网页上的元素，就能永久屏蔽。
+        这里可以恢复（删除）屏蔽错的。
+      </p>
+      <div className="browser-data-list">
+        {blocked.map((item) => (
+          <div className="browser-data-row" key={`${item.host}|${item.selector}`}>
+            <div className="browser-data-main">
+              <span className="browser-data-title">{item.host}</span>
+              <span className="browser-data-sub">{item.selector}</span>
+            </div>
+            <button
+              type="button"
+              className="browser-data-remove"
+              onClick={() => void removeBlocked(item)}
+              title="恢复（删除这条屏蔽）"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        {blocked.length === 0 && <p className="settings-hint">还没有屏蔽任何元素。</p>}
+      </div>
+      {blocked.length > 0 && (
+        <div className="browser-data-toolbar">
+          <button type="button" className="btn btn-quiet btn-compact" onClick={() => void clearBlocked()}>
+            全部恢复
+          </button>
+        </div>
+      )}
 
       <h4>还想更强？油猴脚本补 DOM 层</h4>
       <p className="settings-hint">

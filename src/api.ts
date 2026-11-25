@@ -31,6 +31,7 @@ import type {
   WallpaperLockConfig,
   HistoryEntry,
   CredentialEntry,
+  BlockedEntry,
 } from "./types";
 
 export const api = {
@@ -385,6 +386,10 @@ export const api = {
     invoke<void>("set_desktop_wallpaper", { archiveId, pageIndex }),
 
   // ---------- 广告拦截（2026-11-26） ----------
+  blockedList: () => invoke<BlockedEntry[]>("blocked_list"),
+  blockedRemove: (host: string, selector: string) =>
+    invoke<void>("blocked_remove", { host, selector }),
+  blockedClear: () => invoke<void>("blocked_clear"),
   adblockReadCustom: () => invoke<string>("adblock_read_custom"),
   adblockWriteCustom: (content: string) =>
     invoke<void>("adblock_write_custom", { content }),

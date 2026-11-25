@@ -1472,6 +1472,7 @@ fn attach_tab_hooks(
         .on_page_load({
             let label_for_load = label_for_nav.clone();
             let tab_id_for_load = tab_id_for_nav.clone();
+            let app_for_block = app.clone();
             move |webview, payload| {
                 crumb(format!("加载事件 {:?}", payload.event()));
                 let loading = payload.event() == tauri::webview::PageLoadEvent::Started;
@@ -1480,6 +1481,22 @@ fn attach_tab_hooks(
                 // 写入的 __xkShortcuts 不会被随后的导航重置掉。
                 if !loading {
                     sync_shortcuts_flag(&label_for_load, &webview);
+                    // 注入该站点已屏蔽的元素规则（元素选择器选中的，display:none）。
+                    if let Ok(url) = webview.url() {
+                        if let Some(host) = url.host_str() {
+                            let css = crate::blocked_elements::css_for(&app_for_block, host);
+                            if !css.is_empty() {
+                                let script = format!(
+                                    "(function(){{var s=document.getElementById('__xkBlocked');\
+                                     if(!s){{s=document.createElement('style');s.id='__xkBlocked';\
+                                     (document.head||document.documentElement).appendChild(s);}}\
+                                     s.textContent={};}})();",
+                                    serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".to_string())
+                                );
+                                let _ = webview.eval(&script);
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -2076,6 +2093,12 @@ fn handle_toolbar_action(
         "back" => history_action(label, "back"),
         "forward" => history_action(label, "forward"),
         "reload" => history_action(label, "reload"),
+        // 元素选择器（画匣盾悬浮圆点）：把选中的选择器永久写进屏蔽列表。
+        "blockElement" => {
+            let selector = req.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+            let host = req.get("host").and_then(|v| v.as_str()).unwrap_or("");
+            crate::blocked_elements::add(app, host, selector)
+        }
         "stop" => stop_loading(label),
         "reorder" => {
             let tab_id = req
