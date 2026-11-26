@@ -121,6 +121,10 @@ fn curl_base() -> std::process::Command {
     command
         .arg("-s")
         .arg("-L")
+        // 最多跟 5 次重定向：未登录时 exhentai 会一路跳到登录页再打转，
+        // 不设上限会以「退出码 47」失败且看不出真实原因。
+        .arg("--max-redirs")
+        .arg("5")
         .arg("--retry")
         .arg("2")
         .arg("--retry-delay")
@@ -136,22 +140,53 @@ fn curl_base() -> std::process::Command {
 }
 
 fn cookie_for(app: &AppHandle, url: &str) -> String {
-    // 直接问主窗要 cookie：与织机下载器同一份登录态，用户在内置浏览器里登录过
-    // 就不必再来一遍。
-    let Some(window) = app.get_webview_window("main") else {
-        return String::new();
-    };
+    // 登录态在**浏览器的 webview** 里，不在工作台主窗。以前只问主窗，
+    // 结果 curl 裸奔：exhentai 重定向到登录页甚至打转（退出码 47），
+    // nhentai/18comic 被当未登录（管理员 2026-11-26 的报错）。
+    // 现在先问「当前打开目标站点」的浏览器 webview，再退回其它浏览器，最后才问主窗。
     let Ok(parsed) = tauri::Url::parse(url) else {
         return String::new();
     };
-    match window.cookies_for_url(parsed) {
-        Ok(list) => list
-            .iter()
-            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
-            .collect::<Vec<_>>()
-            .join("; "),
-        Err(_) => String::new(),
+    let target_host = parsed.host_str().unwrap_or("").to_lowercase();
+
+    let mut labels: Vec<String> = crate::browser::alive_labels();
+    labels.sort_by_key(|label| {
+        let matched = crate::browser::active_tab_url(label)
+            .map(|current| current.to_lowercase().contains(&target_host))
+            .unwrap_or(false);
+        if matched {
+            0
+        } else {
+            1
+        }
+    });
+
+    for label in labels {
+        let Ok(webview) = crate::browser::active_webview_of(&label) else {
+            continue;
+        };
+        if let Ok(list) = webview.cookies_for_url(parsed.clone()) {
+            if !list.is_empty() {
+                return list
+                    .iter()
+                    .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+            }
+        }
     }
+
+    // 兜底：主窗（同一 WebView2 profile 时也能查到）。
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(list) = window.cookies_for_url(parsed) {
+            return list
+                .iter()
+                .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                .collect::<Vec<_>>()
+                .join("; ");
+        }
+    }
+    String::new()
 }
 
 /// 抓一段文本（页面 HTML）。
@@ -408,6 +443,9 @@ fn package_cbz(files: &[PathBuf], target: &Path) -> Result<(), String> {
 /// 预览：只抓作品页，拿标题/标签/页数给前端确认，不下载。
 #[tauri::command]
 pub async fn net_dl_preview(app: AppHandle, url: String) -> Result<NetDlStatus, String> {
+    if url.contains("nhentai.net") {
+        return preview_nhentai(&app, &url);
+    }
     let html = fetch_text(&app, &url)?;
     let title = parse_title(&html);
     let tags = parse_tags(&html);
@@ -434,6 +472,45 @@ pub async fn net_dl_preview(app: AppHandle, url: String) -> Result<NetDlStatus, 
         total,
         title,
         tags: flat,
+        path: String::new(),
+    })
+}
+
+fn preview_nhentai(app: &AppHandle, url: &str) -> Result<NetDlStatus, String> {
+    let id = nhentai_gallery_id(url)
+        .ok_or("链接里没找到作品 id（应形如 nhentai.net/g/615034/）".to_string())?;
+    let raw = fetch_text(app, &format!("https://nhentai.net/api/gallery/{id}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("nhentai 接口返回不是 JSON（可能被登录墙或验证页拦截）：{e}"))?;
+    let title = value["title"]["pretty"]
+        .as_str()
+        .or_else(|| value["title"]["english"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let total = value["num_pages"].as_u64().unwrap_or(0) as usize;
+    let mut tags: Vec<(String, String)> = Vec::new();
+    if let Some(list) = value["tags"].as_array() {
+        for tag in list {
+            let kind = tag["type"].as_str().unwrap_or("tag").to_string();
+            let name = tag["name"].as_str().unwrap_or("").to_string();
+            if !name.is_empty() {
+                tags.push((kind, name));
+            }
+        }
+    }
+    Ok(NetDlStatus {
+        running: false,
+        finished: false,
+        error: String::new(),
+        stage: if title.is_empty() {
+            "已解析（没识别到标题，可能是登录态失效）".to_string()
+        } else {
+            format!("已解析：{total} 页")
+        },
+        done: 0,
+        total,
+        title,
+        tags,
         path: String::new(),
     })
 }
@@ -470,6 +547,10 @@ pub async fn net_dl_start(app: AppHandle, url: String) -> Result<(), String> {
 }
 
 fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
+    // nhentai 走 API（structure 和 exhentai 完全不同），单独一条路。
+    if url.contains("nhentai.net") {
+        return run_nhentai_download(app, url);
+    }
     let html = fetch_text(app, url)?;
     let title = {
         let parsed = parse_title(&html);
@@ -601,4 +682,163 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
     set_status(|s| s.stage = "导入画匣…".to_string());
     crate::d2::import_downloaded_meta(app, target.clone(), &title, &tags)?;
     Ok(target.to_string_lossy().to_string())
+}
+
+/// nhentai 有公开 JSON 接口，比解析 HTML 稳：一次拿到标题、标签和每页扩展名，
+/// 图片直接从 i.nhentai.net 拉（地址由 media_id + 页号拼出来）。
+fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
+    let id = nhentai_gallery_id(url)
+        .ok_or("链接里没找到作品 id（应形如 nhentai.net/g/615034/）".to_string())?;
+    set_status(|s| s.stage = format!("读取 nhentai 作品 {id}…"));
+    let api = format!("https://nhentai.net/api/gallery/{id}");
+    let raw = fetch_text(app, &api)?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("nhentai 接口返回不是 JSON（可能被登录墙或验证页拦截）：{e}"))?;
+    let media_id = value["media_id"]
+        .as_str()
+        .ok_or("nhentai 接口没有 media_id（可能未登录或作品已删除）")?
+        .to_string();
+    let pages = value["images"]["pages"]
+        .as_array()
+        .ok_or("nhentai 接口没有 pages")?
+        .clone();
+    let title = value["title"]["pretty"]
+        .as_str()
+        .or_else(|| value["title"]["english"].as_str())
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or("UNTITLE")
+        .to_string();
+    let mut tags: Vec<(String, String)> = Vec::new();
+    if let Some(list) = value["tags"].as_array() {
+        for tag in list {
+            let kind = tag["type"].as_str().unwrap_or("tag");
+            let name = tag["name"].as_str().unwrap_or("");
+            if !name.is_empty() {
+                tags.push((kind.to_string(), name.to_string()));
+            }
+        }
+    }
+    set_status(|s| {
+        s.title = title.clone();
+        s.tags = tags.clone();
+        s.total = pages.len();
+        s.stage = "准备下载…".to_string();
+    });
+
+    let mut urls: Vec<String> = Vec::new();
+    for (index, page) in pages.iter().enumerate() {
+        let ext = match page["t"].as_str().unwrap_or("j") {
+            "p" => "png",
+            "g" => "gif",
+            "w" => "webp",
+            _ => "jpg",
+        };
+        urls.push(format!(
+            "https://i.nhentai.net/galleries/{media_id}/{}.{ext}",
+            index + 1
+        ));
+    }
+    let count = urls.len();
+    if count == 0 {
+        return Err("nhentai 返回 0 页".to_string());
+    }
+
+    let temp = std::env::temp_dir().join(format!(
+        "xk-netdl-nh-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&temp).map_err(|e| format!("建临时目录失败：{e}"))?;
+
+    let cursor = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let files: Mutex<Vec<Option<PathBuf>>> = Mutex::new(vec![None; count]);
+    let first_error: Mutex<Option<String>> = Mutex::new(None);
+
+    std::thread::scope(|scope| {
+        for _ in 0..CONCURRENCY.min(count) {
+            scope.spawn(|| loop {
+                if CANCEL.load(Ordering::SeqCst) {
+                    return;
+                }
+                let index = cursor.fetch_add(1, Ordering::SeqCst);
+                if index >= count {
+                    return;
+                }
+                let image = &urls[index];
+                let dest = temp.join(format!("{index:04}.{}", extension_of(image)));
+                match fetch_file(app, image, url, &dest) {
+                    Ok(()) => {
+                        if let Ok(mut guard) = files.lock() {
+                            guard[index] = Some(dest);
+                        }
+                        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                        set_status(|s| {
+                            s.done = n;
+                            s.stage = format!("下载中 {n}/{count}");
+                        });
+                    }
+                    Err(error) => {
+                        if let Ok(mut guard) = first_error.lock() {
+                            if guard.is_none() {
+                                *guard = Some(error);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    if CANCEL.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_dir_all(&temp);
+        set_status(|s| s.stage = "已取消".to_string());
+        return Ok(String::new());
+    }
+    if let Ok(guard) = first_error.lock() {
+        if let Some(error) = guard.as_ref() {
+            let _ = std::fs::remove_dir_all(&temp);
+            return Err(error.clone());
+        }
+    }
+
+    let ordered: Vec<PathBuf> = files
+        .into_inner()
+        .map_err(|e| format!("收集结果失败：{e}"))?
+        .into_iter()
+        .flatten()
+        .collect();
+    if ordered.is_empty() {
+        let _ = std::fs::remove_dir_all(&temp);
+        return Err("一张都没下载成功".to_string());
+    }
+
+    set_status(|s| s.stage = "打包 CBZ…".to_string());
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("缓存目录不可用：{e}"))?
+        .join("netdl");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建缓存目录失败：{e}"))?;
+    let target = dir.join(format!("{}.cbz", sanitize(&title)));
+    package_cbz(&ordered, &target)?;
+    let _ = std::fs::remove_dir_all(&temp);
+    set_status(|s| s.stage = "导入画匣…".to_string());
+    crate::d2::import_downloaded_meta(app, target.clone(), &title, &tags)?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+fn nhentai_gallery_id(url: &str) -> Option<String> {
+    let marker = "/g/";
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
 }
