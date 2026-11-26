@@ -31,6 +31,7 @@ import type {
   WallpaperLockConfig,
   HistoryEntry,
   CredentialEntry,
+  SiteLoginEntry,
   BlockedEntry,
 } from "./types";
 
@@ -419,6 +420,13 @@ export const api = {
   /** 按需解密取密码明文（DPAPI 绑当前 Windows 用户）。 */
   browserCredentialReveal: (id: number) =>
     invoke<string>("browser_credential_reveal", { id }),
+
+  // ---------- 站点登录态（Cookie 快照，DPAPI 加密；下载时不依赖浏览器窗口） ----------
+  /** 从当前浏览器抓某站点的 Cookie 并加密落盘，返回抓到的条数。 */
+  siteLoginCapture: (host: string, note?: string) =>
+    invoke<number>("site_login_capture", { host, note: note ?? "" }),
+  siteLoginList: () => invoke<SiteLoginEntry[]>("site_login_list"),
+  siteLoginDelete: (id: number) => invoke<void>("site_login_delete", { id }),
 
   // ---------- 壁纸锁（管理员 2026-11-25；防君子不防小人） ----------
   /** 读壁纸锁配置（哈希/盐不下发，只给开关、壁纸列表、轮换间隔）。 */

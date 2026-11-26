@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { CredentialEntry, HistoryEntry } from "../types";
+import type { CredentialEntry, HistoryEntry, SiteLoginEntry } from "../types";
 
 function formatTime(ms: number): string {
   if (!ms) return "";
@@ -22,7 +22,7 @@ interface Draft {
  * 密码只在本机当前 Windows 用户下能解，拷走 DB 也读不出来。
  */
 export default function BrowserDataSettings() {
-  const [tab, setTab] = useState<"history" | "credential">("history");
+  const [tab, setTab] = useState<"history" | "credential" | "siteLogin">("history");
   const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -32,6 +32,10 @@ export default function BrowserDataSettings() {
   const [creds, setCreds] = useState<CredentialEntry[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [revealed, setRevealed] = useState<Record<number, string>>({});
+
+  const [logins, setLogins] = useState<SiteLoginEntry[]>([]);
+  const [loginHost, setLoginHost] = useState("");
+  const [loginNote, setLoginNote] = useState("");
 
   const loadHistory = async (keyword = "") => {
     try {
@@ -49,9 +53,18 @@ export default function BrowserDataSettings() {
     }
   };
 
+  const loadLogins = async () => {
+    try {
+      setLogins(await api.siteLoginList());
+    } catch (error) {
+      setHint(`登录态读取失败：${String(error)}`);
+    }
+  };
+
   useEffect(() => {
     void loadHistory();
     void loadCreds();
+    void loadLogins();
   }, []);
 
   const clearHistory = async () => {
@@ -129,12 +142,43 @@ export default function BrowserDataSettings() {
     }
   };
 
+  const captureLogin = async () => {
+    const host = loginHost.trim();
+    if (!host) {
+      setHint("请先填站点域名，例如 18comic.org");
+      return;
+    }
+    setBusy(true);
+    try {
+      const count = await api.siteLoginCapture(host, loginNote.trim());
+      setHint(`已保存 ${host} 的登录态（${count} 项 Cookie），以后下载会直接沿用`);
+      setLoginHost("");
+      setLoginNote("");
+      await loadLogins();
+    } catch (error) {
+      setHint(`保存登录态失败：${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeLogin = async (id: number) => {
+    if (!window.confirm("删除这条登录态？删除后下载该站可能要重新登录。")) return;
+    try {
+      await api.siteLoginDelete(id);
+      await loadLogins();
+    } catch (error) {
+      setHint(`删除失败：${String(error)}`);
+    }
+  };
+
   return (
     <>
       <h3>浏览器数据</h3>
       <p className="settings-hint">
-        浏览历史自动记录（最多 3000 条，同网址 10 分钟内合并）；账号密码用 Windows DPAPI
-        加密，只在本机当前用户下能解，DB 拷走也读不出来。
+        浏览历史自动记录（最多 3000 条，同网址 10 分钟内合并）；账号密码和登录态 Cookie
+        都用 Windows DPAPI 加密，只在本机当前用户下能解，DB 拷走也读不出来。
+        在浏览器里登录站点后，到「登录态」保存一次，以后网络下载不用再登录。
       </p>
 
       <div className="browser-data-tabs">
@@ -151,6 +195,13 @@ export default function BrowserDataSettings() {
           onClick={() => setTab("credential")}
         >
           账号密码
+        </button>
+        <button
+          type="button"
+          className={tab === "siteLogin" ? "is-active" : ""}
+          onClick={() => setTab("siteLogin")}
+        >
+          登录态
         </button>
       </div>
 
@@ -313,6 +364,63 @@ export default function BrowserDataSettings() {
               </div>
             ))}
             {creds.length === 0 && <p className="settings-hint">还没有账号，点「新增账号」加一条。</p>}
+          </div>
+          <p className="settings-hint">
+            账号簿会在打开对应站点的登录页时自动填入用户名和密码，只填保存过的站点；没有账号的站点不受影响。
+          </p>
+        </>
+      )}
+
+      {tab === "siteLogin" && (
+        <>
+          <p className="settings-hint">
+            先在内置浏览器里登录好站点，再在下面填域名保存。下载时会从这份快照读 Cookie，
+            即使浏览窗口关了、画匣重启过也能用；Cookie 内容不显示、不明文落盘。
+          </p>
+          <div className="browser-data-toolbar">
+            <input
+              value={loginHost}
+              onChange={(event) => setLoginHost(event.target.value)}
+              placeholder="站点域名，如 18comic.org"
+              className="settings-inline-input"
+            />
+            <input
+              value={loginNote}
+              onChange={(event) => setLoginNote(event.target.value)}
+              placeholder="备注（可选）"
+              className="settings-inline-input"
+            />
+            <button
+              type="button"
+              className="btn btn-primary btn-compact"
+              onClick={() => void captureLogin()}
+              disabled={busy}
+            >
+              保存当前登录态
+            </button>
+          </div>
+          <div className="browser-data-list">
+            {logins.map((item) => (
+              <div className="browser-data-row" key={item.id}>
+                <div className="browser-data-main">
+                  <span className="browser-data-title">{item.host}</span>
+                  <span className="browser-data-sub">
+                    {item.note || "（无备注）"} · {formatTime(item.updatedAt)}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="browser-data-remove"
+                  onClick={() => void removeLogin(item.id)}
+                  title="删除这条登录态"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {logins.length === 0 && (
+              <p className="settings-hint">还没有保存的登录态。粘贴 Cookie 时也会自动存一份到这里。</p>
+            )}
           </div>
         </>
       )}

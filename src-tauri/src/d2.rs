@@ -1506,6 +1506,9 @@ pub fn d2_set_cookies(
                 cookie.set_path("/");
                 // 不设 secure/httpOnly：会话 cookie 要能被站点脚本读取做校验；
                 // 是否仅 HTTPS 传输由站点页面协议决定，硬设 secure 会让 HTTP 调试页失效。
+                // 但过期时间必须设：不设就是会话 cookie，画匣一重启登录态全丢
+                // （管理员 2026-11-26「登录状态页不保存」）。180 天足够长。
+                cookie.set_max_age(cookie::time::Duration::days(180));
                 if webview.set_cookie(cookie).is_ok() {
                     written += 1;
                 }
@@ -1529,6 +1532,24 @@ pub fn d2_set_cookies(
 
     if written == 0 {
         return Err("写入 cookie 失败：浏览窗口可能已经关掉了".to_string());
+    }
+
+    // 顺手存一份加密快照：以后浏览窗口关掉、甚至画匣重启过，网络下载也能直接
+    // 用这段 Cookie，不用再粘一次。pairs 已把「每行一个」和整段请求头都归一了。
+    if let Some(host) = bare_domains.first() {
+        let snapshot = pairs
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !snapshot.is_empty() {
+            let _ = crate::save_site_login_snapshot(
+                &app,
+                host,
+                &snapshot,
+                "粘贴 Cookie 时自动保存",
+            );
+        }
     }
     Ok(written)
 }

@@ -1040,6 +1040,124 @@ fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(data.to_vec())
 }
 
+/// 从当前还活着的内嵌浏览器 / 主窗收集某个 host 的 Cookie，拼成请求头形式。
+/// 只做读取，不写盘；写盘由 site_login_capture 负责。
+fn collect_browser_cookies(app: &AppHandle, host: &str) -> String {
+    let Ok(url) = tauri::Url::parse(&format!("https://{host}/")) else {
+        return String::new();
+    };
+    let mut pairs: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_label, webview) in app.webviews() {
+        if let Ok(list) = webview.cookies_for_url(url.clone()) {
+            for cookie in list {
+                if seen.insert(cookie.name().to_string()) {
+                    pairs.push(format!("{}={}", cookie.name(), cookie.value()));
+                }
+            }
+        }
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(list) = window.cookies_for_url(url) {
+            for cookie in list {
+                if seen.insert(cookie.name().to_string()) {
+                    pairs.push(format!("{}={}", cookie.name(), cookie.value()));
+                }
+            }
+        }
+    }
+    pairs.join("; ")
+}
+
+/// 供 d2_set_cookies 复用：把一段 Cookie 串加密存成站点登录态快照。
+pub(crate) fn save_site_login_snapshot(
+    app: &AppHandle,
+    host: &str,
+    cookies: &str,
+    note: &str,
+) -> Result<(), String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "应用状态还没准备好".to_string())?;
+    let enc = dpapi_protect(cookies.as_bytes())?;
+    with_library(&state, |library| {
+        db::upsert_site_login(&library.conn, host, &enc, note).map(|_| ())
+    })
+}
+
+/// 给下载链路用的登录态兜底：从落盘快照里读该站 Cookie。
+/// 浏览窗口已关、甚至画匣重启过也能拿到——这正是「每次下载都要重登」的解法。
+pub(crate) fn stored_cookie_for_host(app: &AppHandle, host: &str) -> Option<String> {
+    let state = app.try_state::<AppState>()?;
+    let inner = state.lock().ok()?;
+    let library = inner.library.as_ref()?;
+    let enc = db::site_login_cookies(&library.conn, host).ok()??;
+    let plain = dpapi_unprotect(&enc).ok()?;
+    let text = String::from_utf8_lossy(&plain).to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// 给浏览器登录框自动填充用：按 host 从账号簿取一组明文库名 / 密码。
+pub(crate) fn credential_for_host(app: &AppHandle, host: &str) -> Option<(String, String)> {
+    let state = app.try_state::<AppState>()?;
+    let inner = state.lock().ok()?;
+    let library = inner.library.as_ref()?;
+    let (_, username, enc) = db::credential_for_host(&library.conn, host).ok()??;
+    let plain = dpapi_unprotect(&enc).ok()?;
+    let password = String::from_utf8_lossy(&plain).to_string();
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+    Some((username, password))
+}
+
+/// 抓住当前浏览器里某个站点的登录态，加密落盘。
+/// 用户操作路径：内置浏览器登录成功 → 设置→浏览器数据→登录态→保存当前站点。
+#[tauri::command]
+async fn site_login_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    host: String,
+    note: Option<String>,
+) -> Result<usize, String> {
+    let host = db::normalize_host(&host);
+    if host.is_empty() {
+        return Err("请填写站点域名".to_string());
+    }
+    let cookies = collect_browser_cookies(&app, &host);
+    if cookies.is_empty() {
+        return Err("没读到该站点的登录态：请先在内置浏览器里打开并登录这个站点".to_string());
+    }
+    let count = cookies.split(';').filter(|part| part.contains('=')).count();
+    let enc = dpapi_protect(cookies.as_bytes())?;
+    let note = note.unwrap_or_default();
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            db::upsert_site_login(&library.conn, &host, &enc, &note)
+        })
+    })
+    .await?;
+    Ok(count)
+}
+
+#[tauri::command]
+async fn site_login_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<db::SiteLoginEntry>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::list_site_logins(&library.conn))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn site_login_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| db::delete_site_login(&library.conn, id))
+    })
+    .await
+}
+
 #[tauri::command]
 async fn browser_history_list(
     state: State<'_, AppState>,
@@ -2305,6 +2423,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             browser_credential_save,
             browser_credential_delete,
             browser_credential_reveal,
+            site_login_capture,
+            site_login_list,
+            site_login_delete,
             adblock_read_custom,
             adblock_write_custom,
             blocked_list,

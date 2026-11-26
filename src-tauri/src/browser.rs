@@ -1550,6 +1550,8 @@ fn attach_tab_hooks(
             }
         })
         .initialization_script(CONTENT_SHORTCUTS_SCRIPT)
+        // 登录框自动填充：探测到密码框就问账号簿要凭据（账号簿里没这站就什么都不做）。
+        .initialization_script(AUTOFILL_SCRIPT)
         // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
         // 由本脚本画匣系自己的菜单。
         .initialization_script(CONTEXT_MENU_SCRIPT)
@@ -1783,6 +1785,74 @@ fn attach_userscripts(
     builder.initialization_script(userscripts::loader_source(&sources))
 }
 
+
+/// 登录框自动填充脚本（引擎级，所有内容标签注入）。
+///
+/// 页面里发现密码框就通过 __xkReqQ 报一次 { action:"autofill", host }，引擎按 host
+/// 从账号簿（DPAPI 密文）取一组账号密码，回调 window.__xkAutofill 填进表单。
+/// 「只报一次 + 只填有账号的站」是关键：没保存过账号的站点完全不受影响。
+/// 填值走原生 setter + input/change 事件，React/Vue 的受控输入框才认。
+const AUTOFILL_SCRIPT: &str = r###"
+(function () {
+  if (window.__xkAutofillReady) return;
+  window.__xkAutofillReady = true;
+
+  window.__xkAutofill = function (user, pass) {
+    var inputs = Array.prototype.slice.call(document.querySelectorAll('input'));
+    var passEl = null, userEl = null;
+    for (var i = 0; i < inputs.length; i++) {
+      var el = inputs[i];
+      var type = (el.type || 'text').toLowerCase();
+      if (type === 'password' && !passEl) { passEl = el; continue; }
+      if (!userEl && (type === 'text' || type === 'email' || type === 'tel')) {
+        var hint = ((el.name || '') + ' ' + (el.id || '') + ' ' + (el.placeholder || '')).toLowerCase();
+        if (/user|login|account|email|name|账号|用户名|邮箱/.test(hint)) userEl = el;
+      }
+    }
+    if (!passEl) return false;
+    if (!userEl) {
+      var at = inputs.indexOf(passEl);
+      for (var j = at - 1; j >= 0; j--) {
+        var t = (inputs[j].type || 'text').toLowerCase();
+        if (t === 'text' || t === 'email') { userEl = inputs[j]; break; }
+      }
+    }
+    function fill(el, value) {
+      if (!el || !value) return;
+      var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+      var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+      try {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      } catch (e) {}
+    }
+    fill(userEl, user);
+    fill(passEl, pass);
+    return true;
+  };
+
+  function probe() {
+    if (window.__xkAutofillAsked) return;
+    var pass = document.querySelector('input[type="password"]');
+    if (!pass) return;
+    window.__xkAutofillAsked = true;
+    try {
+      (window.__xkReqQ = window.__xkReqQ || []).push({
+        action: 'autofill', host: location.hostname
+      });
+    } catch (e) {}
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', probe);
+  else probe();
+  // 动态渲染的登录框（SPA / 延迟弹窗）未必在 DOMContentLoaded 时就在，补两轮。
+  setTimeout(probe, 1200);
+  setTimeout(probe, 4000);
+  document.addEventListener('focusin', function (e) {
+    if (e.target && e.target.tagName === 'INPUT' && e.target.type === 'password') probe();
+  }, true);
+})();
+"###;
 
 /// 内容页快捷键脚本（引擎级，所有内容标签注入）。
 ///
@@ -2178,6 +2248,26 @@ fn handle_toolbar_action(
                 if let Some(tab_id) = with_state(label, |state| state.active.clone()) {
                     note_tab_url(label, &tab_id, url);
                 }
+            }
+            Ok(())
+        }
+        // 登录框自动填充：按 host 查账号簿（DPAPI 密文），回调页面填表。
+        // 没保存过这站账号就安静跳过，绝不影响正常浏览。明文只在这一次 eval 里
+        // 出现，不写日志、不落盘。
+        "autofill" => {
+            let host = req.get("host").and_then(|value| value.as_str()).unwrap_or("");
+            if host.is_empty() {
+                return Ok(());
+            }
+            if let Some((username, password)) = crate::credential_for_host(app, host) {
+                let webview = active_webview(label)?;
+                let user = serde_json::to_string(&username).unwrap_or_else(|_| "\"\"".to_string());
+                let pass = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
+                webview
+                    .eval(&format!(
+                        "window.__xkAutofill && window.__xkAutofill({user}, {pass});"
+                    ))
+                    .map_err(|error| format!("自动填充失败: {error}"))?;
             }
             Ok(())
         }

@@ -344,6 +344,14 @@ export interface CredentialEntry {
   updatedAt: number;
 }
 
+/** 站点登录态快照一条（Cookie 密文不下发，只显示站点与保存时间）。 */
+export interface SiteLoginEntry {
+  id: number;
+  host: string;
+  note: string;
+  updatedAt: number;
+}
+
 /** 网页元素屏蔽一条（元素选择器选的）。 */
 export interface BlockedEntry {
   host: string;

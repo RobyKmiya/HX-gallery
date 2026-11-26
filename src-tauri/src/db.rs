@@ -356,7 +356,16 @@ fn ensure_browser_tables(conn: &Connection) -> Result<(), String> {
              updated_at INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS idx_browser_credential_site
-             ON browser_credential(site COLLATE NOCASE);",
+             ON browser_credential(site COLLATE NOCASE);
+         -- 站点登录态快照：手工从浏览器抓下来的整段 Cookie，DPAPI 加密后落库。
+         -- 下载时浏览窗口可能已关、进程也可能重启过，这份快照是稳定的兜底来源。
+         CREATE TABLE IF NOT EXISTS browser_site_login (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             host TEXT NOT NULL UNIQUE COLLATE NOCASE,
+             cookies_enc BLOB NOT NULL,
+             note TEXT NOT NULL DEFAULT '',
+             updated_at INTEGER NOT NULL
+         );",
     )
     .map_err(|e| format!("建浏览器数据表失败: {e}"))
 }
@@ -376,6 +385,16 @@ pub struct CredentialEntry {
     pub id: i64,
     pub site: String,
     pub username: String,
+    pub note: String,
+    pub updated_at: i64,
+}
+
+/// 站点登录态快照（不返回 cookie 明文）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteLoginEntry {
+    pub id: i64,
+    pub host: String,
     pub note: String,
     pub updated_at: i64,
 }
@@ -561,6 +580,153 @@ pub fn credential_password(conn: &Connection, id: i64) -> Result<Vec<u8>, String
         |row| row.get::<_, Vec<u8>>(0),
     )
     .map_err(|e| format!("读取账号密码失败: {e}"))
+}
+
+/// 把「站点」字段规整成可比较的 host：去 scheme / 端口 / 路径 / www.，小写。
+/// 账号簿里的 site 是用户手填的，可能带 https://、路径甚至中文备注，统一一下再匹配。
+pub fn normalize_host(raw: &str) -> String {
+    let mut value = raw.trim().to_ascii_lowercase();
+    if let Some(pos) = value.find("://") {
+        value = value[pos + 3..].to_string();
+    }
+    for marker in ['/', '?', '#'] {
+        if let Some(pos) = value.find(marker) {
+            value.truncate(pos);
+        }
+    }
+    if let Some(pos) = value.rfind(':') {
+        if value[pos + 1..].chars().all(|c| c.is_ascii_digit()) {
+            value.truncate(pos);
+        }
+    }
+    value
+        .trim_start_matches("www.")
+        .trim()
+        .trim_matches('.')
+        .to_string()
+}
+
+/// 站点匹配：同域或子域都算（账号簿填主域、实际访问 www. 子域也能用）。
+fn host_matches(saved: &str, host: &str) -> bool {
+    if saved.is_empty() || host.is_empty() {
+        return false;
+    }
+    saved == host
+        || host.ends_with(&format!(".{saved}"))
+        || saved.ends_with(&format!(".{host}"))
+}
+
+/// 按 host 取一条账号（返回 id / 用户名 / 密码密文），供登录框自动填充用。
+pub fn credential_for_host(
+    conn: &Connection,
+    host: &str,
+) -> Result<Option<(i64, String, Vec<u8>)>, String> {
+    let wanted = normalize_host(host);
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT id, site, username, password_enc FROM browser_credential
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|e| format!("准备账号匹配查询失败: {e}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })
+        .map_err(|e| format!("查询账号失败: {e}"))?;
+    for row in rows {
+        let (id, site, username, enc) = row.map_err(|e| format!("读取账号失败: {e}"))?;
+        if host_matches(&normalize_host(&site), &wanted) {
+            return Ok(Some((id, username, enc)));
+        }
+    }
+    Ok(None)
+}
+
+pub fn list_site_logins(conn: &Connection) -> Result<Vec<SiteLoginEntry>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, host, note, updated_at FROM browser_site_login
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|e| format!("准备登录态查询失败: {e}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(SiteLoginEntry {
+                id: row.get(0)?,
+                host: row.get(1)?,
+                note: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("查询登录态失败: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取登录态失败: {e}"))
+}
+
+/// 按站点 upsert 一份登录态快照（cookies_enc 为 DPAPI 密文）。
+pub fn upsert_site_login(
+    conn: &Connection,
+    host: &str,
+    cookies_enc: &[u8],
+    note: &str,
+) -> Result<i64, String> {
+    let now = now_ms();
+    conn.execute(
+        "INSERT INTO browser_site_login (host, cookies_enc, note, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(host) DO UPDATE SET
+             cookies_enc = excluded.cookies_enc,
+             note = excluded.note,
+             updated_at = excluded.updated_at",
+        params![normalize_host(host), cookies_enc, note, now],
+    )
+    .map_err(|e| format!("保存登录态失败: {e}"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_site_login(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM browser_site_login WHERE id = ?1", params![id])
+        .map_err(|e| format!("删除登录态失败: {e}"))?;
+    Ok(())
+}
+
+/// 取某个 host 的登录态密文（按域或子域匹配）。
+pub fn site_login_cookies(conn: &Connection, host: &str) -> Result<Option<Vec<u8>>, String> {
+    let wanted = normalize_host(host);
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    // 先精确命中；没有再看子域（存的是主域、访问的是 www. 之类）。
+    if let Ok(enc) = conn.query_row(
+        "SELECT cookies_enc FROM browser_site_login WHERE host = ?1 COLLATE NOCASE",
+        params![wanted],
+        |row| row.get::<_, Vec<u8>>(0),
+    ) {
+        return Ok(Some(enc));
+    }
+    let mut statement = conn
+        .prepare("SELECT host, cookies_enc FROM browser_site_login")
+        .map_err(|e| format!("准备登录态读取失败: {e}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|e| format!("查询登录态失败: {e}"))?;
+    for row in rows {
+        let (saved, enc) = row.map_err(|e| format!("读取登录态失败: {e}"))?;
+        if host_matches(&normalize_host(&saved), &wanted) {
+            return Ok(Some(enc));
+        }
+    }
+    Ok(None)
 }
 
 /// 标签归一：把「中文固定词」或「非规范拼写」的标签改到词典的英文规范名上。

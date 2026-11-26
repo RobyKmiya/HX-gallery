@@ -178,14 +178,26 @@ fn cookie_for(app: &AppHandle, url: &str) -> String {
         }
     }
 
-    // 兜底：主窗（同一 WebView2 profile 时也能查到）。
+    // 兜底：主窗（同一 WebView2 profile 时也能查到）。原来这里只要 cookies_for_url
+    // 成功就 return，哪怕拿到的是空列表——那样下面的落盘快照永远没机会生效。
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(list) = window.cookies_for_url(parsed) {
-            return list
-                .iter()
-                .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
-                .collect::<Vec<_>>()
-                .join("; ");
+            if !list.is_empty() {
+                return list
+                    .iter()
+                    .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+            }
+        }
+    }
+
+    // 最后的兜底：落盘登录态快照。浏览窗口可能已关、画匣也可能重启过——这正是
+    // 管理员 2026-11-26「每次下载都要重新登录」的根因：老实现只认活着的 webview。
+    // 快照是用户登录后在设置里点「保存当前站点登录态」抓下来的，DPAPI 加密存库。
+    if let Some(saved) = crate::stored_cookie_for_host(app, &target_host) {
+        if !saved.is_empty() {
+            return saved;
         }
     }
     String::new()
