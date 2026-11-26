@@ -283,12 +283,13 @@ export default function Reader({
   }, [enterMode, card.id]);
 
   // 真无边框（管理员 11-23 要「连标题栏都没了」的版本）：
-  // 打开阅读器时**一次性**去掉标题栏，关闭时**一次性**还原——整个阅读会话
-  // 期间窗口零调整，不会再有晃动/闪烁/残影。F 切沉浸只动应用内工具栏。
+  // 原生标题栏已全局永久去除，这里只在万一被打开时兜底关掉。
+  // ⚠️ 卸载时**绝不能**还原成 true：老代码关阅读器时 `setWindowDecorations(true)`
+  // 把原生标题栏开了回来，和自绘窗条叠成「两个框」（管理员 2026-11-26 截图）。
   useEffect(() => {
     void api.setWindowDecorations(false).catch(() => {});
     return () => {
-      void api.setWindowDecorations(true).catch(() => {});
+      void api.setWindowDecorations(false).catch(() => {});
     };
   }, []);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);

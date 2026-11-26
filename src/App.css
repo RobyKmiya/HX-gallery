@@ -8755,3 +8755,55 @@ body.is-splitting {
 
 /* 登录态快照缺标志 cookie 的警示。 */
 .site-cookie-warn { color: var(--danger, #e07263); }
+
+/* 详情页：源链接（网络下载自动写进备注，可点回原页）。 */
+.source-links {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.source-link {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .02);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  padding: 6px 9px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: border-color .2s ease, color .2s ease;
+}
+.source-link:hover {
+  border-color: var(--accent-deep);
+  color: var(--accent);
+}
+
+/* 壁纸锁：壁纸改 <img> 承载（可拖拽平移/滚轮缩放），加载失败给出可见提示。 */
+.wallpaper-lock-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+  will-change: transform;
+}
+.wallpaper-lock-hint,
+.wallpaper-lock-tip {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+  z-index: 1;
+}
+.wallpaper-lock-hint { top: 18px; }
+.wallpaper-lock-tip { bottom: 14px; }

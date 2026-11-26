@@ -357,6 +357,29 @@ export default function WorkspaceTabs({
     setActiveId(id);
   };
 
+  /** 详情页「源链接」等外部请求：直接开一个带地址的网页标签。 */
+  const openUrlTab = (url: string) => {
+    const id = `browser-${Date.now().toString(36)}${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
+    setTabs((prev) => [
+      ...prev,
+      { id, kind: "browser", title: hostOf(url), url },
+    ]);
+    setActiveId(id);
+  };
+
+  // 详情页点「源链接」→ 这里开网页标签（CustomEvent，避免一层层传回调）。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const url = (event as CustomEvent<string>).detail;
+      if (typeof url === "string" && /^https?:\/\//.test(url)) openUrlTab(url);
+    };
+    window.addEventListener("huaxia:open-url-tab", handler);
+    return () => window.removeEventListener("huaxia:open-url-tab", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** 新页里输入网址 / 小房子回新页：url=null 时退回 React 新页。 */
   const setTabUrl = (id: string, url: string | null) => {
     setTabs((prev) =>

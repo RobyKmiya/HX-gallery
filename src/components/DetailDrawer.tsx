@@ -874,6 +874,26 @@ export default function DetailDrawer({
                   : `${noteDraft.length} / 2000`}
             </span>
           </div>
+          {/* 源链接（网络下载自动写进备注，形如「源：https://…」）：点开直接在新网页标签里看原页。 */}
+          {extractUrls(card.note ?? "").length > 0 && (
+            <div className="source-links">
+              {extractUrls(card.note ?? "").map((url) => (
+                <button
+                  key={url}
+                  type="button"
+                  className="source-link"
+                  title="在新网页标签里打开来源"
+                  onClick={() => {
+                    window.dispatchEvent(
+                      new CustomEvent("huaxia:open-url-tab", { detail: url }),
+                    );
+                  }}
+                >
+                  🔗 {shortUrl(url)}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             className="note-input"
             value={noteDraft}
@@ -1440,4 +1460,24 @@ export default function DetailDrawer({
       </aside>
     </div>
   );
+}
+
+/** 从备注里抠出 http(s) 链接（源：https://… 那行）。 */
+export function extractUrls(text: string): string[] {
+  const matches = text.match(/https?:\/\/[^\s，。；、"']+/g);
+  if (!matches) return [];
+  const seen: string[] = [];
+  for (const url of matches) {
+    if (!seen.includes(url)) seen.push(url);
+  }
+  return seen;
+}
+
+function shortUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.host + (parsed.pathname.length > 1 ? parsed.pathname.slice(0, 40) : "");
+  } catch {
+    return url.length > 50 ? `${url.slice(0, 50)}…` : url;
+  }
 }

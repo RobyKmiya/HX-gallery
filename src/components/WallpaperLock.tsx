@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { WallpaperLockConfig } from "../types";
 import { wallpaperUrl } from "../wallpapers";
@@ -8,6 +8,9 @@ import { wallpaperUrl } from "../wallpapers";
  *
  * 管理员定位：防君子不防小人，不做防破解。密码错误只抖动，不计数、不锁定。
  * 没设密码时直接回车就进（默认无密码）。
+ *
+ * 2026-11-26 补：壁纸支持**拖拽平移 + 滚轮缩放**（之前是死图看不全）；
+ * 加载失败明确提示，不再整屏黑掉装作没生效。
  */
 export default function WallpaperLock({
   config,
@@ -24,6 +27,13 @@ export default function WallpaperLock({
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [shakeKey, setShakeKey] = useState(0);
+  const [loadFailed, setLoadFailed] = useState(false);
+  // 平移 + 缩放：拖画面看细节，滚轮放大缩小，双击复位。
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+
+  const current = urls.length > 0 ? urls[index % urls.length] : null;
 
   // 多张时按配置的间隔轮换；只有一张或间隔为 0 就定住。
   useEffect(() => {
@@ -35,7 +45,12 @@ export default function WallpaperLock({
     return () => window.clearInterval(timer);
   }, [urls.length, config.intervalSecs]);
 
-  const current = urls.length > 0 ? urls[index % urls.length] : null;
+  // 换壁纸时把视角复位。
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+    setLoadFailed(false);
+  }, [index]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -61,9 +76,57 @@ export default function WallpaperLock({
   return (
     <div
       className="wallpaper-lock"
-      style={current ? { backgroundImage: `url("${current}")` } : undefined}
+      onWheel={(event) => {
+        if (!current) return;
+        event.preventDefault();
+        const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+        setZoom((value) => Math.min(6, Math.max(1, value * factor)));
+      }}
+      onDoubleClick={() => {
+        setZoom(1);
+        setOffset({ x: 0, y: 0 });
+      }}
+      onPointerDown={(event) => {
+        if (!current || event.button !== 0) return;
+        dragRef.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag) return;
+        setOffset({
+          x: drag.ox + (event.clientX - drag.x),
+          y: drag.oy + (event.clientY - drag.y),
+        });
+      }}
+      onPointerUp={() => {
+        dragRef.current = null;
+      }}
     >
+      {current && !loadFailed && (
+        <img
+          className="wallpaper-lock-img"
+          src={current}
+          alt=""
+          draggable={false}
+          onError={() => setLoadFailed(true)}
+          style={{
+            transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+            cursor: zoom > 1 ? "grab" : "default",
+          }}
+        />
+      )}
       <div className="wallpaper-lock-shade" aria-hidden="true" />
+      {(!current || loadFailed) && (
+        <p className="wallpaper-lock-hint">
+          {urls.length === 0
+            ? "还没有壁纸：去 设置 → 壁纸锁 添加一张（不挡进入）"
+            : "这张壁纸加载失败（文件可能被移动或删除），去 设置 → 壁纸锁 重新添加"}
+        </p>
+      )}
+      {current && !loadFailed && (
+        <p className="wallpaper-lock-tip">滚轮缩放 · 拖拽平移 · 双击复位</p>
+      )}
       <div className={`wallpaper-lock-body${error ? " is-error" : ""}`} key={shakeKey}>
         <form className={`wallpaper-lock-card${error ? " is-error" : ""}`} onSubmit={submit}>
           <span className="wallpaper-lock-mark" aria-hidden="true" />
