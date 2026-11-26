@@ -6418,6 +6418,41 @@ body.is-splitting {
   font-weight: 600;
 }
 
+/* SERIES 合集区折叠记忆（管理员 2026-11-27：折叠后不展示合集，反之常显） */
+.series-strip-head.is-toggle {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+  transition: color 0.18s ease;
+}
+.series-strip-head.is-toggle:hover .eyebrow,
+.series-strip-head.is-toggle:hover strong {
+  color: var(--accent-strong);
+}
+.series-strip-caret {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--faint);
+  transition: transform 0.24s var(--hx-ease);
+}
+.series-strip-caret.is-open {
+  transform: rotate(180deg);
+}
+.series-strip-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition: grid-template-rows 0.32s var(--hx-ease), opacity 0.24s ease;
+}
+.series-strip-body.is-collapsed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.series-strip-body > .series-strip-grid {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .series-strip-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
@@ -9078,18 +9113,23 @@ body.is-splitting {
   transform-origin: top left;
 }
 
-/* ---- A14 分组展开收起：侧栏收藏夹组高度过渡（始终挂载） ---- */
+/* ---- A14 分组展开收起：侧栏收藏夹组高度过渡（始终挂载） ----
+   注意：展开态不能锁 max-height / overflow:hidden——否则收藏夹一多就被截断、
+   鼠标滚不动（管理员反馈）。flex 项必须 flex:0 0 auto 才会撑开交给 .sidebar-nav 滚动。 */
 .nav-collection-list {
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   gap: 4px;
-  max-height: 1400px;
-  overflow: hidden;
-  transition: max-height 0.32s var(--hx-ease), opacity 0.24s ease;
+  max-height: none;
+  overflow: visible;
+  transition: opacity 0.24s ease;
 }
 .nav-collection-list.is-collapsed {
   max-height: 0;
+  overflow: hidden;
   opacity: 0;
+  transition: max-height 0.32s var(--hx-ease), opacity 0.24s ease;
 }
 
 /* ---- A15 壁纸交叉淡化：新壁纸压在上面淡入，旧壁纸保留到淡入结束 ---- */
@@ -9117,4 +9157,156 @@ body.is-splitting {
   }
   .progress-fill::after { animation: none; }
   .nav-collection-list, .nav-active-indicator { transition: none; }
+}
+
+/* ============================================================
+   标签拖拽排序（标签中心：手柄发起拖动，同分组内生效，顺序入 localStorage）
+   相对「UI 动效统一实施」追加，不改动上方任何已有规则。
+   ============================================================ */
+.tag-row.is-sortable {
+  grid-template-columns: auto auto auto 36px minmax(0, 1fr) auto;
+  transition: transform 0.2s var(--hx-ease), box-shadow 0.2s ease,
+    opacity 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+.tag-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 26px;
+  border-radius: 5px;
+  color: var(--faint);
+  font-size: 13px;
+  letter-spacing: -3px;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  transition: color 0.16s ease, background 0.16s ease;
+}
+.tag-drag-handle:hover {
+  color: var(--accent-strong);
+  background: rgba(232, 163, 92, 0.12);
+}
+.tag-drag-handle:active {
+  cursor: grabbing;
+}
+.tag-row.is-dragging {
+  opacity: 0.45;
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.tag-row.is-drag-over {
+  border-color: var(--accent-strong);
+  background: rgba(232, 163, 92, 0.1);
+  box-shadow: 0 0 0 2px rgba(232, 163, 92, 0.25);
+}
+@media (max-width: 860px) {
+  .tag-row.is-sortable {
+    grid-template-columns: auto auto auto 32px minmax(0, 1fr);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tag-row.is-sortable,
+  .tag-drag-handle {
+    transition: none;
+  }
+  .tag-row.is-dragging,
+  .tag-row.is-drag-over {
+    animation: none;
+  }
+}
+
+/* ---- 链接下载：解析态白色反向进度条（解析/已解析，还没开始下载） ---- */
+@keyframes hx-reverse-load {
+  from { width: 100%; }
+  to { width: 8%; }
+}
+.progress-track.is-parsing .progress-fill {
+  background: linear-gradient(90deg, rgba(255, 255, 255, .55), #fff);
+  box-shadow: 0 0 10px rgba(255, 255, 255, .4);
+  transition: none;
+  animation: hx-reverse-load 1.2s ease-in-out infinite alternate;
+}
+/* 解析态关掉 A6 扫光，避免白条和反向白条打架。 */
+.progress-fill.is-parsing::after { display: none; }
+
+/* ---- 链接下载：完成烟花礼炮（纯 CSS，每项完成时播放一次） ---- */
+.net-dl-item { position: relative; }
+.net-dl-fireworks {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.fw-burst {
+  position: absolute;
+  left: var(--fw-x);
+  top: var(--fw-y);
+  width: 2px;
+  height: 2px;
+  animation: fw-burst 1.25s ease-out var(--fw-delay) both;
+}
+.fw-burst::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 12px 4px var(--fw-color), 0 0 22px 7px var(--fw-color);
+  animation: fw-flash .45s ease-out var(--fw-delay) both;
+}
+.fw-spark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: linear-gradient(to top, var(--fw-color), #fff);
+  transform-origin: 50% 100%;
+  transform: rotate(var(--fw-angle)) translateY(0) scaleY(.2);
+  animation: fw-spark 1s cubic-bezier(.15, .7, .3, 1) var(--fw-delay) both;
+}
+@keyframes fw-burst {
+  0% { transform: scale(0); opacity: 0; }
+  20% { opacity: 1; transform: scale(1); }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+@keyframes fw-flash {
+  0% { opacity: 0; transform: scale(.2); }
+  25% { opacity: 1; transform: scale(1.4); }
+  100% { opacity: 0; transform: scale(.6); }
+}
+@keyframes fw-spark {
+  0% { opacity: 0; transform: rotate(var(--fw-angle)) translateY(0) scaleY(.2); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(var(--fw-angle)) translateY(-34px) scaleY(1); }
+}
+.fw-confetti {
+  position: absolute;
+  left: var(--fw-cx);
+  top: 0;
+  width: 5px;
+  height: 9px;
+  border-radius: 1px;
+  background: var(--fw-color);
+  opacity: 0;
+  animation: fw-confetti-fall 1.4s ease-in var(--fw-cdelay) both;
+}
+@keyframes fw-confetti-fall {
+  0% { opacity: 0; transform: translate3d(0, -8px, 0) rotate(0deg); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(10px, 110px, 0) rotate(540deg); }
+}
+
+/* 减少动态效果：解析反向条与烟花都停掉（白条保留静态满格提示）。 */
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.is-parsing .progress-fill { animation: none; width: 100% !important; }
+  .net-dl-fireworks { display: none; }
 }

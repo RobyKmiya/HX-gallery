@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api";
 import { notifyModalOpen, notifyModalClose } from "../modalBus";
 import type { NetDlStatus } from "../types";
@@ -67,6 +67,14 @@ function itemState(s: NetDlStatus): "idle" | "running" | "paused" | "done" | "fa
   return "idle";
 }
 
+/** 解析态：阶段文案带「解析」（含预览的「已解析：N 页」）且还没开始下载张数。 */
+function isParsing(s: NetDlStatus): boolean {
+  return s.stage.includes("解析") && s.done === 0;
+}
+
+/** 礼炮配色：金 / 橙 / 粉 / 青 / 紫。 */
+const FIREWORK_COLORS = ["#ffd76a", "#ff9d5c", "#ff7ba9", "#5ce1e6", "#c9a7ff"];
+
 const STATE_LABEL: Record<ReturnType<typeof itemState>, string> = {
   idle: "等待",
   running: "下载中",
@@ -87,6 +95,10 @@ export default function NetGalleryDialog({
   const [expanded, setExpanded] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const doneNotified = useRef(false);
+  /** 刚完成、正在放礼炮的项；1.6 秒后自动移除。 */
+  const [celebratingIds, setCelebratingIds] = useState<Set<string>>(() => new Set());
+  const prevStatesRef = useRef<Map<string, ReturnType<typeof itemState>>>(new Map());
+  const celebrationTimersRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     if (!embedded) notifyModalOpen();
@@ -95,6 +107,47 @@ export default function NetGalleryDialog({
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
   }, [embedded]);
+
+  // 卸载时清掉未放完的礼炮定时器。
+  useEffect(
+    () => () => {
+      celebrationTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  // 每项从「非完成」变成「完成」时放一次礼炮；轮询刷新 items 不会重复触发。
+  useEffect(() => {
+    const prev = prevStatesRef.current;
+    const next = new Map<string, ReturnType<typeof itemState>>();
+    const justDone: string[] = [];
+    for (const item of items) {
+      const state = itemState(item.status);
+      next.set(item.id, state);
+      if (state === "done" && prev.get(item.id) !== "done") justDone.push(item.id);
+    }
+    prevStatesRef.current = next;
+    if (justDone.length === 0) return;
+
+    setCelebratingIds((old) => {
+      const updated = new Set(old);
+      justDone.forEach((id) => updated.add(id));
+      return updated;
+    });
+    for (const id of justDone) {
+      const oldTimer = celebrationTimersRef.current.get(id);
+      if (oldTimer !== undefined) window.clearTimeout(oldTimer);
+      const timer = window.setTimeout(() => {
+        celebrationTimersRef.current.delete(id);
+        setCelebratingIds((old) => {
+          const updated = new Set(old);
+          updated.delete(id);
+          return updated;
+        });
+      }, 1600);
+      celebrationTimersRef.current.set(id, timer);
+    }
+  }, [items]);
 
   // 一次轮询拉回所有任务进度；这是唯一的定时器，不会再每项各开一个。
   useEffect(() => {
@@ -328,9 +381,49 @@ export default function NetGalleryDialog({
             items.map((item) => {
               const state = itemState(item.status);
               const percent = itemPercent(item.status);
+              const parsing = isParsing(item.status);
               const isOpen = expanded === item.id;
               return (
                 <div className={`net-dl-item is-${state}`} key={item.id}>
+                  {celebratingIds.has(item.id) ? (
+                    <div className="net-dl-fireworks" aria-hidden="true">
+                      {Array.from({ length: 4 }, (_, burstIdx) => (
+                        <div
+                          className="fw-burst"
+                          key={burstIdx}
+                          style={
+                            {
+                              "--fw-x": `${22 + burstIdx * 19}%`,
+                              "--fw-y": `${32 + (burstIdx % 2) * 16}%`,
+                              "--fw-delay": `${burstIdx * 0.08}s`,
+                              "--fw-color": FIREWORK_COLORS[burstIdx % FIREWORK_COLORS.length],
+                            } as CSSProperties
+                          }
+                        >
+                          {Array.from({ length: 8 }, (_, sparkIdx) => (
+                            <span
+                              className="fw-spark"
+                              key={sparkIdx}
+                              style={{ "--fw-angle": `${sparkIdx * 45}deg` } as CSSProperties}
+                            />
+                          ))}
+                        </div>
+                      ))}
+                      {Array.from({ length: 8 }, (_, confIdx) => (
+                        <span
+                          className="fw-confetti"
+                          key={`c${confIdx}`}
+                          style={
+                            {
+                              "--fw-cx": `${8 + confIdx * 11}%`,
+                              "--fw-cdelay": `${0.08 + confIdx * 0.01}s`,
+                              "--fw-color": FIREWORK_COLORS[confIdx % FIREWORK_COLORS.length],
+                            } as CSSProperties
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="net-dl-item-main">
                     <button
                       type="button"
@@ -351,9 +444,9 @@ export default function NetGalleryDialog({
                       </div>
                       <div className="net-dl-item-url">{shortUrl(item.url)}</div>
                       <div className="net-dl-progress-row">
-                        <div className="progress-track net-dl-track">
+                        <div className={`progress-track net-dl-track${parsing ? " is-parsing" : ""}`}>
                           <div
-                            className={`progress-fill net-dl-fill${state === "paused" ? " is-paused" : ""}`}
+                            className={`progress-fill net-dl-fill${state === "paused" ? " is-paused" : ""}${parsing ? " is-parsing" : ""}`}
                             style={{ width: `${state === "done" ? 100 : percent}%` }}
                           />
                         </div>
