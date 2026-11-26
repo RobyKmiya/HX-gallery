@@ -562,7 +562,11 @@ fn load_custom_adblock() -> Vec<String> {
 }
 
 /// 自定义名单缓存：设置页改完调 `reload_custom_adblock` 立即生效，不用重启。
-static CUSTOM_ADBLOCK: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+///
+/// 用 Arc 而不是 Vec：这个函数在**每个网络请求**里都要调用一次，
+/// 以前每次 clone 整张名单，一个页面几百个请求就是一串没必要的分配。
+static CUSTOM_ADBLOCK: std::sync::Mutex<Option<std::sync::Arc<Vec<String>>>> =
+    std::sync::Mutex::new(None);
 
 pub fn reload_custom_adblock() {
     if let Ok(mut guard) = CUSTOM_ADBLOCK.lock() {
@@ -570,13 +574,13 @@ pub fn reload_custom_adblock() {
     }
 }
 
-fn custom_adblock_domains() -> Vec<String> {
+fn custom_adblock_domains() -> std::sync::Arc<Vec<String>> {
     if let Ok(guard) = CUSTOM_ADBLOCK.lock() {
         if let Some(list) = guard.as_ref() {
             return list.clone();
         }
     }
-    let list = load_custom_adblock();
+    let list = std::sync::Arc::new(load_custom_adblock());
     if let Ok(mut guard) = CUSTOM_ADBLOCK.lock() {
         *guard = Some(list.clone());
     }
@@ -618,6 +622,23 @@ fn adblock_url_blocked(uri: &tauri::http::Uri) -> bool {
     !query.is_empty() && TRACKING_PARAMS.iter().any(|param| query.contains(param))
 }
 
+/// 域名是否命中（含子域），**零分配**。
+///
+/// 老写法是 `host.ends_with(&format!(".{domain}"))`——每个请求、名单里每个域名
+/// 都 new 一个 String。一个页面几百个请求 × 60 多个域名 = 上万次分配，
+/// 是「浏览器反应慢」能实打实感觉到的那种开销。
+fn host_matches(host: &str, domain: &str) -> bool {
+    if host == domain {
+        return true;
+    }
+    let (host_bytes, domain_bytes) = (host.as_bytes(), domain.as_bytes());
+    if host_bytes.len() <= domain_bytes.len() {
+        return false;
+    }
+    let start = host_bytes.len() - domain_bytes.len();
+    host_bytes[start - 1] == b'.' && &host_bytes[start..] == domain_bytes
+}
+
 fn adblock_host_blocked(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_lowercase();
     if host.is_empty() {
@@ -628,7 +649,7 @@ fn adblock_host_blocked(host: &str) -> bool {
         .iter()
         .copied()
         .chain(custom.iter().map(|s| s.as_str()))
-        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+        .any(|domain| host_matches(&host, domain))
 }
 
 /// 给标签页挂上拦截回调：命中名单直接 404。
@@ -764,6 +785,14 @@ pub fn refresh_user_agent(webview: &Webview) {
             *guard = Some(ua);
         }
     }
+}
+
+/// 后台问 UA：新建标签的主流程不能等这次 IPC（否则「右键新标签打开」会顿一下）。
+fn spawn_user_agent_refresh(webview: Webview) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        refresh_user_agent(&webview);
+    });
 }
 
 /// 找一扇「当前就停在这个域名上」的标签（用来做同源 fetch）。
@@ -992,7 +1021,8 @@ fn open_hosted(
                 .map_err(|error| format!("创建内容标签失败：{error}"))?;
             crumb("内容 webview 就绪");
             // 问一次真实 UA 存起来：curl 下载要用同一套身份过 Cloudflare。
-            refresh_user_agent(&webview);
+            // 放后台线程：建标签的主流程不能被这一次 IPC 拖住（右键开新标签会「卡一下」）。
+            spawn_user_agent_refresh(webview.clone());
 
             let state = BrowserState {
                 window: window.clone(),
@@ -1093,8 +1123,12 @@ pub fn history_action(label: &str, action: &str) -> Result<(), String> {
             .find(|tab| tab.id == state.active)
             .ok_or("浏览器没有激活标签")?;
         let plan = match action {
-            "back" => Plan::Eval("history.back()"),
-            "forward" => Plan::Eval("history.forward()"),
+            "back" => Plan::Eval(
+                "(function(){ if (history.length > 1) { history.back(); return 'ok'; } return 'edge-back'; })()",
+            ),
+            "forward" => Plan::Eval(
+                "(function(){ if (history.length > 1) { history.forward(); return 'ok'; } return 'edge-fwd'; })()",
+            ),
             "reload" => {
                 if tab.url.trim().is_empty() || tab.url == "about:blank" {
                     // home 是 Url 类型：to_string() 后再判断，别当 String trim。
@@ -1116,11 +1150,28 @@ pub fn history_action(label: &str, action: &str) -> Result<(), String> {
     })
     .ok_or_else(|| "浏览器不存在".to_string())??;
     match plan {
-        Plan::Eval(script) => webview.eval(script),
-        Plan::Navigate(url) => webview.navigate(url),
-        Plan::Reload => webview.reload(),
+        Plan::Eval(script) => {
+            // 用 eval_json 而不是 eval：要拿到「有没有历史」的结论。
+            // 以前直接 history.back()，在第一条记录上点后退什么都不会发生，
+            // 用户只看到「按钮没反应」，完全不知道是没有上一页（管理员反馈）。
+            let outcome = eval_json(&webview, script, Duration::from_millis(900)).unwrap_or_default();
+            if outcome.contains("edge") {
+                if let Some(toolbar) = toolbar_of(label) {
+                    let message = if outcome.contains("fwd") { "前进" } else { "后退" };
+                    let _ = toolbar.eval(&format!(
+                        "window.__xkToast && window.__xkToast({});",
+                        serde_json::to_string(&format!("没有可{message}的页面了"))
+                            .unwrap_or_else(|_| "\"没有更多历史了\"".to_string())
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Plan::Navigate(url) => webview
+            .navigate(url)
+            .map_err(|e| format!("执行失败: {e}")),
+        Plan::Reload => webview.reload().map_err(|e| format!("执行失败: {e}")),
     }
-    .map_err(|e| format!("执行失败: {e}"))
 }
 
 /// 新建标签（弹窗接管与工具栏「+」共用）。返回标签 id。
@@ -1181,7 +1232,7 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 )
                 .map_err(|error| format!("创建标签失败：{error}"))?;
             crumb("新标签 webview 就绪");
-            refresh_user_agent(&webview);
+            spawn_user_agent_refresh(webview.clone());
 
             let tab_url = url_for_thread.to_string();
     // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
@@ -2371,16 +2422,30 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
             // 队列有两个来源：工具栏 webview（按钮）和**当前内容页**（快捷键 / 鼠标侧键 /
             // 右键菜单）。以前只读工具栏，内容页写的动作永远没人消费——Ctrl+R / F5 /
             // Alt+←→ / Ctrl+滚轮缩放全部静默失效（管理员 2026-11-26 反馈的「快捷键无用」）。
+            // 先做长度探针再做 JSON 序列化：队列绝大多数时候是空的，
+            // `JSON.stringify` 在长页面上是笔实打实的开销，每 200ms 一次会拖慢页面。
+            const QUEUE_LEN_JS: &str = "window.__xkReqQ ? window.__xkReqQ.length : 0";
             const QUEUE_JS: &str =
                 "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())";
             let mut reqs: Vec<serde_json::Value> = Vec::new();
-            if let Ok(raw) = eval_json(&toolbar, QUEUE_JS, Duration::from_secs(2)) {
-                if !raw.trim().is_empty() && raw != "[]" {
-                    if let Ok(mut list) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
-                        reqs.append(&mut list);
+            let drain = |view: &Webview, wait: Duration, reqs: &mut Vec<serde_json::Value>| {
+                let pending = eval_json(view, QUEUE_LEN_JS, wait)
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<i64>()
+                    .unwrap_or(0);
+                if pending <= 0 {
+                    return;
+                }
+                if let Ok(raw) = eval_json(view, QUEUE_JS, Duration::from_millis(800)) {
+                    if !raw.trim().is_empty() && raw != "[]" {
+                        if let Ok(mut list) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                            reqs.append(&mut list);
+                        }
                     }
                 }
-            }
+            };
+            drain(&toolbar, Duration::from_millis(1200), &mut reqs);
             let active_webview = with_state(&label, |state| {
                 state
                     .tabs
@@ -2390,13 +2455,7 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
             })
             .flatten();
             if let Some(active) = active_webview {
-                if let Ok(raw) = eval_json(&active, QUEUE_JS, Duration::from_millis(800)) {
-                    if !raw.trim().is_empty() && raw != "[]" {
-                        if let Ok(mut list) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
-                            reqs.append(&mut list);
-                        }
-                    }
-                }
+                drain(&active, Duration::from_millis(500), &mut reqs);
             }
             if reqs.is_empty() {
                 push_state(&label);
@@ -2710,22 +2769,40 @@ fn toolbar_of(label: &str) -> Option<Webview> {
     with_state(label, |state| state.toolbar.clone())
 }
 
-/// 油猴跨域 XHR 轮询器：遍历本浏览器全部标签的 `__xkGmXhr` 队列。
+/// 油猴跨域 XHR 轮询器。
+///
+/// 2026-11-26 性能修复：原来每 250ms 遍历**全部标签**、每个标签 2 次 eval（各带
+/// 1~2s 超时）。开 4~5 个标签时就是每秒几十次 WebView2 IPC，页面一重（漫画织机）
+/// 就明显发卡、甚至看起来死住。现在改成：
+/// - 当前标签每轮都服务（织机就在当前页上跑）；
+/// - 后台标签**轮转**，每轮只服务一个，标签数不再线性放大开销；
+/// - 空标签列表不再 `return`（原来会让轮询线程永久退场）。
 fn start_gm_poller(label: &str, app: AppHandle) {
     let label = label.to_string();
     std::thread::spawn(move || {
         let _ = app;
+        let mut cursor = 0usize;
         loop {
             std::thread::sleep(GM_XHR_POLL_INTERVAL);
             let Some(webviews) = tab_webviews(&label) else {
                 return;
             };
             if webviews.is_empty() {
-                return;
+                continue;
             }
-            for webview in &webviews {
-                poll_tab_req(&label, webview);
-                poll_gm_xhr_queue(webview);
+            let active = active_webview(&label).ok();
+            let active_label = active.as_ref().map(|view| view.label().to_string());
+            if let Some(view) = active.as_ref() {
+                poll_tab_req(&label, view);
+                poll_gm_xhr_queue(view);
+            }
+            if webviews.len() > 1 {
+                cursor = (cursor + 1) % webviews.len();
+                let view = &webviews[cursor];
+                if active_label.as_deref() != Some(view.label()) {
+                    poll_tab_req(&label, view);
+                    poll_gm_xhr_queue(view);
+                }
             }
         }
     });
@@ -2743,10 +2820,23 @@ fn app_of(label: &str) -> Option<AppHandle> {
 
 /// 内容页请求（右键菜单「在新标签打开」等）：与工具栏同一套队列契约。
 fn poll_tab_req(label: &str, webview: &Webview) {
+    // 先看长度：绝大多数轮次队列是空的，不必把整条队列 JSON 序列化回来。
+    let pending = eval_json(
+        webview,
+        "window.__xkReqQ ? window.__xkReqQ.length : 0",
+        Duration::from_millis(500),
+    )
+    .unwrap_or_default()
+    .trim()
+    .parse::<i64>()
+    .unwrap_or(0);
+    if pending <= 0 {
+        return;
+    }
     let raw = match eval_json(
         webview,
         "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())",
-        Duration::from_secs(2),
+        Duration::from_millis(1200),
     ) {
         Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
         _ => return,
@@ -2796,9 +2886,8 @@ static GM_XHR_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 static GM_XHR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn poll_gm_xhr_queue(webview: &Webview) {
-    if !window_is_alive(webview) {
-        return;
-    }
+    // 这里不再先跑 window_is_alive 探针：那也是次 IPC，而 eval 本身在标签已关时
+    // 就会返回 Err，等于自带存活判定。
     if GM_XHR_INFLIGHT.load(Ordering::Relaxed) >= GM_XHR_MAX_INFLIGHT {
         return;
     }

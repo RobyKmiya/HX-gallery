@@ -8715,3 +8715,40 @@ body.is-splitting {
   box-shadow: 0 0 0 3px rgba(232, 163, 92, .12);
 }
 .site-login-paste::placeholder { color: var(--faint); }
+
+/* 登录态：按站点分组的 Cookie 快捷粘贴块。 */
+.site-cookie-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0 6px;
+}
+.site-cookie-row {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, .02);
+  padding: 10px 12px 11px;
+}
+.site-cookie-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+.site-cookie-on {
+  font-size: 10.5px;
+  color: var(--success);
+  border: 1px solid var(--success);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.site-cookie-off {
+  font-size: 10.5px;
+  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.site-cookie-row .settings-hint { margin: 4px 0 6px; }

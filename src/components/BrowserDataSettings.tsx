@@ -15,6 +15,30 @@ interface Draft {
   note: string;
 }
 
+/** 常见的几个图站：直接给一个粘贴框，不用每次手打域名。 */
+const COOKIE_SITES: { host: string; label: string; hint: string }[] = [
+  {
+    host: "18comic.vip",
+    label: "18comic（禁漫天堂）",
+    hint: "登录后复制 document.cookie，或整段 Cookie 请求头；关键是 AVS",
+  },
+  {
+    host: "nhentai.net",
+    label: "nhentai",
+    hint: "csrftoken / access_token / sessionid",
+  },
+  {
+    host: "exhentai.org",
+    label: "exhentai / e-hentai",
+    hint: "ipb_member_id / ipb_pass_hash / sk / igneous",
+  },
+  {
+    host: "wnacg.com",
+    label: "wnacg（绅士漫画）",
+    hint: "登录态 cookie，通常一两条就够",
+  },
+];
+
 /**
  * 设置 → 浏览器数据：浏览历史 + 账号密码。
  *
@@ -37,6 +61,8 @@ export default function BrowserDataSettings() {
   const [loginHost, setLoginHost] = useState("");
   const [loginNote, setLoginNote] = useState("");
   const [cookieText, setCookieText] = useState("");
+  const [siteDrafts, setSiteDrafts] = useState<Record<string, string>>({});
+  const [busySite, setBusySite] = useState("");
 
   const loadHistory = async (keyword = "") => {
     try {
@@ -193,6 +219,36 @@ export default function BrowserDataSettings() {
       await loadLogins();
     } catch (error) {
       setHint(`删除失败：${String(error)}`);
+    }
+  };
+
+  /** 快捷站点：把该行粘贴的 Cookie 直接写进加密库。 */
+  const importSiteCookie = async (host: string) => {
+    const text = (siteDrafts[host] ?? "").trim();
+    if (!text) return;
+    setBusySite(host);
+    try {
+      const count = await api.siteLoginImport(host, text);
+      setSiteDrafts((prev) => ({ ...prev, [host]: "" }));
+      setHint(`${host}：已存入 ${count} 项 Cookie，下载立刻可用`);
+      await loadLogins();
+    } catch (error) {
+      setHint(`${host} 入库失败：${String(error)}`);
+    } finally {
+      setBusySite("");
+    }
+  };
+
+  const captureFor = async (host: string) => {
+    setBusy(true);
+    try {
+      const count = await api.siteLoginCapture(host);
+      setHint(`已从当前标签抓到 ${host} 的 ${count} 项 Cookie`);
+      await loadLogins();
+    } catch (error) {
+      setHint(`抓取失败：${String(error)}`);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -402,6 +458,51 @@ export default function BrowserDataSettings() {
             也可以直接把 Cookie 粘进来入库，不必开着标签。下载只读这份快照，
             Cookie 内容不显示、不明文落盘。
           </p>
+          <div className="site-cookie-list">
+            {COOKIE_SITES.map((site) => {
+              const saved = logins.find((item) => item.host === site.host);
+              return (
+                <div className="site-cookie-row" key={site.host}>
+                  <div className="site-cookie-head">
+                    <strong>{site.label}</strong>
+                    <span className={saved ? "site-cookie-on" : "site-cookie-off"}>
+                      {saved ? `已保存 · ${formatTime(saved.updatedAt)}` : "未应用"}
+                    </span>
+                  </div>
+                  <p className="settings-hint">{site.hint}</p>
+                  <textarea
+                    className="site-login-paste"
+                    rows={2}
+                    value={siteDrafts[site.host] ?? ""}
+                    onChange={(event) =>
+                      setSiteDrafts((prev) => ({ ...prev, [site.host]: event.target.value }))
+                    }
+                    placeholder="name=value; name2=value2"
+                  />
+                  <div className="browser-data-toolbar">
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-compact"
+                      disabled={busySite === site.host || !(siteDrafts[site.host] ?? "").trim()}
+                      onClick={() => void importSiteCookie(site.host)}
+                    >
+                      {busySite === site.host ? "写入中…" : "写入本机库"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-quiet btn-compact"
+                      disabled={busy}
+                      onClick={() => void captureFor(site.host)}
+                      title="从当前打开的网页标签里直接抓一份"
+                    >
+                      从标签抓取
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="settings-hint">其它站点用下面这行手填域名：</p>
           <div className="browser-data-toolbar">
             <input
               value={loginHost}

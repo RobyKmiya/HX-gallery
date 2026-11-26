@@ -1403,23 +1403,38 @@ fn jm_aid_from_url(url: &str) -> Option<u64> {
 }
 
 /// 页面里的 `var scramble_id = 123456;`，取不到返回 None（调用方用站点默认值）。
+///
+/// 官方正则就是 `var scramble_id = (\d+);`。这里放宽到 key 附近 60 字节内找
+/// 分隔符，但仍然**只认紧邻的数字**——老实现用 `find('=')` 会跑到几百字符外的
+/// 无关代码里抓个数（段数一错，还原出来就是花的）。
 fn jm_scramble_id(html: &str) -> Option<u64> {
-    const KEY: &str = "scramble_id";
-    let mut rest = html;
-    while let Some(pos) = rest.find(KEY) {
-        let after = &rest[pos + KEY.len()..];
-        // 形如 ` = 268850;` 或 `=268850`，宽松取等号后的数字。
-        if let Some(eq) = after.find('=') {
-            let digits: String = after[eq + 1..]
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if !digits.is_empty() {
-                return digits.parse().ok();
+    let mut from = 0usize;
+    while let Some(offset) = html[from..].find("scramble") {
+        let pos = from + offset;
+        let end = (pos + 60).min(html.len());
+        let window = &html[pos..end];
+        let mut separator: Option<usize> = None;
+        for (index, ch) in window.char_indices() {
+            if ch == '=' || ch == ':' {
+                separator = Some(index);
+                break;
+            }
+            // 遇到这些说明这个 "scramble" 只是普通文本（路径/注释），不是赋值。
+            if ch == ';' || ch == '<' || ch == '>' {
+                break;
             }
         }
-        rest = &after[1..];
+        if let Some(index) = separator {
+            let tail = window[index + 1..].trim_start_matches([' ', '\t', '"', '\'']);
+            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(value) = digits.parse::<u64>() {
+                // scramble_id 是六位数级别，太小的多半是页码之类。
+                if value > 1000 {
+                    return Some(value);
+                }
+            }
+        }
+        from = pos + 8;
     }
     None
 }
@@ -1649,10 +1664,25 @@ fn download_and_package(
                                 &filename,
                             );
                             if num > 0 {
-                                if let Err(error) = crate::jm_decode::decode_image_file(&dest, num) {
-                                    set_status(|s| {
-                                        s.stage = format!("第 {} 张还原失败：{error}", index + 1)
-                                    });
+                                match crate::jm_decode::decode_image_file(&dest, num) {
+                                    Ok(applied) => {
+                                        if applied != num {
+                                            // 公式段数没对上，靠画面连续性纠正过来了。
+                                            set_status(|s| {
+                                                s.stage = format!(
+                                                    "第 {} 张：段数按画面校正 {}→{}",
+                                                    index + 1,
+                                                    num,
+                                                    applied
+                                                )
+                                            });
+                                        }
+                                    }
+                                    Err(error) => {
+                                        set_status(|s| {
+                                            s.stage = format!("第 {} 张还原失败：{error}", index + 1)
+                                        });
+                                    }
                                 }
                             }
                         }

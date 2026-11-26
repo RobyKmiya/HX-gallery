@@ -37,6 +37,25 @@ const LOGIN_SITES: &[&str] = &[
 static RESTORED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// 上次落库的内容指纹，避免每加载一个页面就把同一条记录重写一遍。
 static LAST_SAVED: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+/// 每个站点的上次同步时间：图站（尤其漫画织机）一次阅读会触发很多次加载，
+/// 每次都去读 cookie 会把主线程拖慢，这里做 4 秒节流。
+static LAST_SYNC: Mutex<Option<HashMap<String, std::time::Instant>>> = Mutex::new(None);
+
+fn throttled(host: &str) -> bool {
+    let mut guard = match LAST_SYNC.lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
+    let map = guard.get_or_insert_with(HashMap::new);
+    let now = std::time::Instant::now();
+    if let Some(last) = map.get(host) {
+        if now.duration_since(*last) < Duration::from_secs(4) {
+            return true;
+        }
+    }
+    map.insert(host.to_string(), now);
+    false
+}
 
 fn fnv1a(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -104,6 +123,9 @@ pub fn on_page_loaded(webview: &Webview, url: &str) {
 }
 
 fn sync(label: &str, webview: &Webview, parsed: &tauri::Url, host: &str) {
+    if throttled(host) {
+        return;
+    }
     let cookies = read_cookies(webview, parsed);
     let app = webview.app_handle();
 
@@ -122,7 +144,15 @@ fn sync(label: &str, webview: &Webview, parsed: &tauri::Url, host: &str) {
         if written > 0 {
             // 下载链路缓存里可能正压着「没登录」的空值，必须清掉。
             crate::netdl::clear_cookie_cache();
-            let _ = webview.reload();
+            // 只有页面还停在原地才刷新：用户已经点走/后退时再 reload，
+            // 会把他刚发起的导航顶掉，感觉就是「前进后退不灵」。
+            let still_here = webview
+                .url()
+                .map(|current| current.as_str() == parsed.as_str())
+                .unwrap_or(false);
+            if still_here {
+                let _ = webview.reload();
+            }
         }
         return;
     }
