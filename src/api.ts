@@ -422,6 +422,9 @@ export const api = {
     invoke<number>("site_login_capture", { host, note: note ?? "" }),
   siteLoginList: () => invoke<SiteLoginEntry[]>("site_login_list"),
   siteLoginDelete: (id: number) => invoke<void>("site_login_delete", { id }),
+  /** 直接粘贴 Cookie 文本入加密库（不要求网页标签开着）。 */
+  siteLoginImport: (host: string, cookies: string) =>
+    invoke<number>("site_login_import", { host, cookies }),
 
   // ---------- 壁纸锁（管理员 2026-11-25；防君子不防小人） ----------
   /** 读壁纸锁配置（哈希/盐不下发，只给开关、壁纸列表、轮换间隔）。 */

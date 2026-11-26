@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -84,8 +84,8 @@ impl DownloadTask {
 /// 全部任务。key = task_id（前端生成，uuid）。
 static TASKS: Mutex<Option<HashMap<String, Arc<DownloadTask>>>> = Mutex::new(None);
 
-/// 当前线程所属的任务。worker 线程开始时绑定，之后所有 set_status /
-/// cookie_for / fetch_file 都自动认领自己的任务，不用改函数签名。
+// 当前线程所属的任务。worker 线程开始时绑定，之后所有 set_status /
+// cookie_for / fetch_file 都自动认领自己的任务，不用改函数签名。
 thread_local! {
     static CURRENT_TASK: RefCell<Option<Arc<DownloadTask>>> = const { RefCell::new(None) };
 }
@@ -314,7 +314,13 @@ fn curl_base() -> std::process::Command {
         .arg("--max-time")
         .arg("120")
         .arg("-A")
-        .arg(crate::gallery_dl::UA);
+        // 用浏览器真实 UA：Cloudflare 的 cf_clearance 与 UA 绑定，用别的 UA
+        // 等于拿别人的通行证，必被拦（管理员 2026-11-26「下载全部报错」）。
+        .arg(crate::browser::webview_user_agent())
+        .arg("-H")
+        .arg("Accept-Language: zh-CN,zh;q=0.9,en;q=0.8")
+        .arg("-H")
+        .arg("Upgrade-Insecure-Requests: 1");
     command
 }
 
@@ -440,24 +446,31 @@ fn is_challenge(html: &str) -> bool {
         || html.contains("challenge-platform")
 }
 
-/// 抓页面：先 curl（快），被 Cloudflare 拦住再交给内置浏览器（能执行挑战脚本）。
+/// 抓页面：先 curl（快），被 Cloudflare 拦住就交给**已经在这个站点的标签**做同源 fetch。
+///
+/// 不再用 `load_html`：那是直接导航，会把用户正在看的标签整页顶走
+/// （管理员看到「nhentai 标签自己跳到别处」就是这个引起的）。
 fn fetch_html_smart(app: &AppHandle, url: &str) -> Result<String, String> {
     if let Ok(text) = fetch_text(app, url) {
-        if !is_challenge(&text) {
+        if !is_challenge(&text) && text.len() > 500 {
             return Ok(text);
         }
     }
-    for label in crate::browser::alive_labels() {
-        if let Ok(html) =
-            crate::browser::load_html(&label, url, std::time::Duration::from_secs(25))
-        {
-            if !is_challenge(&html) && html.len() > 500 {
-                return Ok(html);
+    match crate::browser::fetch_html_in_webview(url, std::time::Duration::from_secs(25)) {
+        Ok(html) => {
+            if is_challenge(&html) {
+                Err("页面还在 Cloudflare 验证中：在该站点的标签里点一下人机验证，通过后再回来下载。"
+                    .to_string())
+            } else if html.len() <= 500 {
+                Err("页面内容太少（可能是错误页）：先在该站点的标签里确认能正常打开。".to_string())
+            } else {
+                Ok(html)
             }
         }
+        Err(error) => Err(format!(
+            "{error}。\n做法：先在网页标签里打开这个站点的任一页面、过一次验证，再回来点开始下载。"
+        )),
     }
-    Err("页面被 Cloudflare 拦住了：先在浏览器里打开一次该链接、把验证过一次，再回来下载。"
-        .to_string())
 }
 
 /// 抓一个二进制文件到磁盘。
@@ -482,7 +495,7 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
     }
     command
         .arg("-w")
-        .arg("%{content_type}")
+        .arg("%{http_code}|%{content_type}")
         .arg("-o")
         .arg(dest)
         .arg(url);
@@ -547,14 +560,49 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
     }
     // 图床超时/被验证时会返回 200 的 HTML 错误页，会被当成图片存下来
     // （管理员 2026-11-26：nhentai 下出来的是「Error: timeout」占位图）。
-    let content_type = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
-    if !content_type.starts_with("image/") {
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (code, content_type) = match raw.split_once('|') {
+        Some((code, ct)) => (code.trim().to_string(), ct.trim().to_lowercase()),
+        None => (String::new(), raw.to_lowercase()),
+    };
+    // 以**文件头魔数**为准：不少图床/代理返回的 Content-Type 是空的，
+    // 只按头判断会把好图当错误页丢掉（管理员 2026-11-26：nhentai 全片 0/59）。
+    if !content_type.starts_with("image/") && !looks_like_image(dest) {
+        let preview = std::fs::read(dest)
+            .ok()
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes[..bytes.len().min(120)])
+                    .replace(['\r', '\n'], " ")
+            })
+            .unwrap_or_default();
         let _ = std::fs::remove_file(dest);
         return Err(format!(
-            "下载到的不是图片（{content_type}），可能被验证页/错误页替换：{url}"
+            "下载到的不是图片（HTTP {code}，Content-Type「{content_type}」）：{url}\n内容开头：{preview}"
         ));
     }
     Ok(())
+}
+
+/// 按文件头判断是不是图片（JPEG / PNG / GIF / WebP / BMP / AVIF）。
+fn looks_like_image(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 16];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    if read < 4 {
+        return false;
+    }
+    let head = &head[..read];
+    head.starts_with(&[0xFF, 0xD8, 0xFF])
+        || head.starts_with(b"\x89PNG")
+        || head.starts_with(b"GIF8")
+        || (head.starts_with(b"RIFF") && read >= 12 && &head[8..12] == b"WEBP")
+        || head.starts_with(b"BM")
+        || (read >= 12 && &head[4..12] == b"ftypavif")
 }
 
 fn between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<&'a str> {

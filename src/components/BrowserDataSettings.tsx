@@ -36,6 +36,7 @@ export default function BrowserDataSettings() {
   const [logins, setLogins] = useState<SiteLoginEntry[]>([]);
   const [loginHost, setLoginHost] = useState("");
   const [loginNote, setLoginNote] = useState("");
+  const [cookieText, setCookieText] = useState("");
 
   const loadHistory = async (keyword = "") => {
     try {
@@ -162,6 +163,29 @@ export default function BrowserDataSettings() {
     }
   };
 
+  const importLogin = async () => {
+    const host = loginHost.trim();
+    if (!host) {
+      setHint("请先在上面填站点域名，例如 18comic.vip");
+      return;
+    }
+    if (!cookieText.trim()) {
+      setHint("先把 Cookie 粘到下面的框里");
+      return;
+    }
+    setBusy(true);
+    try {
+      const count = await api.siteLoginImport(host, cookieText);
+      setHint(`已把 ${host} 的 ${count} 项 Cookie 存入本机加密库，下载会立刻用它`);
+      setCookieText("");
+      await loadLogins();
+    } catch (error) {
+      setHint(`入库失败：${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const removeLogin = async (id: number) => {
     if (!window.confirm("删除这条登录态？删除后下载该站可能要重新登录。")) return;
     try {
@@ -178,7 +202,7 @@ export default function BrowserDataSettings() {
       <p className="settings-hint">
         浏览历史自动记录（最多 3000 条，同网址 10 分钟内合并）；账号密码和登录态 Cookie
         都用 Windows DPAPI 加密，只在本机当前用户下能解，DB 拷走也读不出来。
-        在浏览器里登录站点后，到「登录态」保存一次，以后网络下载不用再登录。
+        网页标签里登录过的站点会自动存登录态，关掉画匣也不会丢。
       </p>
 
       <div className="browser-data-tabs">
@@ -374,14 +398,15 @@ export default function BrowserDataSettings() {
       {tab === "siteLogin" && (
         <>
           <p className="settings-hint">
-            先在内置浏览器里登录好站点，再在下面填域名保存。下载时会从这份快照读 Cookie，
-            即使浏览窗口关了、画匣重启过也能用；Cookie 内容不显示、不明文落盘。
+            网页标签里登录好站点后，这里会自动保存一份加密快照（关掉画匣也不丢）；
+            也可以直接把 Cookie 粘进来入库，不必开着标签。下载只读这份快照，
+            Cookie 内容不显示、不明文落盘。
           </p>
           <div className="browser-data-toolbar">
             <input
               value={loginHost}
               onChange={(event) => setLoginHost(event.target.value)}
-              placeholder="站点域名，如 18comic.org"
+              placeholder="站点域名，如 18comic.vip"
               className="settings-inline-input"
             />
             <input
@@ -392,12 +417,30 @@ export default function BrowserDataSettings() {
             />
             <button
               type="button"
-              className="btn btn-primary btn-compact"
+              className="btn btn-compact"
               onClick={() => void captureLogin()}
               disabled={busy}
             >
-              保存当前登录态
+              从当前标签抓取
             </button>
+          </div>
+          <textarea
+            className="site-login-paste"
+            value={cookieText}
+            onChange={(event) => setCookieText(event.target.value)}
+            placeholder={"把 Cookie 粘到这里，支持整段请求头：\nAVS=xxxxxxxx; ipb_member_id=123; ipb_pass_hash=abc…"}
+            rows={3}
+          />
+          <div className="browser-data-toolbar">
+            <button
+              type="button"
+              className="btn btn-primary btn-compact"
+              onClick={() => void importLogin()}
+              disabled={busy || !cookieText.trim()}
+            >
+              粘贴 Cookie 入库
+            </button>
+            <span className="settings-hint">只存本机、DPAPI 加密；下载会立刻用它。</span>
           </div>
           <div className="browser-data-list">
             {logins.map((item) => (

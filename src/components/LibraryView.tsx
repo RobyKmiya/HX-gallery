@@ -70,7 +70,6 @@ import {AlertIcon,
   CloseIcon,
   FolderIcon,
   FilterIcon,
-  GlobeIcon,
   GridIcon,
   HeartIcon,
   ImportIcon,
@@ -2461,16 +2460,6 @@ export default function LibraryView({
             <span className="nav-label">设置</span>
           </button>
 
-          <button
-            type="button"
-            className="nav-item"
-            onClick={() => setD2PanelOpen(true)}
-            title="画匣浏览器：内嵌浏览 + 整部抓取（支持 exhentai / nhentai / 18comic / wnacg）+ Cookie 登录"
-          >
-            <GlobeIcon width={16} height={16} />
-            <span className="nav-label">画匣浏览器</span>
-          </button>
-
           {activeQueue && (
             <div className="nav-row is-active">
               <button
@@ -3794,7 +3783,6 @@ export default function LibraryView({
               onClick: () => setDetailDock(detailDock === "dock" ? "float" : "dock"),
             },
             { label: "打开标签中心", dividerBefore: true, onClick: () => onOpenTab?.("tags") },
-            { label: "打开网页抓取", onClick: () => setD2PanelOpen(true) },
             { label: "打开更新面板", onClick: () => onOpenTab?.("release") },
             {
               label: "在资源管理器中显示库目录",

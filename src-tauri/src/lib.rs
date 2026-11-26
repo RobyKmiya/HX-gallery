@@ -21,6 +21,7 @@ pub mod queue;
 mod reader;
 mod release;
 pub mod series;
+pub mod site_login;
 pub mod translate;
 pub mod userscripts;
 
@@ -1125,9 +1126,9 @@ async fn site_login_capture(
     if host.is_empty() {
         return Err("请填写站点域名".to_string());
     }
-    let cookies = collect_browser_cookies(&app, &host);
+    let cookies = crate::site_login::capture_from_tabs(&app, &host);
     if cookies.is_empty() {
-        return Err("没读到该站点的登录态：请先在内置浏览器里打开并登录这个站点".to_string());
+        return Err("没读到该站点的登录态：请先在网页标签里打开并登录这个站点".to_string());
     }
     let count = cookies.split(';').filter(|part| part.contains('=')).count();
     let enc = dpapi_protect(cookies.as_bytes())?;
@@ -1138,7 +1139,22 @@ async fn site_login_capture(
         })
     })
     .await?;
+    crate::netdl::clear_cookie_cache();
     Ok(count)
+}
+
+/// 手动粘贴 Cookie 入库：不需要浏览器开着也能生效。
+///
+/// 管理员 2026-11-26：「登录过、关掉画匣、再打开数据又没了」——以前的粘贴框
+/// 只会往「已打开的浏览窗口」里写，没开窗就整条丢失。现在先落加密库，
+/// 下发给下载链路和已打开的标签。
+#[tauri::command]
+async fn site_login_import(
+    app: AppHandle,
+    host: String,
+    cookies: String,
+) -> Result<usize, String> {
+    crate::site_login::import_cookie_text(&app, &host, &cookies)
 }
 
 #[tauri::command]
@@ -2427,6 +2443,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             site_login_capture,
             site_login_list,
             site_login_delete,
+            site_login_import,
             adblock_read_custom,
             adblock_write_custom,
             blocked_list,

@@ -8694,3 +8694,24 @@ body.is-splitting {
   flex-direction: column;
 }
 .panel-embedded .net-dl-list { max-height: none; flex: 1 1 auto; }
+
+/* 登录态：直接粘贴 Cookie 入库（不要求网页标签开着）。 */
+.site-login-paste {
+  width: 100%;
+  margin: 8px 0;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-raised);
+  color: var(--text);
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+.site-login-paste:focus {
+  border-color: var(--accent-deep);
+  box-shadow: 0 0 0 3px rgba(232, 163, 92, .12);
+}
+.site-login-paste::placeholder { color: var(--faint); }

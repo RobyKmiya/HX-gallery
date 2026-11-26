@@ -663,7 +663,7 @@ export default function SettingsDialog({
                 </button>
                 <button type="button" className="btn btn-quiet" onClick={onOpenD2}>
                   <BookIcon width={13} height={13} />
-                  网页抓取（D2 下载器）
+                  整本抓取（旧版·按章节合并）
                 </button>
                 <button type="button" className="btn btn-quiet" onClick={onOpenRelease}>
                   <RefreshIcon width={13} height={13} />

@@ -206,6 +206,23 @@ export default function NetGalleryDialog({
     setItems((prev) => prev.filter((it) => it.id !== id));
   }, []);
 
+  /** 单项重试：换一个新任务 id，原地重排（后端不认旧 id 的残留状态）。 */
+  const retryOne = useCallback(async (item: DownloadItem) => {
+    const nextId = crypto.randomUUID();
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === item.id
+          ? { ...it, id: nextId, status: { ...EMPTY, running: true, stage: "重新排队…" } }
+          : it,
+      ),
+    );
+    try {
+      await api.netDlStartTask(nextId, item.url);
+    } catch (e) {
+      setError(`重试失败：${String(e)}`);
+    }
+  }, []);
+
   const cancelAll = async () => {
     for (const item of items) {
       if (item.status.running) await cancelOne(item.id);
@@ -213,6 +230,18 @@ export default function NetGalleryDialog({
   };
 
   const activeCount = items.filter((it) => itemState(it.status) === "running" || itemState(it.status) === "paused").length;
+  const failedItems = items.filter((it) => {
+    const state = itemState(it.status);
+    return state === "failed" || state === "canceled";
+  });
+  const failedCount = failedItems.length;
+
+  /** 一键重试所有失败/取消项：逐个换新 id 重排，失败的继续留在列表里。 */
+  const retryAllFailed = async () => {
+    for (const item of failedItems) {
+      await retryOne(item);
+    }
+  };
 
   return (
     <div
@@ -355,14 +384,26 @@ export default function NetGalleryDialog({
                           </button>
                         </>
                       ) : (
-                        <button
-                          type="button"
-                          className="btn btn-quiet btn-compact net-dl-danger"
-                          onClick={() => void removeOne(item.id)}
-                          title="移除"
-                        >
-                          <TrashIcon />
-                        </button>
+                        <>
+                          {(state === "failed" || state === "canceled") && (
+                            <button
+                              type="button"
+                              className="btn btn-quiet btn-compact"
+                              onClick={() => void retryOne(item)}
+                              title="重试这一项"
+                            >
+                              重试
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-quiet btn-compact net-dl-danger"
+                            onClick={() => void removeOne(item.id)}
+                            title="移除"
+                          >
+                            <TrashIcon />
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -402,6 +443,11 @@ export default function NetGalleryDialog({
           {activeCount > 0 ? (
             <button type="button" className="btn" onClick={() => void cancelAll()}>
               全部取消
+            </button>
+          ) : null}
+          {failedCount > 0 ? (
+            <button type="button" className="btn" onClick={() => void retryAllFailed()}>
+              重试失败项（{failedCount}）
             </button>
           ) : null}
           <span className="net-dl-footer-hint">

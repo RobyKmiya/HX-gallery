@@ -501,7 +501,40 @@ const ADBLOCK_DOMAINS: &[&str] = &[
     "trafficstars.com",
     "tsyndicate.com",
     "adspyglass.com",
+    // 2026-11-26 管理员实测：nhentai 标签被整页劫持到 ourdreamland.ai 的广告页
+    // （url 里还带着没替换的 {gender}/{sourceType} 模板变量，典型的推广联盟脚本）。
+    // 资源级拦截拦不住「顶层导航」，必须同时上 on_navigation。
+    "ourdreamland.ai",
+    "ourdreamland.com",
+    "ourdreamland.net",
+    "dreamlandai.com",
 ];
+
+/// 整页级的广告/联盟跳转判断：出现在 URL 里就说明这是一次推广跳转。
+///
+/// 和资源级拦截分开写：顶层导航不该因为「域名不认识」就被拦（会误伤正常站），
+/// 所以这里的规则更保守——只有明确的广告站点，或带推广参数的着陆页才算。
+pub fn is_ad_navigation(url: &str) -> bool {
+    let Ok(parsed) = tauri::Url::parse(url) else {
+        return false;
+    };
+    // 自家页面（tauri://localhost、asset 协议）一律放行。
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    // 只按**域名**判断：顶层导航若也吃 utm_/gclid 这类参数规则，
+    // 用户从别处复制来的正常链接会被静默拦掉，那是误伤。
+    parsed
+        .host_str()
+        .map(adblock_host_blocked)
+        .unwrap_or(false)
+}
+
+/// 站点登录态自动同步的入口：页面加载完成时抓一份快照，缺 Cookie 时回填一次。
+/// 具体实现在 `site_login` 模块（这里只做转发，避免 browser 依赖业务库）。
+fn notify_page_loaded(webview: &tauri::Webview, url: &str) {
+    crate::site_login::on_page_loaded(webview, url);
+}
 
 /// 用户自定义名单文件路径（一行一个域名，# 开头为注释）。
 pub fn custom_adblock_path() -> Option<std::path::PathBuf> {
@@ -696,6 +729,136 @@ pub fn load_html(label: &str, url: &str, wait: Duration) -> Result<String, Strin
     read_active_html(label, Duration::from_millis(4000))
 }
 
+/// 浏览器真实 UA（缓存）。
+///
+/// 下载走 curl，Cloudflare 的 `cf_clearance` 是**绑 UA** 的：浏览器里拿到的
+/// 通行证，用另一个 UA 去请求立刻又变成挑战页。以前 curl 写死 Chrome/126，
+/// 而 WebView2 实际报的是 Edge UA —— 这就是「浏览器能看、下载全被拦」的原因之一。
+static WEBVIEW_UA: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 读缓存的浏览器 UA（**不**做 WebView2 调用）。
+///
+/// 刻意不在这里现问：这个函数在下发的 worker 线程里被反复调用，
+/// 每次都要 IPC 就回到「几百张图 × 几千次 WebView2 调用」的老路上。
+/// UA 在浏览器创建时问一次（`refresh_user_agent`），之后只读缓存。
+pub fn webview_user_agent() -> String {
+    if let Ok(guard) = WEBVIEW_UA.lock() {
+        if let Some(ua) = guard.as_ref() {
+            if ua.len() > 20 {
+                return ua.clone();
+            }
+        }
+    }
+    // 浏览器没开时的兜底：按 WebView2 的典型 UA 写，比纯 Chrome 更像本机环境。
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0".to_string()
+}
+
+/// 问一次 WebView2 的真实 UA 并缓存（只在建标签的线程里调用）。
+pub fn refresh_user_agent(webview: &Webview) {
+    let Ok(raw) = eval_json(webview, "navigator.userAgent", Duration::from_millis(800)) else {
+        return;
+    };
+    let ua = raw.trim().trim_matches('"').to_string();
+    if ua.len() > 20 {
+        if let Ok(mut guard) = WEBVIEW_UA.lock() {
+            *guard = Some(ua);
+        }
+    }
+}
+
+/// 找一扇「当前就停在这个域名上」的标签（用来做同源 fetch）。
+fn webview_for_host(host: &str) -> Option<Webview> {
+    let mut found: Option<Webview> = None;
+    if let Ok(guard) = BROWSERS.lock() {
+        'outer: for state in guard.values() {
+            for tab in &state.tabs {
+                let Ok(parsed) = Url::parse(&tab.url) else {
+                    continue;
+                };
+                let matched = parsed
+                    .host_str()
+                    .map(|value| value.eq_ignore_ascii_case(host))
+                    .unwrap_or(false);
+                if matched {
+                    found = Some(tab.webview.clone());
+                    break 'outer;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// 在**已经登录的标签内部**用同源 fetch 抓页面 HTML。
+///
+/// 为什么不用 `load_html`：那个是直接 `navigate`，会把用户正在看的标签整页换掉
+/// （用户在 nhentai 标签上，一下 18comic 就被顶走了，看着就像「自己乱跳」）。
+/// 同源 fetch 用的是浏览器自己的网络栈 —— cookie、UA、TLS 指纹、cf_clearance
+/// 全都对得上，Cloudflare 也认。
+pub fn fetch_html_in_webview(url: &str, wait: Duration) -> Result<String, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("网址格式不对：{e}"))?;
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("网址里没有域名".to_string());
+    }
+    let webview = webview_for_host(&host)
+        .ok_or_else(|| format!("没有打开着 {host} 的标签（先在这个站点的标签里过一次验证）"))?;
+    let url_js = serde_json::to_string(url).unwrap_or_else(|_| format!("\"{url}\""));
+    let script = format!(
+        r#"(function(){{
+  window.__hxFetch = {{ done: false, len: -1, err: '', text: '' }};
+  try {{
+    fetch({url_js}, {{ credentials: 'include', headers: {{ 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' }} }})
+      .then(function(r){{ if(!r.ok) throw new Error('HTTP ' + r.status); return r.text(); }})
+      .then(function(t){{ window.__hxFetch = {{ done: true, len: t.length, err: '', text: t }}; }})
+      .catch(function(e){{ window.__hxFetch = {{ done: true, len: 0, err: String(e), text: '' }}; }});
+  }} catch (e) {{
+    window.__hxFetch = {{ done: true, len: 0, err: String(e), text: '' }};
+  }}
+  return 'started';
+}})()"#
+    );
+    webview
+        .eval(script)
+        .map_err(|e| format!("在标签里发起抓取失败：{e}"))?;
+
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err("浏览器抓取超时（页面可能一直在验证）".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let len = eval_json(
+            &webview,
+            "window.__hxFetch ? window.__hxFetch.len : -1",
+            Duration::from_millis(700),
+        )
+        .unwrap_or_default();
+        let Ok(len) = len.trim().parse::<i64>() else {
+            continue;
+        };
+        if len < 0 {
+            continue;
+        }
+        if len == 0 {
+            let err = eval_json(
+                &webview,
+                "window.__hxFetch.err || ''",
+                Duration::from_millis(700),
+            )
+            .unwrap_or_default();
+            return Err(format!("标签内抓取失败：{err}"));
+        }
+        let text = eval_json(&webview, "window.__hxFetch.text", Duration::from_millis(8000))?;
+        // 抓完就把大字符串放掉，别一直占着页面内存。
+        let _ = webview.eval("if (window.__hxFetch) { window.__hxFetch.text = ''; }");
+        if text.trim().is_empty() {
+            return Err("标签内抓取返回空内容".to_string());
+        }
+        return Ok(text);
+    }
+}
+
 /// 打开一个新的浏览器窗口（工具栏 + 首个标签）。
 ///
 /// 返回窗口 label（调用方存好，后续所有命令都按 label 路由）。
@@ -828,6 +991,8 @@ fn open_hosted(
                 )
                 .map_err(|error| format!("创建内容标签失败：{error}"))?;
             crumb("内容 webview 就绪");
+            // 问一次真实 UA 存起来：curl 下载要用同一套身份过 Cloudflare。
+            refresh_user_agent(&webview);
 
             let state = BrowserState {
                 window: window.clone(),
@@ -1016,6 +1181,7 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 )
                 .map_err(|error| format!("创建标签失败：{error}"))?;
             crumb("新标签 webview 就绪");
+            refresh_user_agent(&webview);
 
             let tab_url = url_for_thread.to_string();
     // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
@@ -1396,8 +1562,30 @@ fn attach_tab_hooks(
         })
         // 弹窗接管 v2：新窗一律开成新标签（后台建，建好即激活）。
         .on_new_window(move |new_url, _features| {
-            queue_pending_tab(&label_for_new, &new_url.to_string(), true);
+            let target = new_url.to_string();
+            // 广告/联盟弹窗不开标签：以前一律开，nhentai 点一下正文就多出个
+            // ourdreamland 广告标签（管理员 2026-11-26 截图）。
+            if is_ad_navigation(&target) {
+                crumb(format!("拦下广告弹窗 {target}"));
+                return NewWindowResponse::Deny;
+            }
+            queue_pending_tab(&label_for_new, &target, true);
             NewWindowResponse::Deny
+        })
+        // 顶层导航拦截：资源级拦截管不到主文档，广告页会整页接管当前标签。
+        .on_navigation(|url| {
+            let target = url.to_string();
+            if is_ad_navigation(&target) {
+                crumb(format!("拦下广告跳转 {target}"));
+                return false;
+            }
+            true
+        })
+        // 页面加载完成：自动快照该站登录态；库里有快照但浏览器没有时回填一次。
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                notify_page_loaded(&webview, payload.url().as_str());
+            }
         })
         .on_download({
             let label_for_download = label_for_dl.clone();
