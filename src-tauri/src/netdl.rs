@@ -276,9 +276,20 @@ fn parse_title(html: &str) -> String {
 /// 标签：命名空间 → 若干标签值。
 fn parse_tags(html: &str) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
-    let Some(block) = between(html, "<div id=\"taglist\">", "</table>") else {
+    // 锚点放宽：exhentai 的 taglist 常带 style/class，写死 `<div id="taglist">`
+    // 会整块找不到（管理员 2026-11-26：标题、页数都对，tag 是空的）。
+    let Some(pos) = html.find("id=\"taglist\"") else {
         return out;
     };
+    let after_id = &html[pos..];
+    let Some(gt) = after_id.find('>') else {
+        return out;
+    };
+    let content = &after_id[gt + 1..];
+    let Some(end) = content.find("</table>") else {
+        return out;
+    };
+    let block = &content[..end];
     // 每行形如 <td class="tc">artist:</td><td class="tc"><a ...>name</a></td>
     for row in block.split("<tr>") {
         let Some(cell) = between(row, "<td class=\"tc\">", "</td>") else {
@@ -692,8 +703,12 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
     set_status(|s| s.stage = format!("读取 nhentai 作品 {id}…"));
     let api = format!("https://nhentai.net/api/gallery/{id}");
     let raw = fetch_text(app, &api)?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("nhentai 接口返回不是 JSON（可能被登录墙或验证页拦截）：{e}"))?;
+    // 接口被 Cloudflare / 登录墙拦时会返回 HTML；退回解析作品页本体
+    // （管理员 2026-11-26：接口返回不是 JSON）。
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return run_nhentai_from_html(app, url),
+    };
     let media_id = value["media_id"]
         .as_str()
         .ok_or("nhentai 接口没有 media_id（可能未登录或作品已删除）")?
@@ -751,11 +766,136 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
             index + 1
         ));
     }
+    download_and_package(app, urls, &title, &tag_map, url)
+}
+
+fn nhentai_gallery_id(url: &str) -> Option<String> {
+    let marker = "/g/";
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
+}
+
+/// 接口不可用时的回退：直接解析 nhentai 作品页 HTML。
+fn run_nhentai_from_html(app: &AppHandle, page_url: &str) -> Result<String, String> {
+    set_status(|s| s.stage = "接口被拦，改解析作品页…".to_string());
+    let html = fetch_text(app, page_url)?;
+    if html.contains("cf-chl") || html.contains("Just a moment") {
+        return Err(
+            "nhentai 弹了人机验证，curl 过不去。先用内置浏览器打开该作品页过一次验证，再重试。"
+                .to_string(),
+        );
+    }
+    let title = nhentai_title_from_html(&html).unwrap_or_else(|| "UNTITLE".to_string());
+    let tag_map = nhentai_tags_from_html(&html);
+    let urls = nhentai_image_urls(&html);
+    if urls.is_empty() {
+        return Err("nhentai 页面里没找到图片（可能是验证页或页面结构变了）".to_string());
+    }
+    let flat: Vec<(String, String)> = tag_map
+        .iter()
+        .flat_map(|(kind, names)| {
+            names
+                .iter()
+                .map(move |name| (kind.clone(), name.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    set_status(|s| {
+        s.title = title.clone();
+        s.tags = flat;
+        s.total = urls.len();
+    });
+    download_and_package(app, urls, &title, &tag_map, page_url)
+}
+
+fn nhentai_title_from_html(html: &str) -> Option<String> {
+    let pos = html.find("class=\"pretty\"")?;
+    let after = &html[pos..];
+    let gt = after.find('>')?;
+    let rest = &after[gt + 1..];
+    let end = rest.find("</span>")?;
+    let text = html_unescape(rest[..end].trim());
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn nhentai_tags_from_html(html: &str) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find("<a class=\"tag\"") {
+        let after = &rest[pos..];
+        let kind = after
+            .find("data-type=\"")
+            .and_then(|p| {
+                let body = &after[p + 11..];
+                body.find('"').map(|end| body[..end].to_string())
+            })
+            .unwrap_or_else(|| "tag".to_string());
+        let name = after.find("<span class=\"name\">").and_then(|p| {
+            let body = &after[p + "<span class=\"name\">".len()..];
+            body.find("</span>")
+                .map(|end| html_unescape(body[..end].trim()))
+        });
+        if let Some(name) = name {
+            if !name.is_empty() {
+                out.entry(kind).or_default().push(name);
+            }
+        }
+        rest = &after[1..];
+    }
+    out
+}
+
+/// 从作品页拿每页图片地址：data-src 是缩略图（`1t.jpg`），去掉 `t` 就是原图。
+fn nhentai_image_urls(html: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find("data-src=\"") {
+        let after = &rest[pos + "data-src=\"".len()..];
+        let Some(end) = after.find('"') else {
+            break;
+        };
+        let mut src = after[..end].to_string();
+        if src.starts_with("//") {
+            src = format!("https:{src}");
+        }
+        if src.contains("i.nhentai.net") {
+            if let Some(dot) = src.rfind('.') {
+                let (base, ext) = src.split_at(dot);
+                if base.ends_with('t') && base.len() > 1 {
+                    src = format!("{}.{}", &base[..base.len() - 1], &ext[1..]);
+                }
+            }
+            if !out.contains(&src) {
+                out.push(src);
+            }
+        }
+        rest = &after[end..];
+    }
+    out
+}
+
+/// 下载一组图片并打包入库（nhentai API / HTML 两条路共用）。
+fn download_and_package(
+    app: &AppHandle,
+    urls: Vec<String>,
+    title: &str,
+    tag_map: &HashMap<String, Vec<String>>,
+    referer: &str,
+) -> Result<String, String> {
     let count = urls.len();
     if count == 0 {
-        return Err("nhentai 返回 0 页".to_string());
+        return Err("没有可下载的图片".to_string());
     }
-
     let temp = std::env::temp_dir().join(format!(
         "xk-netdl-nh-{}-{}",
         std::process::id(),
@@ -783,7 +923,7 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
                 }
                 let image = &urls[index];
                 let dest = temp.join(format!("{index:04}.{}", extension_of(image)));
-                match fetch_file(app, image, url, &dest) {
+                match fetch_file(app, image, referer, &dest) {
                     Ok(()) => {
                         if let Ok(mut guard) = files.lock() {
                             guard[index] = Some(dest);
@@ -836,22 +976,10 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
         .map_err(|e| format!("缓存目录不可用：{e}"))?
         .join("netdl");
     std::fs::create_dir_all(&dir).map_err(|e| format!("建缓存目录失败：{e}"))?;
-    let target = dir.join(format!("{}.cbz", sanitize(&title)));
+    let target = dir.join(format!("{}.cbz", sanitize(title)));
     package_cbz(&ordered, &target)?;
     let _ = std::fs::remove_dir_all(&temp);
     set_status(|s| s.stage = "导入画匣…".to_string());
-    crate::d2::import_downloaded_meta(app, target.clone(), &title, &tag_map)?;
+    crate::d2::import_downloaded_meta(app, target.clone(), title, tag_map)?;
     Ok(target.to_string_lossy().to_string())
-}
-
-fn nhentai_gallery_id(url: &str) -> Option<String> {
-    let marker = "/g/";
-    let start = url.find(marker)? + marker.len();
-    let rest = &url[start..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        Some(digits)
-    }
 }
