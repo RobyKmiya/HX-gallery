@@ -9,25 +9,43 @@ import {
 import { api, assetUrl } from "../api";
 import { useLibraryActions } from "../libraryActions";
 import { formatDateTime } from "../format";
-import type {
-  ArchiveCardData,
-  Tag,
-  TagCategory,
-  TagGraph as TagGraphData,
-} from "../types";
+import type { ArchiveCardData, Tag, TagCategory } from "../types";
 import {
   BookIcon,
   CheckIcon,
   ChevronRightIcon,
   CloseIcon,
   FolderIcon,
-  GraphIcon,
   PlusIcon,
   SearchIcon,
   TagIcon,
   TrashIcon,
 } from "./Icons";
-import TagGraph from "./TagGraph";
+
+const TAG_ORDER_KEY = "huaxia.tagOrder";
+
+function loadTagOrder(): number[] {
+  try {
+    const raw = window.localStorage.getItem(TAG_ORDER_KEY);
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list)
+      ? list.filter(
+          (item): item is number =>
+            typeof item === "number" && Number.isFinite(item),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistTagOrder(ids: number[]): void {
+  try {
+    window.localStorage.setItem(TAG_ORDER_KEY, JSON.stringify(ids));
+  } catch {
+    // localStorage 不可用时只影响排序记忆，不影响功能
+  }
+}
 
 interface TagCenterProps {
   onClose: () => void;
@@ -70,6 +88,16 @@ export default function TagCenter({
   );
   const [dirtyCount, setDirtyCount] = useState(0);
   const [bulkSaveBusy, setBulkSaveBusy] = useState(false);
+  /** 自定义标签顺序（localStorage 持久化），不在 order 里的标签排在最后。 */
+  const [tagOrder, setTagOrder] = useState<number[]>(loadTagOrder);
+  const [dragSource, setDragSource] = useState<{
+    group: string;
+    index: number;
+  } | null>(null);
+  const [dragOverTarget, setDragOverTarget] = useState<{
+    group: string;
+    index: number;
+  } | null>(null);
 
   const registerSave = useCallback(
     (
@@ -109,9 +137,6 @@ export default function TagCenter({
       setBulkSaveBusy(false);
     }
   }
-  const [graph, setGraph] = useState<TagGraphData | null>(null);
-  const [graphLoading, setGraphLoading] = useState(false);
-  const [graphMinWeight, setGraphMinWeight] = useState(1);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(
     () => {
       try {
@@ -181,29 +206,36 @@ export default function TagCenter({
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (!active || event.key !== "Escape") return;
-      if (graph) {
-        setGraph(null);
-      } else {
-        onClose();
-      }
+      onClose();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [active, graph, onClose]);
+  }, [active, onClose]);
 
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    if (!keyword) return tags;
-    return tags.filter((tag) => {
-      const translated = tag.translatedName?.toLowerCase() ?? "";
-      return (
-        tag.name.toLowerCase().includes(keyword) ||
-        tag.originalName.toLowerCase().includes(keyword) ||
-        translated.includes(keyword) ||
-        String(tag.number) === keyword.replace(/^#/, "")
-      );
+    const result = keyword
+      ? tags.filter((tag) => {
+          const translated = tag.translatedName?.toLowerCase() ?? "";
+          return (
+            tag.name.toLowerCase().includes(keyword) ||
+            tag.originalName.toLowerCase().includes(keyword) ||
+            translated.includes(keyword) ||
+            String(tag.number) === keyword.replace(/^#/, "")
+          );
+        })
+      : [...tags];
+    if (tagOrder.length === 0) return result;
+    const positions = new Map(tagOrder.map((id, order) => [id, order]));
+    // sort 稳定：不在 order 里的标签保持接口返回的相对顺序，统一排到最后
+    return result.sort((left, right) => {
+      const leftOrder = positions.get(left.id);
+      const rightOrder = positions.get(right.id);
+      if (leftOrder === undefined) return rightOrder === undefined ? 0 : 1;
+      if (rightOrder === undefined) return -1;
+      return leftOrder - rightOrder;
     });
-  }, [query, tags]);
+  }, [query, tags, tagOrder]);
 
   const filteredDeleted = useMemo(() => {
     const keyword = query.trim().toLowerCase();
@@ -295,17 +327,30 @@ export default function TagCenter({
   const selectedTags = tags.filter((tag) => selectedIds.includes(tag.id));
   const mergeOptions = tags.filter((tag) => !selectedIds.includes(tag.id));
 
-  async function openGraph() {
-    if (graphLoading) return;
-    setGraphLoading(true);
-    try {
-      setGraph(await api.tagGraph(graphMinWeight, 300));
-    } catch (error) {
-      onNotify(`生成导图失败：${String(error)}`, "error");
-    } finally {
-      setGraphLoading(false);
-    }
-  }
+  /** 组内拖拽：把 from 位置的标签移动到 target 位置，再写回全局顺序。 */
+  const handleDrop = useCallback(
+    (group: string, groupIds: number[], target: number) => {
+      const from = dragSource;
+      setDragSource(null);
+      setDragOverTarget(null);
+      if (!from || from.group !== group || from.index === target) return;
+      const movingId = groupIds[from.index];
+      const targetId = groupIds[target];
+      if (movingId === undefined || targetId === undefined) return;
+
+      const next =
+        tagOrder.length > 0 ? [...tagOrder] : tags.map((tag) => tag.id);
+      for (const id of [movingId, targetId]) {
+        if (!next.includes(id)) next.push(id);
+      }
+      next.splice(next.indexOf(movingId), 1);
+      const insertAt = next.indexOf(targetId) + (from.index < target ? 1 : 0);
+      next.splice(insertAt, 0, movingId);
+      persistTagOrder(next);
+      setTagOrder(next);
+    },
+    [dragSource, tagOrder, tags],
+  );
 
   const toggleSelect = useCallback((tagId: number) => {
     setSelectedIds((previous) =>
@@ -414,24 +459,54 @@ export default function TagCenter({
     }
   }
 
-  const renderTagRow = (tag: Tag) => (
-    <TagRow
-      key={tag.id}
-      tag={tag}
-      categories={categories}
-      selected={selectedIds.includes(tag.id)}
-      onToggleSelect={toggleSelect}
-      onNotify={onNotify}
-      onSaved={handleSaved}
-      onDeleted={handleDeleted}
-      onBrowse={onBrowseTag}
-      onRegisterSave={registerSave}
-    />
-  );
+  const renderTagRow = (
+    tag: Tag,
+    index: number,
+    group: string,
+    groupIds: number[],
+  ) => {
+    const isDragging = dragSource?.group === group && dragSource.index === index;
+    const isDragOver =
+      dragOverTarget?.group === group &&
+      dragOverTarget.index === index &&
+      !isDragging;
+    return (
+      <TagRow
+        key={tag.id}
+        tag={tag}
+        categories={categories}
+        selected={selectedIds.includes(tag.id)}
+        onToggleSelect={toggleSelect}
+        onNotify={onNotify}
+        onSaved={handleSaved}
+        onDeleted={handleDeleted}
+        onBrowse={onBrowseTag}
+        onRegisterSave={registerSave}
+        dragIndex={index}
+        onDragStart={() => setDragSource({ group, index })}
+        onDragOver={(target) => {
+          if (!dragSource || dragSource.group !== group) return;
+          setDragOverTarget((previous) =>
+            previous?.group === group && previous.index === target
+              ? previous
+              : { group, index: target },
+          );
+        }}
+        onDrop={(target) => handleDrop(group, groupIds, target)}
+        onDragEnd={() => {
+          setDragSource(null);
+          setDragOverTarget(null);
+        }}
+        isDragging={isDragging}
+        isDragOver={isDragOver}
+      />
+    );
+  };
 
   function renderCategory(category: TagCategory): ReactNode {
     if (!visibleCategoryPaths.has(category.path)) return null;
     const directTags = directTagsByCategory.get(category.path) ?? [];
+    const directTagIds = directTags.map((tag) => tag.id);
     const childSections = (childrenByCategory.get(category.id) ?? [])
       .map((child) => renderCategory(child))
       .filter(Boolean);
@@ -475,7 +550,9 @@ export default function TagCenter({
         </header>
         {!collapsed && directTags.length > 0 && (
           <div className="tag-category-rows">
-            {directTags.map(renderTagRow)}
+            {directTags.map((tag, index) =>
+              renderTagRow(tag, index, category.path, directTagIds),
+            )}
           </div>
         )}
         {!collapsed && childSections}
@@ -516,7 +593,16 @@ export default function TagCenter({
           <span className="tag-category-count">{rows.length}</span>
         </header>
         {!collapsed && (
-          <div className="tag-category-rows">{rows.map(renderTagRow)}</div>
+          <div className="tag-category-rows">
+            {rows.map((tag, index) =>
+              renderTagRow(
+                tag,
+                index,
+                path,
+                rows.map((item) => item.id),
+              ),
+            )}
+          </div>
         )}
       </section>
     );
@@ -549,29 +635,6 @@ export default function TagCenter({
             </div>
           </div>
           <div className="tag-center-actions">
-            <label className="mini-select" title="导图至少连线几次才显示">
-              <span>连线 ≥</span>
-              <select
-                value={graphMinWeight}
-                onChange={(event) =>
-                  setGraphMinWeight(Number(event.target.value))
-                }
-              >
-                <option value={1}>1</option>
-                <option value={2}>2</option>
-                <option value={3}>3</option>
-                <option value={5}>5</option>
-              </select>
-            </label>
-            <button
-              type="button"
-              className="btn btn-ghost btn-compact"
-              onClick={() => void openGraph()}
-              disabled={graphLoading || tags.length === 0}
-            >
-              <GraphIcon width={15} height={15} />
-              {graphLoading ? "生成中…" : "一键导图"}
-            </button>
             {!embedded && (
               <button
                 type="button"
@@ -765,14 +828,6 @@ export default function TagCenter({
           </span>
         </footer>
       </div>
-
-      {graph && (
-        <TagGraph
-          graph={graph}
-          onClose={() => setGraph(null)}
-          onBrowseTag={onBrowseTag}
-        />
-      )}
     </div>
   );
 }
@@ -791,6 +846,14 @@ interface TagRowProps {
     tagId: number,
     entry: { dirty: boolean; save: () => Promise<boolean> } | null,
   ) => void;
+  /** 同组内序号；提供时才渲染拖动手柄。 */
+  dragIndex?: number;
+  onDragStart?: (index: number) => void;
+  onDragOver?: (index: number) => void;
+  onDrop?: (index: number) => void;
+  onDragEnd?: () => void;
+  isDragging?: boolean;
+  isDragOver?: boolean;
 }
 
 function TagRow({
@@ -803,7 +866,15 @@ function TagRow({
   onDeleted,
   onBrowse,
   onRegisterSave,
+  dragIndex,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+  isDragging = false,
+  isDragOver = false,
 }: TagRowProps) {
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const [name, setName] = useState(tag.name);
   const [translatedName, setTranslatedName] = useState(tag.translatedName ?? "");
   const [category, setCategory] = useState(tag.category ?? "");
@@ -956,7 +1027,25 @@ function TagRow({
   }
 
   return (
-    <div className={`tag-row${selected ? " is-selected" : ""}`}>
+    <div
+      ref={rowRef}
+      className={`tag-row${dragIndex !== undefined ? " is-sortable" : ""}${
+        selected ? " is-selected" : ""
+      }${isDragging ? " is-dragging" : ""}${
+        isDragOver ? " is-drag-over" : ""
+      }`}
+      onDragOver={(event) => {
+        if (onDragOver === undefined || dragIndex === undefined) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        onDragOver(dragIndex);
+      }}
+      onDrop={(event) => {
+        if (onDrop === undefined || dragIndex === undefined) return;
+        event.preventDefault();
+        onDrop(dragIndex);
+      }}
+    >
       <button
         type="button"
         className={`tag-row-select${selected ? " is-on" : ""}`}
@@ -966,6 +1055,26 @@ function TagRow({
       >
         {selected && <CheckIcon width={11} height={11} />}
       </button>
+
+      {dragIndex !== undefined && onDragStart !== undefined && (
+        <span
+          className="tag-drag-handle"
+          title="拖动排序（仅同组内）"
+          draggable
+          onDragStart={(event) => {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", String(tag.id));
+            // 整行作为拖拽影像，但只有手柄可发起拖动，避免干扰输入框选字
+            if (rowRef.current) {
+              event.dataTransfer.setDragImage(rowRef.current, 20, 16);
+            }
+            onDragStart(dragIndex);
+          }}
+          onDragEnd={onDragEnd}
+        >
+          ⋮⋮
+        </span>
+      )}
 
       <span className="tag-row-number" title="按导入顺序分配的编号">
         #{tag.number}
