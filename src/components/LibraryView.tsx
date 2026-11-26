@@ -424,6 +424,12 @@ export default function LibraryView({
   );
   const SIDEBAR_RAIL_WIDTH = 62;
 
+  /** 主界面 SERIES 合集区折叠记忆（管理员：折叠后就不展示合集，反之常显）。 */
+  const [seriesCollapsed, setSeriesCollapsed] = usePersistentFlag(
+    "huaxia.layout.seriesCollapsed",
+    false,
+  );
+
   /** 侧栏「收藏夹」大类是否折叠（记在本机，重开也保持）。 */
   const [collectionsCollapsed, setCollectionsCollapsed] = useState(() => {
     try {
@@ -1992,6 +1998,26 @@ export default function LibraryView({
     await onLibraryChanged();
   }, [loadTags, loadCollections, loadPage, onLibraryChanged]);
 
+  // 管理员 2026-11-27：每次进主界面检测一次新画廊——轻量扫描目录，
+  // 只在真的 added>0 时刷新列表并提示，没新增就零打扰（资源消耗低）。
+  const autoScannedRef = useRef(false);
+  useEffect(() => {
+    if (autoScannedRef.current) return;
+    autoScannedRef.current = true;
+    void (async () => {
+      try {
+        const report = await api.scanLibrary();
+        if (report.added > 0) {
+          await refreshLibrary();
+          notify(`发现 ${report.added} 个新画集，已刷新画廊`, "success");
+        }
+      } catch {
+        // 维护锁被占（导入/下载中）或库不可用：静默跳过，不影响进主界面。
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const libraryActions = useMemo(
     () => ({ notify, refresh: refreshLibrary, browseTag }),
     [notify, refreshLibrary, browseTag],
@@ -2553,11 +2579,11 @@ export default function LibraryView({
           <button
             type="button"
             className="nav-item"
-            onClick={() => onOpenTab?.("release")}
-            title="检查更新并立即安装"
+            onClick={() => void refreshLibrary()}
+            title="刷新画廊：重新扫描库里的画集（检查新版本请到 设置 → 通用）"
           >
             <RefreshIcon width={16} height={16} />
-            <span className="nav-label">更新画匣</span>
+            <span className="nav-label">刷新画廊</span>
           </button>
 
           <button
@@ -3387,22 +3413,45 @@ export default function LibraryView({
             <>
               {seriesList.length > 0 && page === 1 && !selectionMode && (
                 <section className="series-strip" aria-label="合集">
-                  <header className="series-strip-head">
+                  <header
+                    className="series-strip-head is-toggle"
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={!seriesCollapsed}
+                    title={seriesCollapsed ? "展开合集" : "折叠合集（下次进入保持）"}
+                    onClick={() => setSeriesCollapsed(!seriesCollapsed)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSeriesCollapsed(!seriesCollapsed);
+                      }
+                    }}
+                  >
                     <span className="eyebrow">SERIES</span>
                     <strong>合集 · {seriesList.length}</strong>
+                    <span
+                      className={`series-strip-caret${seriesCollapsed ? "" : " is-open"}`}
+                      aria-hidden="true"
+                    >
+                      ▾
+                    </span>
                   </header>
-                  <div className="series-strip-grid">
-                    {seriesList.map((entry) => (
-                      <SeriesCard
-                        key={entry.id}
-                        series={entry}
-                        onOpen={(next) => {
-                          // 合集详情与画廊详情是两块独立浮层，打开一个就收另一个。
-                          setSelected(null);
-                          setOpenSeries(next);
-                        }}
-                      />
-                    ))}
+                  <div
+                    className={`series-strip-body${seriesCollapsed ? " is-collapsed" : ""}`}
+                  >
+                    <div className="series-strip-grid">
+                      {seriesList.map((entry) => (
+                        <SeriesCard
+                          key={entry.id}
+                          series={entry}
+                          onOpen={(next) => {
+                            // 合集详情与画廊详情是两块独立浮层，打开一个就收另一个。
+                            setSelected(null);
+                            setOpenSeries(next);
+                          }}
+                        />
+                      ))}
+                    </div>
                   </div>
                 </section>
               )}
