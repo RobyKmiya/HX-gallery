@@ -4109,7 +4109,7 @@ export default function LibraryView({
           管理员反馈标签离开再返回状态全重置（搜索词/子页签/输入草稿/进度）。
           注意：隐藏的面板仍活着，所以给有全局键盘监听的面板传 active=false，
           避免它们抢 Esc / 快捷键。 */}
-      <div className="panel-tab-host">
+      <div className="panel-tab-host" hidden={activeKind === "home"}>
         <div hidden={activeKind !== "tags"} className="panel-tab-slot">
           <TagCenter
             embedded

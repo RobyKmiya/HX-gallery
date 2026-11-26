@@ -1133,25 +1133,77 @@ fn jm_image_urls(html: &str) -> Vec<String> {
 }
 
 /// 18comic 的标签（`<a href="/tags/xxx">名字</a>`，也可能在 `class` 含 tag 的容器里）。
+/// 18comic 的标签。
+///
+/// 2026-11-26 管理员反馈「下载的漫画 tag 看不到」。根因：老实现只找
+/// `href="/tags/xxx"`（相册页格式），而单章 /photo/ 页的标签是
+/// `<span itemprop="genre" data-type="tags">` 里的 `<a>`，或 `<meta name="keywords">`。
+/// 参考 JMComic-Crawler-Python 的 pattern_html_album_tags / pattern_html_photo_tags，
+/// 三路都试，取到即止，避免某一路结构变了就彻底没 tag。
+fn jm_push_tag(out: &mut HashMap<String, Vec<String>>, raw: &str) {
+    let name = html_unescape(raw.trim());
+    if !name.is_empty() && name.len() < 40 && !name.contains('<') {
+        let list = out.entry("tag".to_string()).or_default();
+        if !list.contains(&name) {
+            list.push(name);
+        }
+    }
+}
+
 fn jm_tags(html: &str) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
+
+    // ① 新版 / 整本页：<span ... data-type="tags"> 里的一堆 <a>文字</a>。
+    let mut rest = html;
+    while let Some(pos) = rest.find("data-type=\"tags\"") {
+        let after = &rest[pos..];
+        // 找到这个 span 的结束，只在其内部取 <a>。
+        let Some(span_end) = after.find("</span>") else { break };
+        let block = &after[..span_end];
+        let mut inner_rest = block;
+        while let Some(a) = inner_rest.find("<a") {
+            let a_after = &inner_rest[a..];
+            let Some(gt) = a_after.find('>') else { break };
+            let text_start = gt + 1;
+            let Some(close) = a_after[text_start..].find("</a>") else { break };
+            jm_push_tag(&mut out, &a_after[text_start..text_start + close]);
+            inner_rest = &a_after[text_start + close + 4..];
+        }
+        rest = &after[span_end + 7..];
+    }
+    if !out.is_empty() {
+        return out;
+    }
+
+    // ② 单章页：<meta name="keywords" content="a,b,c">（JMComic photo tags）。
+    let mut rest = html;
+    while let Some(pos) = rest.find("name=\"keywords\"") {
+        let after = &rest[pos..];
+        if let Some(cpos) = after.find("content=\"") {
+            let value = &after[cpos + "content=\"".len()..];
+            if let Some(end) = value.find('"') {
+                for part in value[..end].split([',', '，']) {
+                    jm_push_tag(&mut out, part);
+                }
+            }
+        }
+        rest = &after[pos + 1..];
+    }
+    if !out.is_empty() {
+        return out;
+    }
+
+    // ③ 旧相册页兜底：href="/tags/xxx" 的文字。
     let mut rest = html;
     while let Some(pos) = rest.find("href=\"/tags/") {
         let after = &rest[pos..];
-        let Some(gt) = after.find('>') else {
-            break;
-        };
+        let Some(gt) = after.find('>') else { break };
         let inner = &after[gt + 1..];
         let Some(end) = inner.find("</a>") else {
             rest = &after[1..];
             continue;
         };
-        let name = html_unescape(inner[..end].trim());
-        if !name.is_empty() && name.len() < 40 && !name.contains('<') {
-            out.entry("tag".to_string())
-                .or_default()
-                .push(name);
-        }
+        jm_push_tag(&mut out, &inner[..end]);
         rest = &after[end..];
     }
     out
@@ -1279,4 +1331,60 @@ fn download_and_package(
     set_status(|s| s.stage = "导入画匣…".to_string());
     crate::d2::import_downloaded_meta(app, target.clone(), title, tag_map)?;
     Ok(target.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use super::*;
+
+
+
+    #[test]
+
+    fn jm_tags_reads_photo_meta_keywords() {
+
+        let html = r#"<html><head><meta name="keywords" content="标签A,标签B,标签C"></head></html>"#;
+
+        let tags = jm_tags(html);
+
+        let got = tags.get("tag").unwrap();
+
+        assert_eq!(got, &vec!["标签A".to_string(), "标签B".to_string(), "标签C".to_string()]);
+
+    }
+
+
+
+    #[test]
+
+    fn jm_tags_reads_album_data_type_span() {
+
+        let html = r#"<span itemprop="genre" data-type="tags"><a href="/tag/x">作者X</a><a href="/tag/y">标签Y</a></span>"#;
+
+        let tags = jm_tags(html);
+
+        let got = tags.get("tag").unwrap();
+
+        assert!(got.contains(&"作者X".to_string()));
+
+        assert!(got.contains(&"标签Y".to_string()));
+
+    }
+
+
+
+    #[test]
+
+    fn jm_tags_falls_back_to_tags_href() {
+
+        let html = r#"<a href="/tags/abc">旧标签</a>"#;
+
+        let tags = jm_tags(html);
+
+        assert!(tags.get("tag").unwrap().contains(&"旧标签".to_string()));
+
+    }
+
 }

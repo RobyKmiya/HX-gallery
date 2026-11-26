@@ -7643,14 +7643,18 @@ body.is-splitting {
   flex-direction: column;
 }
 
-/* 面板「始终挂载 + 显隐」：slot 撑满标签区，hidden 的 slot 彻底不占位。 */
+/* 面板「始终挂载 + 显隐」：host/slot 都要让 hidden 真正生效。
+   注意 .panel-tab-host 有 display:flex，会盖掉原生 [hidden]{display:none}，
+   必须 !important，否则主页时被一个透明 absol 容器盖住、画集列表全空
+   （2026-11-26 1.1.72 回归）。组件仍挂载，state 不丢。 */
+.panel-tab-host[hidden],
+.panel-tab-slot[hidden] {
+  display: none !important;
+}
 .panel-tab-slot {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
-}
-.panel-tab-slot[hidden] {
-  display: none !important;
 }
 
 /* ---------- 启动遮罩（--masked 雏形） ---------- */
