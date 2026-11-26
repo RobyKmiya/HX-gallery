@@ -1626,6 +1626,19 @@ pub fn set_rating(conn: &Connection, id: i64, rating: i64) -> Result<(), String>
     Ok(())
 }
 
+/// 读一条画集的备注（详情页展示源链接用）。
+pub fn get_note(conn: &Connection, id: i64) -> Result<Option<String>, String> {
+    match conn.query_row(
+        "SELECT note FROM archives WHERE id = ?1 AND deleted_at IS NULL",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    ) {
+        Ok(note) => Ok(note),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("读取备注失败: {e}")),
+    }
+}
+
 pub fn set_note(conn: &Connection, id: i64, note: Option<&str>) -> Result<Option<String>, String> {
     let note = note
         .map(str::trim)

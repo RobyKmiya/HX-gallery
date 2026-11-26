@@ -1723,6 +1723,7 @@ fn attach_tab_hooks(
                                             cached.clone(),
                                             &meta.title,
                                             &meta.tags,
+                                            None,
                                         );
                                         match outcome {
                                             Ok(message) => {

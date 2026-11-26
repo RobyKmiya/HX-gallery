@@ -1204,7 +1204,7 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&temp);
 
     set_status(|s| s.stage = "导入画匣…".to_string());
-    crate::d2::import_downloaded_meta(app, target.clone(), &title, &tags)?;
+    crate::d2::import_downloaded_meta(app, target.clone(), &title, &tags, Some(url))?;
     Ok(target.to_string_lossy().to_string())
 }
 
@@ -1787,7 +1787,7 @@ pub(crate) fn download_and_package(
     package_cbz(&ordered, &target)?;
     let _ = std::fs::remove_dir_all(&temp);
     set_status(|s| s.stage = "导入画匣…".to_string());
-    crate::d2::import_downloaded_meta(app, target.clone(), title, tag_map)?;
+    crate::d2::import_downloaded_meta(app, target.clone(), title, tag_map, Some(referer))?;
     Ok(target.to_string_lossy().to_string())
 }
 

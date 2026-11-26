@@ -1017,7 +1017,7 @@ pub fn d2_cancel() -> Result<(), String> {
 ///
 /// 不带站点元数据的入口（gallery-dl 等）走这个。
 pub fn import_downloaded(app: &AppHandle, path: PathBuf) {
-    let _ = import_downloaded_meta(app, path, "", &HashMap::new());
+    let _ = import_downloaded_meta(app, path, "", &HashMap::new(), None);
 }
 
 /// 看文件头判断是不是 zip（`PK\x03\x04`，空包是 `PK\x05\x06`）。
@@ -1047,6 +1047,7 @@ pub fn import_downloaded_meta(
     path: PathBuf,
     title: &str,
     tags: &HashMap<String, Vec<String>>,
+    source: Option<&str>,
 ) -> Result<String, String> {
     // blob 下载可能丢扩展名：先看魔数，是真 zip 就按标题补回 .zip 再入库。
     let mut path = path;
@@ -1174,6 +1175,33 @@ pub fn import_downloaded_meta(
             );
             if imported == 0 {
                 return Err(batch_message);
+            }
+            // 源链接写进备注，详情页可点回原页（管理员 2026-11-26）。
+            if let Some(source_url) = source.map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    if let Ok(inner) = state.lock() {
+                        if let Some(library) = inner.library.as_ref() {
+                            for archive_id in &report.archive_ids {
+                                let existing = crate::db::get_note(&library.conn, *archive_id)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_default();
+                                let combined = if existing.contains(source_url) {
+                                    existing
+                                } else if existing.is_empty() {
+                                    format!("源：{source_url}")
+                                } else {
+                                    format!("源：{source_url}\n{existing}")
+                                };
+                                let _ = crate::db::set_note(
+                                    &library.conn,
+                                    *archive_id,
+                                    Some(&combined),
+                                );
+                            }
+                        }
+                    }
+                }
             }
             // drafts 里有一条固定的「来源/D2下载」标记，提示里报给用户的是
             // 真正来自作品页的标签数，别把这条算进去。
