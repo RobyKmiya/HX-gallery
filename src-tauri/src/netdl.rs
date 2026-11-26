@@ -70,19 +70,13 @@ pub fn net_dl_cancel() {
     set_status(|s| s.stage = "正在取消…".to_string());
 }
 
-/// 本机代理：优先环境变量，其次读注册表里的系统代理。
-/// 站点点不开多半是没走代理（curl 默认只认环境变量，不认 Windows 系统代理）。
+/// 本机代理：**系统代理优先**，环境变量兜底。
+///
+/// 2026-11-26 事故：环境变量里残留 `HTTPS_PROXY=127.0.0.1:50714`（旧代理端口），
+/// 而系统代理早已换成 `127.0.0.1:30808`。老实现优先读环境变量，于是所有 curl
+/// 全打到死端口 —— 表现为「nhentai 织机必然出错、网络问题很大、全部超时」。
+/// 浏览器能开就说明系统代理是活的，所以以它为准。
 fn proxy_arg() -> Option<String> {
-    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
-        if let Ok(value) = std::env::var(key) {
-            let trimmed = value.trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
-            }
-        }
-    }
-    // 环境变量没有（双击启动的 GUI 进程不继承 shell 的代理变量）时，
-    // 读 Windows 系统代理——Edge 能用就是靠它。
     #[cfg(windows)]
     {
         use winreg::enums::HKEY_CURRENT_USER;
@@ -104,6 +98,14 @@ fn proxy_arg() -> Option<String> {
                         }
                     }
                 }
+            }
+        }
+    }
+    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
             }
         }
     }
@@ -211,6 +213,33 @@ fn fetch_text(app: &AppHandle, url: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// 是不是 Cloudflare 挑战页（curl 拿到这种就是被拦了）。
+fn is_challenge(html: &str) -> bool {
+    html.contains("Just a moment")
+        || html.contains("cf-chl")
+        || html.contains("challenge-platform")
+}
+
+/// 抓页面：先 curl（快），被 Cloudflare 拦住再交给内置浏览器（能执行挑战脚本）。
+fn fetch_html_smart(app: &AppHandle, url: &str) -> Result<String, String> {
+    if let Ok(text) = fetch_text(app, url) {
+        if !is_challenge(&text) {
+            return Ok(text);
+        }
+    }
+    for label in crate::browser::alive_labels() {
+        if let Ok(html) =
+            crate::browser::load_html(&label, url, std::time::Duration::from_secs(25))
+        {
+            if !is_challenge(&html) && html.len() > 500 {
+                return Ok(html);
+            }
+        }
+    }
+    Err("页面被 Cloudflare 拦住了：先在浏览器里打开一次该链接、把验证过一次，再回来下载。"
+        .to_string())
 }
 
 /// 抓一个二进制文件到磁盘。
@@ -562,6 +591,9 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
     if url.contains("nhentai.net") {
         return run_nhentai_download(app, url);
     }
+    if url.contains("18comic") {
+        return run_18comic_download(app, url);
+    }
     let html = fetch_text(app, url)?;
     let title = {
         let parsed = parse_title(&html);
@@ -784,13 +816,7 @@ fn nhentai_gallery_id(url: &str) -> Option<String> {
 /// 接口不可用时的回退：直接解析 nhentai 作品页 HTML。
 fn run_nhentai_from_html(app: &AppHandle, page_url: &str) -> Result<String, String> {
     set_status(|s| s.stage = "接口被拦，改解析作品页…".to_string());
-    let html = fetch_text(app, page_url)?;
-    if html.contains("cf-chl") || html.contains("Just a moment") {
-        return Err(
-            "nhentai 弹了人机验证，curl 过不去。先用内置浏览器打开该作品页过一次验证，再重试。"
-                .to_string(),
-        );
-    }
+    let html = fetch_html_smart(app, page_url)?;
     let title = nhentai_title_from_html(&html).unwrap_or_else(|| "UNTITLE".to_string());
     let tag_map = nhentai_tags_from_html(&html);
     let urls = nhentai_image_urls(&html);
@@ -884,7 +910,80 @@ fn nhentai_image_urls(html: &str) -> Vec<String> {
     out
 }
 
-/// 下载一组图片并打包入库（nhentai API / HTML 两条路共用）。
+/// 18comic：`/photo/{id}` 是单章（图片就在这页），`/album/{id}` 是整本（章节列表）。
+fn run_18comic_download(app: &AppHandle, url: &str) -> Result<String, String> {
+    let html = fetch_html_smart(app, url)?;
+    let title = jm_title(&html).unwrap_or_else(|| "UNTITLE".to_string());
+    let urls = jm_image_urls(&html);
+    if urls.is_empty() {
+        if url.contains("/album/") {
+            return Err(
+                "这是整本（album）页面：目前请先贴单章 /photo/ 链接下载，整本合并下一批做"
+                    .to_string(),
+            );
+        }
+        return Err(
+            "18comic 页面里没找到图片：可能没登录（会员才能看图），或页面被验证页替换"
+                .to_string(),
+        );
+    }
+    set_status(|s| {
+        s.title = title.clone();
+        s.total = urls.len();
+    });
+    download_and_package(app, urls, &title, &HashMap::new(), url)
+}
+
+fn jm_title(html: &str) -> Option<String> {
+    if let Some(pos) = html.find("<h1") {
+        let after = &html[pos..];
+        if let Some(gt) = after.find('>') {
+            let rest = &after[gt + 1..];
+            if let Some(end) = rest.find("</h1>") {
+                let text = html_unescape(rest[..end].trim());
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    if let Some(pos) = html.find("<title>") {
+        let rest = &html[pos + "<title>".len()..];
+        if let Some(end) = rest.find("</title>") {
+            let raw = html_unescape(rest[..end].trim());
+            let title = raw.split(" - ").next().unwrap_or(&raw).trim().to_string();
+            if !title.is_empty() {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+/// 18comic 的图片在 data-original / data-src / src，统一过滤 `/media/photos/`。
+fn jm_image_urls(html: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for attr in ["data-original=\"", "data-src=\"", "src=\""] {
+        let mut rest = html;
+        while let Some(pos) = rest.find(attr) {
+            let after = &rest[pos + attr.len()..];
+            let Some(end) = after.find('"') else {
+                break;
+            };
+            let mut src = after[..end].to_string();
+            if src.starts_with("//") {
+                src = format!("https:{src}");
+            }
+            if src.contains("/media/photos/") && !out.contains(&src) {
+                out.push(src);
+            }
+            rest = &after[end..];
+        }
+    }
+    out
+}
+
+/// 下载一组图片并打包入库（nhentai API / HTML / 18comic 共用）。
 fn download_and_package(
     app: &AppHandle,
     urls: Vec<String>,

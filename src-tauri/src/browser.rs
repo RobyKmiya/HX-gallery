@@ -658,6 +658,39 @@ fn eval_json(window: &Webview, expression: &str, wait: Duration) -> Result<Strin
     Ok(serde_json::from_str::<String>(&raw).unwrap_or(raw))
 }
 
+/// 读指定浏览器「激活标签」的完整 HTML（给网络画集抓 Cloudflare 站用）。
+pub fn read_active_html(label: &str, wait: Duration) -> Result<String, String> {
+    let webview = active_webview(label)?;
+    eval_json(&webview, "document.documentElement.outerHTML", wait)
+}
+
+/// 让指定浏览器的激活标签导航到 url，等加载完成后返回 HTML。
+///
+/// 用于 Cloudflare 挑战站（nhentai / 18comic）：curl 拿到的只有「Just a moment」，
+/// 浏览器能执行挑战脚本，所以走这条路。会占用当前标签（下载是主动操作，可接受）。
+pub fn load_html(label: &str, url: &str, wait: Duration) -> Result<String, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("网址格式不对: {e}"))?;
+    let webview = active_webview(label)?;
+    webview
+        .navigate(parsed)
+        .map_err(|e| format!("导航失败: {e}"))?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let state = eval_json(&webview, "document.readyState", Duration::from_millis(900))
+            .unwrap_or_default();
+        if state.trim() == "complete" {
+            // 给懒加载/挑战脚本留出渲染时间。
+            std::thread::sleep(Duration::from_millis(900));
+            break;
+        }
+    }
+    read_active_html(label, Duration::from_millis(4000))
+}
+
 /// 打开一个新的浏览器窗口（工具栏 + 首个标签）。
 ///
 /// 返回窗口 label（调用方存好，后续所有命令都按 label 路由）。
