@@ -35,6 +35,7 @@ import AdblockSettings from "./AdblockSettings";
 
 type SettingsTab =
   | "general"
+  | "reading"
   | "wallpaper"
   | "browser"
   | "userscript"
@@ -76,6 +77,7 @@ interface SettingsDialogProps {
 
 const TABS: { key: SettingsTab; label: string }[] = [
   { key: "general", label: "通用" },
+  { key: "reading", label: "阅读" },
   { key: "wallpaper", label: "壁纸锁" },
   { key: "browser", label: "浏览器数据" },
   { key: "userscript", label: "用户脚本" },
@@ -393,6 +395,26 @@ export default function SettingsDialog({
                 </label>
                 <p className="settings-hint">
                   指定收藏在下次启动时生效；浏览器标签不随重启恢复（重新打开会新开）。
+                </p>
+              </>
+            )}
+
+            {tab === "reading" && (
+              <>
+                <h3>阅读偏好</h3>
+                <PrefToggle
+                  flagKey="huaxia.reader.showPageHud"
+                  label="沉浸模式显示页码与进度线"
+                  hint="关掉后沉浸阅读只剩画面本身，更彻底的沉浸（下次打开阅读生效）。"
+                />
+                <PrefToggle
+                  flagKey="huaxia.reader.pageTransition"
+                  label="翻页过渡动画（可选）"
+                  hint="动效批复 A16：翻页时新页按方向轻滑入。默认关，想要再开。"
+                />
+                <p className="settings-hint">
+                  图片管理在阅读器工具栏（图片角标按钮）和详情页都有：可增删 zip/cbz
+                  的单页，删除先进回收站。
                 </p>
               </>
             )}
@@ -726,6 +748,47 @@ export default function SettingsDialog({
           </div>
         </div>
       </section>
+    </div>
+  );
+}
+
+
+/** 阅读偏好开关：直接读写 localStorage（Reader 用 usePersistentFlag 读同一键）。 */
+function PrefToggle({
+  flagKey,
+  label,
+  hint,
+}: {
+  flagKey: string;
+  label: string;
+  hint: string;
+}) {
+  const [on, setOn] = useState(() => {
+    try {
+      return window.localStorage.getItem(flagKey) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "8px 0" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(event) => {
+            const next = event.target.checked;
+            setOn(next);
+            try {
+              window.localStorage.setItem(flagKey, next ? "1" : "0");
+            } catch {
+              // 无痕模式等存不了就算了
+            }
+          }}
+        />
+        <span>{label}</span>
+      </label>
+      <p className="settings-hint">{hint}</p>
     </div>
   );
 }

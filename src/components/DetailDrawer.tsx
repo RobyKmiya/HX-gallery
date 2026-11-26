@@ -6,10 +6,10 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, assetUrl } from "../api";
 import CopyTitleButton from "./CopyTitleButton";
+import PageOpsPanel from "./PageOpsPanel";
 import { formatBytes, formatDateTime } from "../format";
 import { parseTagInput, summarizeByCategory, tagsFromHtml, tagsToCopyText } from "../tags";
 import type {
@@ -560,87 +560,6 @@ export default function DetailDrawer({
     }
   }
 
-  // ---------- 图片管理（zip/cbz 单页增删，重打包在后台线程） ----------
-  const [pageOpsOpen, setPageOpsOpen] = useState(false);
-  const [pageList, setPageList] = useState<{
-    kind: string;
-    encrypted: boolean;
-    pages: { index: number; name: string; size: number }[];
-    pageCount: number;
-  } | null>(null);
-  const [pageOpsBusy, setPageOpsBusy] = useState("");
-  const [pageProgress, setPageProgress] = useState("");
-  const [pageConfirmIndex, setPageConfirmIndex] = useState<number | null>(null);
-
-  const loadPageList = useCallback(async () => {
-    setPageOpsBusy("读取中…");
-    try {
-      setPageList(await api.galleryPageList(card.id));
-    } catch (error) {
-      onNotify(`读取图片清单失败：${String(error)}`, "error");
-    } finally {
-      setPageOpsBusy("");
-    }
-  }, [card.id, onNotify]);
-
-  const togglePageOps = () => {
-    const next = !pageOpsOpen;
-    setPageOpsOpen(next);
-    if (next && !pageList) void loadPageList();
-  };
-
-  // 重打包进度。
-  useEffect(() => {
-    if (!pageOpsOpen) return;
-    const unlisten = listen<{ archiveId: number; stage: string; done: number; total: number }>(
-      "gallery://pageops",
-      (event) => {
-        if (event.payload.archiveId !== card.id) return;
-        setPageProgress(`${event.payload.stage} ${event.payload.done}/${event.payload.total}`);
-      },
-    );
-    return () => {
-      void unlisten.then((off) => off());
-    };
-  }, [pageOpsOpen, card.id]);
-
-  const deletePage = async (index: number) => {
-    if (pageConfirmIndex !== index) {
-      setPageConfirmIndex(index);
-      return;
-    }
-    setPageConfirmIndex(null);
-    setPageOpsBusy("删除中…");
-    try {
-      const remaining = await api.galleryPageDelete(card.id, index);
-      onNotify(`已删除第 ${index + 1} 页，剩 ${remaining} 页（可在回收站二次删除）`, "success");
-      await loadPageList();
-      // 画集页数变了：让主页网格刷新卡片计数。
-      void emit("d2://download", { ok: true });
-    } catch (error) {
-      onNotify(`删除失败：${String(error)}`, "error");
-    } finally {
-      setPageOpsBusy("");
-    }
-  };
-
-  const addPages = async () => {
-    setPageOpsBusy("等待选择图片…");
-    try {
-      const [added, total] = await api.galleryPageAdd(card.id);
-      onNotify(`已追加 ${added} 页，现在共 ${total} 页`, "success");
-      await loadPageList();
-      void emit("d2://download", { ok: true });
-    } catch (error) {
-      const message = String(error);
-      if (!message.includes("没有选择图片")) {
-        onNotify(`追加失败：${message}`, "error");
-      }
-    } finally {
-      setPageOpsBusy("");
-    }
-  };
-
   async function saveNote() {
     if (noteBusy) return;
     const next = noteDraft.trim();
@@ -1015,64 +934,9 @@ export default function DetailDrawer({
               <ImportIcon width={14} height={14} />
               图片管理
             </span>
-            <span className="meta-hint">
-              {pageList ? (pageList.kind === "zip" ? `${pageList.pageCount} 页` : "压缩包不支持") : "zip/cbz 可增删单页"}
-            </span>
-            <button
-              type="button"
-              className="btn btn-quiet btn-compact"
-              onClick={togglePageOps}
-            >
-              {pageOpsOpen ? "收起" : "展开"}
-            </button>
+            <span className="meta-hint">zip/cbz 可增删单页</span>
           </div>
-          {pageOpsOpen && (
-            <div className="page-ops">
-              {pageOpsBusy && <p className="settings-hint">{pageOpsBusy}{pageProgress ? ` · ${pageProgress}` : ""}</p>}
-              {pageList?.kind !== "zip" && pageList && (
-                <p className="settings-hint">
-                  {pageList.kind === "unsupported"
-                    ? "7z/RAR 暂不支持单页增删：先解压再重新打包成 ZIP/CBZ。"
-                    : "读取中…"}
-                </p>
-              )}
-              {pageList?.encrypted && (
-                <p className="settings-hint">注意：这是加密包，增删后新包会变成不加密。</p>
-              )}
-              {pageList?.kind === "zip" && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-compact"
-                    disabled={Boolean(pageOpsBusy)}
-                    onClick={() => void addPages()}
-                  >
-                    添加图片（追加到末尾）
-                  </button>
-                  <div className="page-ops-list">
-                    {pageList.pages.map((page) => (
-                      <div className="page-ops-row" key={page.index}>
-                        <span className="page-ops-index">{page.index + 1}</span>
-                        <span className="page-ops-name" title={page.name}>{page.name}</span>
-                        <button
-                          type="button"
-                          className={`btn btn-compact ${pageConfirmIndex === page.index ? "net-dl-danger" : "btn-ghost"}`}
-                          disabled={Boolean(pageOpsBusy) || pageList.pages.length <= 1}
-                          onClick={() => void deletePage(page.index)}
-                          title={pageConfirmIndex === page.index ? "再点一次确认删除（先进回收站）" : "删除这一页"}
-                        >
-                          {pageConfirmIndex === page.index ? "确认？" : "删"}
-                        </button>
-                      </div>
-                    ))}
-                    {pageList.pages.length === 0 && (
-                      <p className="settings-hint">没有读到任何图片页。</p>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+          <PageOpsPanel archiveId={card.id} onNotify={onNotify} />
         </section>
 
         <section className="meta-panel">

@@ -8867,3 +8867,35 @@ body.is-splitting {
   white-space: nowrap;
   color: var(--text-soft);
 }
+
+/* 阅读：A16 翻页过渡（可选，设置 → 阅读 开关控制；key 变化时触发）。 */
+.reader-stage.page-anim img {
+  animation: huaxia-page-in 0.18s ease-out;
+}
+@keyframes huaxia-page-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 阅读器：图片管理浮层（工具栏按钮弹出，右侧贴边）。 */
+.reader-pageops {
+  position: absolute;
+  top: 46px;
+  right: 12px;
+  z-index: 60;
+  width: 300px;
+  max-height: calc(100% - 60px);
+  overflow-y: auto;
+  background: rgba(24, 25, 31, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px 12px;
+}
+.reader-pageops-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 8px;
+}

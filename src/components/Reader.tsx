@@ -26,6 +26,7 @@ import {
   type GestureSlot,
 } from "../gestures";
 import { usePersistentFlag, usePersistentSize } from "../layout";
+import PageOpsPanel from "./PageOpsPanel";
 import Splitter from "./Splitter";
 import type {
   AnimMeta,
@@ -274,6 +275,11 @@ export default function Reader({
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   /** 沉浸（无框）阅读：顶栏 / 底栏 / 进度条一律不占位、不自动冒头，只留角落一颗淡点还原。 */
   const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
+  // 阅读 HUD（沉浸态的页码 + 2px 进度线）：追求极简沉浸的人可以关掉（设置 → 阅读）。
+  const [showPageHud] = usePersistentFlag("huaxia.reader.showPageHud", true);
+  // A16 翻页过渡（可选替换，默认关）：翻页时新页按方向轻滑入。
+  const [pageTransition] = usePersistentFlag("huaxia.reader.pageTransition", false);
+  const [pageOpsOpen, setPageOpsOpen] = useState(false);
 
   // 画廊双击卡片进入时由 LibraryView 指定本次模式；不影响下次的默认记忆。
   useEffect(() => {
@@ -1823,6 +1829,30 @@ const archiveEpochRef = useRef(0);
             </button>
             <button
               type="button"
+              className={`icon-button${pageOpsOpen ? " is-active" : ""}`}
+              onClick={() => setPageOpsOpen((value) => !value)}
+              disabled={pageCount === 0}
+              aria-label="图片管理"
+              title="图片管理：增删本画集的单页（zip/cbz）"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width={16}
+                height={16}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.4}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="2" y="2" width="9" height="9" rx="1.2" />
+                <path d="M13 5v8a1 1 0 0 1-1 1H5" />
+                <path d="M6.5 5.6l1.6 1.8 1.9-2.3" />
+              </svg>
+            </button>
+            <button
+              type="button"
               className={`icon-button${thumbsOpen ? " is-active" : ""}`}
               onClick={() => setThumbsOpen((value) => !value)}
               disabled={pageCount === 0}
@@ -2110,7 +2140,7 @@ const archiveEpochRef = useRef(0);
 
         <div
           ref={stageRef}
-          className={`reader-stage is-${zoomMode}${spread ? " is-spread" : ""}${dragging ? " is-dragging" : ""}`}
+          className={`reader-stage is-${zoomMode}${spread ? " is-spread" : ""}${dragging ? " is-dragging" : ""}${pageTransition ? " page-anim" : ""}`}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -2426,13 +2456,18 @@ const archiveEpochRef = useRef(0);
 
       {immersive && (
         <>
-          {/* 无框态常显：页码在左下、进度是 2px 细线。都极淡且不接事件，不挡翻页与拖动。 */}
-          <div className="reader-immersive-page" aria-hidden="true">
-            {pageLabel}
-          </div>
-          <div className="reader-immersive-bar" aria-hidden="true">
-            <span style={{ width: `${progress}%` }} />
-          </div>
+          {/* 无框态常显：页码在左下、进度是 2px 细线。都极淡且不接事件，不挡翻页与拖动。
+              管理员 2026-11-27：两者都可以在设置 → 阅读 里关掉，带来更彻底的沉浸。 */}
+          {showPageHud && (
+            <>
+              <div className="reader-immersive-page" aria-hidden="true">
+                {pageLabel}
+              </div>
+              <div className="reader-immersive-bar" aria-hidden="true">
+                <span style={{ width: `${progress}%` }} />
+              </div>
+            </>
+          )}
           {/* 无边框时的拖动热区：顶部 26px 拿来挪窗口（双击=最大化/还原）。 */}
           <div
             className="reader-drag-strip"
@@ -2442,20 +2477,24 @@ const archiveEpochRef = useRef(0);
         </>
       )}
 
-      {immersive && (
-        // 角落还原点：视觉上是个几乎看不见的小圆点，热区 64×64，碰到才明显。
-        <button
-          type="button"
-          className="reader-corner-toggle"
-          onClick={(event) => {
-            event.stopPropagation();
-            setImmersive(false);
-          }}
-          title="显示工具栏 (F)"
-          aria-label="显示工具栏"
-        >
-          <span />
-        </button>
+      {/* 沉浸右下角的还原点按钮已按管理员要求移除（2026-11-27）：
+          退出途径还在——F 切工具栏、右键菜单「退出沉浸模式」、鼠标后退侧键、Esc 退出阅读。 */}
+
+      {pageOpsOpen && (
+        <div className="reader-pageops">
+          <div className="reader-pageops-head">
+            <span>图片管理</span>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setPageOpsOpen(false)}
+              aria-label="关闭图片管理"
+            >
+              <CloseIcon width={14} height={14} />
+            </button>
+          </div>
+          <PageOpsPanel archiveId={card.id} onNotify={onNotify} />
+        </div>
       )}
 
       {menu && (
