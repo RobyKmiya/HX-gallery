@@ -44,6 +44,7 @@ import {
   CloseIcon,
   FirstPageIcon,
   FolderIcon,
+  GearIcon,
   GridIcon,
   LastPageIcon,
   PauseIcon,
@@ -71,6 +72,10 @@ interface ReaderProps {
   onOpenDetail?: () => void;
   /** 详情浮层开着时置真：Esc 交给浮层处理，阅读器不抢。 */
   detailOpen?: boolean;
+  /** 详情浮层开着时单击画面：只关详情，不连携翻页。 */
+  onCloseDetail?: () => void;
+  /** 打开设置（工具栏齿轮）：直达鼠标手势 / 快捷键页。 */
+  onOpenSettings?: () => void;
   /** 本次进入直接用的模式（画廊双击卡片时由 LibraryView 指定）。 */
   enterMode?: "immersive" | "normal" | null;
 }
@@ -241,6 +246,8 @@ export default function Reader({
   continuousNext = false,
   onOpenDetail,
   detailOpen = false,
+  onCloseDetail,
+  onOpenSettings,
   enterMode = null,
 }: ReaderProps) {
   const [info, setInfo] = useState<ReaderInfo | null>(null);
@@ -1052,6 +1059,40 @@ const archiveEpochRef = useRef(0);
     }
   }, [info, bookmarkBusy, currentBookmark, card.id, currentPage, onNotify]);
 
+  /**
+   * ; / ' 快捷加书签：给指定页加书签（幂等，已有就不重复）。
+   * 双页模式 left=当前页、right=下一页；单页模式两者都作用于当前页。
+   */
+  const addBookmarkAt = useCallback(
+    async (kind: "left" | "right") => {
+      if (!info || bookmarkBusy) return;
+      const targetPage =
+        kind === "right" && spread
+          ? Math.min(page + 2, info.pageCount)
+          : currentPage;
+      if (bookmarks.some((bookmark) => bookmark.page === targetPage)) {
+        onNotify(`第 ${targetPage} 页已有书签`, "info");
+        return;
+      }
+      setBookmarkBusy(true);
+      try {
+        const created = await api.addReaderBookmark(card.id, targetPage);
+        setBookmarks((previous) =>
+          [
+            ...previous.filter((bookmark) => bookmark.page !== created.page),
+            created,
+          ].sort((left, right) => left.page - right.page),
+        );
+        onNotify(`已添加第 ${targetPage} 页书签`, "success");
+      } catch (bookmarkError) {
+        onNotify(`添加书签失败：${String(bookmarkError)}`, "error");
+      } finally {
+        setBookmarkBusy(false);
+      }
+    },
+    [info, bookmarkBusy, spread, page, currentPage, bookmarks, card.id, onNotify],
+  );
+
   const removeBookmark = useCallback(
     async (bookmark: ReaderBookmark) => {
       setBookmarkBusy(true);
@@ -1178,6 +1219,12 @@ const archiveEpochRef = useRef(0);
         case "openBookmarks":
           setBookmarksOpen(true);
           break;
+        case "bookmarkLeft":
+          void addBookmarkAt("left");
+          break;
+        case "bookmarkRight":
+          void addBookmarkAt("right");
+          break;
         case "openDetail":
           onOpenDetail?.();
           break;
@@ -1221,6 +1268,7 @@ const archiveEpochRef = useRef(0);
       immersive,
       togglePlayback,
       toggleBookmark,
+      addBookmarkAt,
       onOpenDetail,
       copyCurrentPage,
       revealArchive,
@@ -1579,6 +1627,15 @@ const archiveEpochRef = useRef(0);
       dragMovedRef.current = false;
       return;
     }
+    // 详情浮层开着时，单击画面只关详情——不排定翻页动作，避免「关详情顺手翻页」。
+    if (detailOpen) {
+      if (pendingClickRef.current !== null) {
+        window.clearTimeout(pendingClickRef.current);
+        pendingClickRef.current = null;
+      }
+      onCloseDetail?.();
+      return;
+    }
     const rect = event.currentTarget.getBoundingClientRect();
     if (rect.width <= 0) return;
     const ratio = (event.clientX - rect.left) / rect.width;
@@ -1748,6 +1805,23 @@ const archiveEpochRef = useRef(0);
           } as ReaderMenuEntry,
         ]
       : []),
+    {
+      label: spread ? "添加左页书签" : "添加当前页书签",
+      hint: ";",
+      dividerBefore: true,
+      onClick: () => void addBookmarkAt("left"),
+    },
+    ...(spread
+      ? [
+          {
+            label: "添加右页书签",
+            hint: "'",
+            onClick: () => void addBookmarkAt("right"),
+          } as ReaderMenuEntry,
+        ]
+      : []),
+    { label: "画廊详情", hint: "I", dividerBefore: true, onClick: () => onOpenDetail?.() },
+    { label: "阅读设置（手势 / 快捷键）", onClick: () => onOpenSettings?.() },
     { label: "复制当前页到剪贴板", hint: "Ctrl+C", onClick: copyCurrentPage },
     { label: "在资源管理器中显示", hint: "Ctrl+Enter", onClick: revealArchive },
     { label: "设为桌面壁纸", onClick: wallpaperCurrentPage },
@@ -2002,6 +2076,17 @@ const archiveEpochRef = useRef(0);
                 title="详情与编辑 (I)"
               >
                 <TagIcon width={16} height={16} />
+              </button>
+            )}
+            {onOpenSettings && (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={onOpenSettings}
+                aria-label="阅读设置"
+                title="阅读设置：鼠标手势 / 快捷键（也可在右键菜单进入）"
+              >
+                <GearIcon width={16} height={16} />
               </button>
             )}
             <button
@@ -2479,6 +2564,21 @@ const archiveEpochRef = useRef(0);
 
       {/* 沉浸右下角的还原点按钮已按管理员要求移除（2026-11-27）：
           退出途径还在——F 切工具栏、右键菜单「退出沉浸模式」、鼠标后退侧键、Esc 退出阅读。 */}
+
+      {/* 画面浮动详情按钮：沉浸模式也常驻，点开画廊详情（管理员 2026-11-27）。
+          放在 stage 之外，点击不会冒泡触发分区翻页。 */}
+      {onOpenDetail && !detailOpen && (
+        <button
+          type="button"
+          className={`reader-float-detail${immersive ? " is-immersive" : ""}`}
+          onClick={onOpenDetail}
+          aria-label="画廊详情"
+          title="画廊详情 (I)"
+        >
+          <TagIcon width={17} height={17} />
+          <span>详情</span>
+        </button>
+      )}
 
       {pageOpsOpen && (
         <div className="reader-pageops">

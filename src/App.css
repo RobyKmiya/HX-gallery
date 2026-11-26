@@ -9310,3 +9310,49 @@ body.is-splitting {
   .progress-track.is-parsing .progress-fill { animation: none; width: 100% !important; }
   .net-dl-fireworks { display: none; }
 }
+
+/* ============================================================
+   阅读器：画面浮动详情按钮（管理员 2026-11-27）
+   沉浸模式工具栏隐藏，详情入口改由画面右下角常驻按钮承担。
+   ============================================================ */
+.reader-float-detail {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 55;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(18, 20, 26, 0.82);
+  backdrop-filter: blur(8px);
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 8px 22px -10px rgba(0, 0, 0, 0.9);
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease,
+    border-color 0.18s ease;
+}
+.reader-float-detail:hover {
+  background: rgba(232, 163, 92, 0.16);
+  border-color: rgba(232, 163, 92, 0.42);
+  color: var(--accent-strong);
+  transform: translateY(-2px);
+}
+.reader-float-detail:active {
+  transform: scale(0.94);
+}
+/* 沉浸模式更收敛：半透明，鼠标移上去才显出来 */
+.reader-float-detail.is-immersive {
+  opacity: 0.55;
+}
+.reader-float-detail.is-immersive:hover {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reader-float-detail,
+  .reader-float-detail:hover,
+  .reader-float-detail:active { transition: none; transform: none; }
+}

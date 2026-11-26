@@ -4038,6 +4038,14 @@ export default function LibraryView({
           continuousNext={readerSeriesNav != null}
           onOpenDetail={() => setReaderDetailOpen(true)}
           detailOpen={readerDetailOpen}
+          onCloseDetail={() => setReaderDetailOpen(false)}
+          onOpenSettings={() => {
+            setReaderCard(null);
+            setReaderSeriesIds(null);
+            setReaderEntryMode(null);
+            setReaderDetailOpen(false);
+            onOpenTab?.("settings");
+          }}
         />
       )}
 

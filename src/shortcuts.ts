@@ -21,6 +21,8 @@ export type ShortcutAction =
   | "togglePlayback"
   | "toggleBookmark"
   | "openBookmarks"
+  | "bookmarkLeft"
+  | "bookmarkRight"
   | "openDetail"
   | "copyPage"
   | "revealArchive"
@@ -47,6 +49,8 @@ export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   togglePlayback: "GIF 播放",
   toggleBookmark: "添加/移除书签",
   openBookmarks: "书签列表",
+  bookmarkLeft: "添加左页书签",
+  bookmarkRight: "添加右页书签",
   openDetail: "详情浮层",
   copyPage: "复制当前页",
   revealArchive: "资源管理器定位",
@@ -74,6 +78,8 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
   togglePlayback: "Shift+P",
   toggleBookmark: "B",
   openBookmarks: "L",
+  bookmarkLeft: ";",
+  bookmarkRight: "'",
   openDetail: "I",
   copyPage: "Ctrl+C",
   revealArchive: "Ctrl+Enter",
