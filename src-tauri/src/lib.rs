@@ -1175,6 +1175,37 @@ async fn site_login_import(
     crate::site_login::import_cookie_text(&app, &host, &cookies)
 }
 
+/// 看某条登录态快照里存了哪些 cookie 的**名字**（值不回显）。
+///
+/// 「注入了还是没登录」多半是快照里根本没有登录标志 cookie（比如 18comic 的
+/// AVS 过期后被浏览器的自动保存覆盖成了一堆杂项），让用户能亲眼看到差什么。
+#[tauri::command]
+async fn site_login_detail(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<Vec<String>, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let enc = db::site_login_cookies_by_id(&library.conn, id)?
+                .ok_or_else(|| "这条登录态不存在".to_string())?;
+            let plain = dpapi_unprotect(&enc)?;
+            let text = String::from_utf8_lossy(&plain).to_string();
+            let mut names: Vec<String> = Vec::new();
+            for part in text.split([';', '\n', '\r']) {
+                let piece = part.trim();
+                if let Some((name, value)) = piece.split_once('=') {
+                    let name = name.trim().to_string();
+                    if !name.is_empty() && !value.trim().is_empty() && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            Ok(names)
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 async fn site_login_list(
     state: State<'_, AppState>,
@@ -2462,6 +2493,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             site_login_list,
             site_login_delete,
             site_login_import,
+            site_login_detail,
             adblock_read_custom,
             adblock_write_custom,
             blocked_list,

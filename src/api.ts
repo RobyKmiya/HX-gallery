@@ -425,6 +425,8 @@ export const api = {
   /** 直接粘贴 Cookie 文本入加密库（不要求网页标签开着）。 */
   siteLoginImport: (host: string, cookies: string) =>
     invoke<number>("site_login_import", { host, cookies }),
+  /** 看一条登录态快照里存了哪些 cookie 名（值不回显）。 */
+  siteLoginDetail: (id: number) => invoke<string[]>("site_login_detail", { id }),
 
   // ---------- 壁纸锁（管理员 2026-11-25；防君子不防小人） ----------
   /** 读壁纸锁配置（哈希/盐不下发，只给开关、壁纸列表、轮换间隔）。 */

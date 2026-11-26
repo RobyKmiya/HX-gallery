@@ -8752,3 +8752,6 @@ body.is-splitting {
   padding: 1px 7px;
 }
 .site-cookie-row .settings-hint { margin: 4px 0 6px; }
+
+/* 登录态快照缺标志 cookie 的警示。 */
+.site-cookie-warn { color: var(--danger, #e07263); }

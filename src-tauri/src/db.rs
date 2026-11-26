@@ -698,6 +698,19 @@ pub fn delete_site_login(conn: &Connection, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// 按 id 读一条登录态密文（给「查看存了哪些 cookie 名」用，不回显值）。
+pub fn site_login_cookies_by_id(conn: &Connection, id: i64) -> Result<Option<Vec<u8>>, String> {
+    match conn.query_row(
+        "SELECT cookies_enc FROM browser_site_login WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Vec<u8>>(0),
+    ) {
+        Ok(enc) => Ok(Some(enc)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("读取登录态失败: {e}")),
+    }
+}
+
 /// 取某个 host 的登录态密文（按域或子域匹配）。
 pub fn site_login_cookies(conn: &Connection, host: &str) -> Result<Option<Vec<u8>>, String> {
     let wanted = normalize_host(host);

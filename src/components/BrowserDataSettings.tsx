@@ -15,6 +15,14 @@ interface Draft {
   note: string;
 }
 
+/** 各站「算登录」的标志 cookie：快照里没有它就救不回登录，要让用户亲眼看见缺什么。 */
+const LOGIN_MARKERS: Record<string, string[]> = {
+  "18comic.vip": ["AVS"],
+  "18comic.org": ["AVS"],
+  "exhentai.org": ["ipb_member_id"],
+  "nhentai.net": ["sessionid", "access_token"],
+};
+
 /** 常见的几个图站：直接给一个粘贴框，不用每次手打域名。 */
 const COOKIE_SITES: { host: string; label: string; hint: string }[] = [
   {
@@ -60,6 +68,7 @@ export default function BrowserDataSettings() {
   const [logins, setLogins] = useState<SiteLoginEntry[]>([]);
   const [loginHost, setLoginHost] = useState("");
   const [loginNote, setLoginNote] = useState("");
+  const [loginDetails, setLoginDetails] = useState<Record<number, string[]>>({});
   const [cookieText, setCookieText] = useState("");
   const [siteDrafts, setSiteDrafts] = useState<Record<string, string>>({});
   const [busySite, setBusySite] = useState("");
@@ -82,7 +91,17 @@ export default function BrowserDataSettings() {
 
   const loadLogins = async () => {
     try {
-      setLogins(await api.siteLoginList());
+      const list = await api.siteLoginList();
+      setLogins(list);
+      // 顺手把每条快照里的 cookie 名拉出来（值不下发）：
+      // 「注入了还是没登录」多半是快照里缺了登录标志 cookie，得让用户能看见。
+      const details: Record<number, string[]> = {};
+      await Promise.allSettled(
+        list.map(async (entry) => {
+          details[entry.id] = await api.siteLoginDetail(entry.id);
+        }),
+      );
+      setLoginDetails(details);
     } catch (error) {
       setHint(`登录态读取失败：${String(error)}`);
     }
@@ -461,6 +480,12 @@ export default function BrowserDataSettings() {
           <div className="site-cookie-list">
             {COOKIE_SITES.map((site) => {
               const saved = logins.find((item) => item.host === site.host);
+              const markers = LOGIN_MARKERS[site.host];
+              const names = saved ? (loginDetails[saved.id] ?? []) : [];
+              const missingMarker =
+                saved !== undefined &&
+                markers !== undefined &&
+                !markers.some((marker) => names.includes(marker));
               return (
                 <div className="site-cookie-row" key={site.host}>
                   <div className="site-cookie-head">
@@ -469,6 +494,17 @@ export default function BrowserDataSettings() {
                       {saved ? `已保存 · ${formatTime(saved.updatedAt)}` : "未应用"}
                     </span>
                   </div>
+                  {saved && (
+                    <p className="settings-hint">
+                      已存：{names.length > 0 ? names.join("、") : "读取中…"}
+                      {missingMarker && (
+                        <span className="site-cookie-warn">
+                          （缺登录标志 {markers!.join("/")}——这份快照救不回登录，
+                          在网页里登录一次让它自动重存，或重新粘含 {markers![0]} 的完整 cookie）
+                        </span>
+                      )}
+                    </p>
+                  )}
                   <p className="settings-hint">{site.hint}</p>
                   <textarea
                     className="site-login-paste"
