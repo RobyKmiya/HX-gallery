@@ -11,6 +11,7 @@ pub mod db;
 pub mod fsutil;
 pub mod importer;
 pub mod instance;
+mod jm_api;
 mod jm_decode;
 pub mod library;
 pub mod loose_images;

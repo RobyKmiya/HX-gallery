@@ -320,6 +320,80 @@ pub fn import_cookie_text(
     Ok(pairs.len())
 }
 
+/// 从登录态快照里抠账号密码。
+///
+/// 18comic 的 `remember_id` / `remember` cookie 是 URL 编码的 PHP 序列化：
+/// `a:3:{s:8:"username";s:8:"ROBYlock";s:15:"password";s:15:"xxxx";...}` ——
+/// 里头就带着明文账号和密码。管理员拍板「不接外接浏览器，做好自动填充」，
+/// 快照里既然有，登录框就直接填，省得手打。
+pub fn credential_from_snapshot(app: &AppHandle, host: &str) -> Option<(String, String)> {
+    let cookies = crate::stored_cookie_for_host(app, host)?;
+    for name in ["remember_id", "remember"] {
+        let prefix = format!("{name}=");
+        let Some(value) = cookies.split(';').find_map(|part| part.trim().strip_prefix(&prefix)) else {
+            continue;
+        };
+        if let Some(credential) = parse_php_remember(value) {
+            return Some(credential);
+        }
+    }
+    None
+}
+
+/// 解 `a:N:{s:len:"value";s:len:"value";...}`，按顺序取前两个字符串值。
+fn parse_php_remember(raw: &str) -> Option<(String, String)> {
+    let decoded = percent_decode(raw);
+    let mut values: Vec<String> = Vec::new();
+    let mut rest = decoded.as_str();
+    while values.len() < 3 {
+        let Some(pos) = rest.find("s:") else { break };
+        let after = &rest[pos..];
+        let Some(colon_at) = after.find(':') else { break };
+        let len_part: String = after[colon_at + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let Ok(len) = len_part.parse::<usize>() else {
+            rest = &after[2..];
+            continue;
+        };
+        let Some(quote_rel) = after[colon_at + 1..].find('"') else { break };
+        let start = colon_at + 1 + quote_rel + 1;
+        let end = start + len;
+        if end > after.len() {
+            rest = &after[2..];
+            continue;
+        }
+        values.push(after[start..end].to_string());
+        rest = &after[end..];
+    }
+    if values.len() >= 2 && !values[0].is_empty() && !values[1].is_empty() {
+        Some((values[0].clone(), values[1].clone()))
+    } else {
+        None
+    }
+}
+
+/// %XX 解码（18comic 的 remember cookie 是 URL 编码过的）。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 /// 手动「保存当前站点登录态」：从活着的标签里抓一次（保留原有命令语义）。
 pub fn capture_from_tabs(app: &AppHandle, host: &str) -> String {
     let mut best = String::new();

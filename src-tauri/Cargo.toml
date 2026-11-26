@@ -40,6 +40,9 @@ gif = "0.14"
 base64 = "0.23"
 # 18comic 图片混淆：get_num 用 md5(aid+文件名) 算分割数
 md-5 = "0.10"
+# 禁漫移动 API 的返回是 AES-256-ECB 加密（jmcomic 同款协议，见 jm_api.rs）
+aes = "0.8"
+ecb = { version = "0.1", features = ["std"] }
 walkdir = "2.5.0"
 natord = "1.0.9"
 blake3 = "1.8.7"

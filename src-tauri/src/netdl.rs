@@ -151,6 +151,15 @@ fn set_status(f: impl FnOnce(&mut NetDlStatus)) {
     }
 }
 
+/// 给 jm_api 等兄弟模块用的状态/取消口子（同任务线程内调用才有效）。
+pub(crate) fn set_running_stage(stage: &str) {
+    set_status(|s| s.stage = stage.to_string());
+}
+
+pub(crate) fn task_is_canceled_public() -> bool {
+    task_is_canceled()
+}
+
 fn task_is_canceled() -> bool {
     current_task()
         .map(|t| t.cancel.load(Ordering::SeqCst))
@@ -253,7 +262,7 @@ pub fn net_dl_cancel() {
 /// 而系统代理早已换成 `127.0.0.1:30808`。老实现优先读环境变量，于是所有 curl
 /// 全打到死端口 —— 表现为「nhentai 织机必然出错、网络问题很大、全部超时」。
 /// 浏览器能开就说明系统代理是活的，所以以它为准。
-fn proxy_arg() -> Option<String> {
+pub(crate) fn proxy_arg() -> Option<String> {
     #[cfg(windows)]
     {
         use winreg::enums::HKEY_CURRENT_USER;
@@ -336,7 +345,7 @@ pub fn clear_cookie_cache() {
     }
 }
 
-fn cookie_for(app: &AppHandle, url: &str) -> String {
+pub(crate) fn cookie_for(app: &AppHandle, url: &str) -> String {
     let Ok(parsed) = tauri::Url::parse(url) else {
         return String::new();
     };
@@ -653,53 +662,24 @@ fn parse_title(html: &str) -> String {
 /// 标签：命名空间 → 若干标签值。
 fn parse_tags(html: &str) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
-    // 锚点放宽：exhentai 的 taglist 常带 style/class，写死 `<div id="taglist">`
-    // 会整块找不到（管理员 2026-11-26：标题、页数都对，tag 是空的）。
-    let Some(pos) = html.find("id=\"taglist\"") else {
-        return out;
-    };
-    let after_id = &html[pos..];
-    let Some(gt) = after_id.find('>') else {
-        return out;
-    };
-    let content = &after_id[gt + 1..];
-    let Some(end) = content.find("</table>") else {
-        return out;
-    };
-    let block = &content[..end];
-
-    // 主路：taglist 里每个标签都是一个 `<a href=".../tag/namespace:value">名字</a>`，
-    // 按 href 取命名空间、按锚文本取名字。老实现按 `<td class="tc">` 逐格抠文本，
-    // exhentai 的单元格 class/嵌套稍一变就整块解析成空（管理员：只有 nhentai 有 tag）。
-    let mut rest = block;
-    while let Some(anchor_at) = rest.find("<a ") {
-        rest = &rest[anchor_at..];
-        let Some(href_at) = rest.find("href=\"") else {
-            break;
-        };
-        let after_href = &rest[href_at + "href=\"".len()..];
-        let Some(href_end) = after_href.find('"') else {
-            break;
-        };
-        let href = after_href[..href_end].to_string();
-        // 锚文本：href 结束后到 </a> 之间（剥掉中间的标签）。
-        let text_part = &after_href[href_end + 1..];
-        let text = match text_part.find("</a>") {
-            Some(close) => strip_tags(&text_part[..close]),
-            None => String::new(),
-        };
-
-        if let Some(tag_at) = href.rfind("/tag/") {
-            let tail = &href[tag_at + "/tag/".len()..];
-            let tail = tail.split(['?', '#']).next().unwrap_or(tail);
-            let (namespace, value) = match tail.split_once(':') {
-                Some((ns, value)) => (ns.to_string(), value.to_string()),
-                None => ("misc".to_string(), tail.to_string()),
+    // 主路（织机同款，管理员实测可用）：**整页**收集 /tag/ 链接。
+    // exhentai/e-hentai 的标签一律是 <a href="https://e-hentai.org/tag/namespace:value">
+    // 以前的实现把范围锁死在 id="taglist" 的 <table> 里，锚点一变就整块解析成空
+    // （管理员：三个并行下载只有走 API 的 nhentai 有 tag）。
+    let mut rest = html;
+    while let Some(pos) = rest.find("/tag/") {
+        let after = &rest[pos + "/tag/".len()..];
+        let end = after.find('"').unwrap_or(after.len());
+        let tail = &after[..end];
+        let tail = tail.split(['?', '#']).next().unwrap_or(tail);
+        if !tail.is_empty() && tail.len() < 80 && !tail.contains('<') && !tail.contains(' ') {
+            let decoded = percent_decode_plus(tail);
+            let (namespace, value) = match decoded.split_once(':') {
+                Some((namespace, value)) => {
+                    (namespace.trim().to_lowercase(), value.trim().to_string())
+                }
+                None => ("misc".to_string(), decoded.trim().to_string()),
             };
-            let value = html_unescape(if text.is_empty() { value.as_str() } else { text.as_str() })
-                .trim()
-                .to_string();
-            let namespace = html_unescape(&namespace).trim().to_lowercase();
             if !value.is_empty() && value.len() < 60 && !value.contains('<') {
                 let list = out.entry(namespace).or_default();
                 if !list.contains(&value) {
@@ -707,70 +687,40 @@ fn parse_tags(html: &str) -> HashMap<String, Vec<String>> {
                 }
             }
         }
-        rest = &after_href[href_end..];
-    }
-    if !out.is_empty() {
-        return out;
-    }
-
-    // 兜底：老站的 taglist 不用链接（很少见），保留按单元格抠文本的旧路。
-    for row in block.split("<tr>") {
-        let Some(cell) = between(row, "<td class=\"tc\">", "</td>") else {
-            continue;
-        };
-        let key = cell.trim();
-        if key.is_empty() || !key.contains(':') {
-            continue;
-        }
-        let namespace = key.trim_end_matches(':').to_string();
-        let mut values: Vec<String> = Vec::new();
-        let mut rest = row;
-        while let Some(pos) = rest.find("</td><td class=\"tc\">") {
-            rest = &rest[pos + "</td><td class=\"tc\">".len()..];
-            let Some(cell_end) = rest.find("</td>") else { break };
-            let segment = &rest[..cell_end];
-            let mut scan = segment;
-            while let Some(open) = scan.find('>') {
-                let after = &scan[open + 1..];
-                let Some(close) = after.find("</a>") else { break };
-                let text = html_unescape(after[..close].trim());
-                if !text.is_empty() && text != "=" {
-                    values.push(text);
-                }
-                scan = &after[close..];
-                if !scan.contains("<a ") {
-                    break;
-                }
-                let Some(next) = scan.find("<a ") else { break };
-                scan = &scan[next..];
-            }
-            if !values.is_empty() {
-                break;
-            }
-        }
-        if !values.is_empty() {
-            out.entry(namespace).or_default().extend(values);
-        }
+        rest = &after[end..];
     }
     out
 }
 
-/// 去掉一段 HTML 里的标签、反转义实体，剩下纯文本。
-fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut depth = 0usize;
-    for ch in html.chars() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.push(ch),
-            _ => {}
+/// %XX 解码 + `+` 当空格（e-hentai 的 tag 链接用 + 拼词，织机就这么还原的）。
+fn percent_decode_plus(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    index += 3;
+                    continue;
+                }
+                out.push(bytes[index]);
+                index += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
         }
     }
-    out
+    String::from_utf8_lossy(&out).to_string()
 }
-
-/// 总页数（图片张数）。
 fn parse_page_count(html: &str) -> usize {
     // <td class="tc">Length:</td><td class="tc">123 pages</td>
     if let Some(block) = between(html, ">Length:</td>", "</td>") {
@@ -1421,6 +1371,19 @@ fn nhentai_image_urls(html: &str) -> Vec<String> {
 
 /// 18comic：`/photo/{id}` 是单章（图片就在这页），`/album/{id}` 是整本（章节列表）。
 fn run_18comic_download(app: &AppHandle, url: &str) -> Result<String, String> {
+    // 先走站点移动 API 的源数据路线（jm_api.rs，jmcomic 同款协议）：
+    // 标题/标签/章节/图片清单都是结构化的，不靠硬抠网页、也不吃 Cloudflare。
+    // 打不通再退回网页解析（fetch_html_smart + jm_image_urls）。
+    if let Some(aid) = jm_aid_from_url(url) {
+        match crate::jm_api::run_album_via_api(app, aid) {
+            Ok(path) => return Ok(path),
+            Err(error) if error == "已取消" => return Err(error),
+            Err(error) => {
+                let brief = error.lines().next().unwrap_or("").to_string();
+                set_status(|s| s.stage = format!("站点接口没通（{brief}），改走网页解析…"));
+            }
+        }
+    }
     let html = fetch_html_smart(app, url)?;
     let title = jm_title(&html).unwrap_or_else(|| "UNTITLE".to_string());
     let urls = jm_image_urls(&html);
@@ -1664,14 +1627,14 @@ fn jm_tags(html: &str) -> HashMap<String, Vec<String>> {
 }
 
 /// 18comic 图片解码参数（站点把图片切成竖条打乱，见 jm_decode.rs）。
-struct JmDecode {
-    scramble_id: u64,
-    aid: u64,
+pub(crate) struct JmDecode {
+    pub(crate) scramble_id: u64,
+    pub(crate) aid: u64,
 }
 
 /// 下载一组图片并打包入库（nhentai API / HTML / 18comic 共用）。
 /// `jm` 非空时，每张图下载完按 18comic 算法还原混淆。
-fn download_and_package(
+pub(crate) fn download_and_package(
     app: &AppHandle,
     urls: Vec<String>,
     title: &str,
@@ -1897,7 +1860,7 @@ mod parse_tags_tests {
         <tr><td class="tc">parody:</td><td><div class="gt"><a href="https://exhentai.org/tag/parody:original">original</a></div></td></tr>
         </table></div>"#;
         let tags = parse_tags(html);
-        assert_eq!(tags.get("artist").unwrap(), &vec!["Hono Huka".to_string()]);
+        assert_eq!(tags.get("artist").unwrap(), &vec!["hono huka".to_string()]);
         assert_eq!(
             tags.get("language").unwrap(),
             &vec!["chinese".to_string(), "translated".to_string()]

@@ -2532,7 +2532,11 @@ fn handle_toolbar_action(
             if host.is_empty() {
                 return Ok(());
             }
-            if let Some((username, password)) = crate::credential_for_host(app, host) {
+            // 账号簿没有就退回登录态快照：18comic 的 remember_id cookie 里
+            // 带着明文账号密码（管理员拍板「不接外接浏览器，做好自动填充」）。
+            if let Some((username, password)) = crate::credential_for_host(app, host)
+                .or_else(|| crate::site_login::credential_from_snapshot(app, host))
+            {
                 let webview = active_webview(label)?;
                 let user = serde_json::to_string(&username).unwrap_or_else(|_| "\"\"".to_string());
                 let pass = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
