@@ -184,7 +184,7 @@ export default function NetGalleryDialog({
             }}
           />
           <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--text-dim, #9a9aa4)" }}>
-            支持多行：一行一个，会按顺序逐本下载。目前支持 exhentai / e-hentai / nhentai；需要先在内置浏览器里登录该站点，下载会沿用那套 cookie。
+            支持多行：一行一个，会按顺序逐本下载。目前支持 exhentai / e-hentai / nhentai / 18comic（先贴单章 /photo/ 链接）；需要先在内置浏览器里登录该站点，下载会沿用那套 cookie。
           </p>
         </div>
 

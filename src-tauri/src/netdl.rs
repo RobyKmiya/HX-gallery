@@ -261,7 +261,12 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
     if let Some(proxy) = proxy_arg() {
         command.arg("--proxy").arg(proxy);
     }
-    command.arg("-o").arg(dest).arg(url);
+    command
+        .arg("-w")
+        .arg("%{content_type}")
+        .arg("-o")
+        .arg(dest)
+        .arg(url);
     let output = command
         .output()
         .map_err(|e| format!("调用 curl 失败：{e}"))?;
@@ -269,6 +274,15 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
         return Err(format!(
             "下载失败（curl 退出码 {:?}）：{url}",
             output.status.code()
+        ));
+    }
+    // 图床超时/被验证时会返回 200 的 HTML 错误页，会被当成图片存下来
+    // （管理员 2026-11-26：nhentai 下出来的是「Error: timeout」占位图）。
+    let content_type = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+    if !content_type.starts_with("image/") {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!(
+            "下载到的不是图片（{content_type}），可能被验证页/错误页替换：{url}"
         ));
     }
     Ok(())
@@ -927,11 +941,22 @@ fn run_18comic_download(app: &AppHandle, url: &str) -> Result<String, String> {
                 .to_string(),
         );
     }
+    let tags = jm_tags(&html);
+    let flat: Vec<(String, String)> = tags
+        .iter()
+        .flat_map(|(kind, names)| {
+            names
+                .iter()
+                .map(move |name| (kind.clone(), name.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     set_status(|s| {
         s.title = title.clone();
+        s.tags = flat;
         s.total = urls.len();
     });
-    download_and_package(app, urls, &title, &HashMap::new(), url)
+    download_and_package(app, urls, &title, &tags, url)
 }
 
 fn jm_title(html: &str) -> Option<String> {
@@ -960,25 +985,70 @@ fn jm_title(html: &str) -> Option<String> {
     None
 }
 
-/// 18comic 的图片在 data-original / data-src / src，统一过滤 `/media/photos/`。
+/// 18comic 的图片地址：**按 `<img>` 在页面里的出现顺序**取，每个 img 只认一个属性
+/// （data-original > data-src > src）。
+///
+/// 之前按属性分组提取（先所有 data-original 再所有 src），顺序被打乱，
+/// 下出来的图页序是错的（管理员 2026-11-26：图片下载错位）。
 fn jm_image_urls(html: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for attr in ["data-original=\"", "data-src=\"", "src=\""] {
-        let mut rest = html;
-        while let Some(pos) = rest.find(attr) {
-            let after = &rest[pos + attr.len()..];
-            let Some(end) = after.find('"') else {
+    let mut rest = html;
+    while let Some(pos) = rest.find("<img") {
+        let after = &rest[pos..];
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        let tag = &after[..end];
+        let mut candidate: Option<String> = None;
+        for attr in ["data-original=", "data-src=", "src="] {
+            let Some(p) = tag.find(attr) else {
+                continue;
+            };
+            let value = &tag[p + attr.len()..];
+            let value = value.trim_start_matches('"').trim_start_matches('\'');
+            let Some(quote) = value.find(|c| c == '"' || c == '\'') else {
                 break;
             };
-            let mut src = after[..end].to_string();
+            let mut src = value[..quote].to_string();
             if src.starts_with("//") {
                 src = format!("https:{src}");
             }
-            if src.contains("/media/photos/") && !out.contains(&src) {
+            if src.contains("/media/photos/") {
+                candidate = Some(src);
+                break;
+            }
+        }
+        if let Some(src) = candidate {
+            if !out.contains(&src) {
                 out.push(src);
             }
-            rest = &after[end..];
         }
+        rest = &after[end..];
+    }
+    out
+}
+
+/// 18comic 的标签（`<a href="/tags/xxx">名字</a>`，也可能在 `class` 含 tag 的容器里）。
+fn jm_tags(html: &str) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find("href=\"/tags/") {
+        let after = &rest[pos..];
+        let Some(gt) = after.find('>') else {
+            break;
+        };
+        let inner = &after[gt + 1..];
+        let Some(end) = inner.find("</a>") else {
+            rest = &after[1..];
+            continue;
+        };
+        let name = html_unescape(inner[..end].trim());
+        if !name.is_empty() && name.len() < 40 && !name.contains('<') {
+            out.entry("tag".to_string())
+                .or_default()
+                .push(name);
+        }
+        rest = &after[end..];
     }
     out
 }
