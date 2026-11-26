@@ -872,7 +872,7 @@ fn fetch_flow(
     status(app, "正在入库…");
 
     let covers_dir = paths::covers_dir(app, &library_id)?;
-    let _guard = crate::try_maintenance()?;
+    let _guard = crate::wait_maintenance(std::time::Duration::from_secs(180))?;
     let options = ImportOptions {
         add_to_collection: None,
         preserve_structure: None,
@@ -1131,7 +1131,9 @@ pub fn import_downloaded_meta(
 
     let outcome = (|| -> Result<ImportReport, String> {
         let covers = paths::covers_dir(app, &library_id)?;
-        let _guard = crate::try_maintenance()?;
+        // 并行下载同时结束时在这里排队（原来 try_lock 立即失败，
+        // 后完成的整本被记成「导入失败」，用户只能重新下载）。
+        let _guard = crate::wait_maintenance(std::time::Duration::from_secs(180))?;
         let options = ImportOptions {
             add_to_collection: None,
             preserve_structure: None,

@@ -473,8 +473,25 @@ fn fetch_html_smart(app: &AppHandle, url: &str) -> Result<String, String> {
     }
 }
 
-/// 抓一个二进制文件到磁盘。
+/// 抓一个二进制文件到磁盘（带自动重试：图床抖一下就整本失败太亏了）。
 fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            // 取消/暂停就不必再试了。
+            wait_check()?;
+            std::thread::sleep(std::time::Duration::from_millis(900 * u64::from(attempt)));
+        }
+        match fetch_file_once(app, url, referer, dest) {
+            Ok(()) => return Ok(()),
+            Err(error) if error == "已取消" => return Err(error),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
+
+fn fetch_file_once(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<(), String> {
     wait_check()?;
     let mut command = curl_base();
     command
@@ -650,7 +667,53 @@ fn parse_tags(html: &str) -> HashMap<String, Vec<String>> {
         return out;
     };
     let block = &content[..end];
-    // 每行形如 <td class="tc">artist:</td><td class="tc"><a ...>name</a></td>
+
+    // 主路：taglist 里每个标签都是一个 `<a href=".../tag/namespace:value">名字</a>`，
+    // 按 href 取命名空间、按锚文本取名字。老实现按 `<td class="tc">` 逐格抠文本，
+    // exhentai 的单元格 class/嵌套稍一变就整块解析成空（管理员：只有 nhentai 有 tag）。
+    let mut rest = block;
+    while let Some(anchor_at) = rest.find("<a ") {
+        rest = &rest[anchor_at..];
+        let Some(href_at) = rest.find("href=\"") else {
+            break;
+        };
+        let after_href = &rest[href_at + "href=\"".len()..];
+        let Some(href_end) = after_href.find('"') else {
+            break;
+        };
+        let href = after_href[..href_end].to_string();
+        // 锚文本：href 结束后到 </a> 之间（剥掉中间的标签）。
+        let text_part = &after_href[href_end + 1..];
+        let text = match text_part.find("</a>") {
+            Some(close) => strip_tags(&text_part[..close]),
+            None => String::new(),
+        };
+
+        if let Some(tag_at) = href.rfind("/tag/") {
+            let tail = &href[tag_at + "/tag/".len()..];
+            let tail = tail.split(['?', '#']).next().unwrap_or(tail);
+            let (namespace, value) = match tail.split_once(':') {
+                Some((ns, value)) => (ns.to_string(), value.to_string()),
+                None => ("misc".to_string(), tail.to_string()),
+            };
+            let value = html_unescape(if text.is_empty() { value.as_str() } else { text.as_str() })
+                .trim()
+                .to_string();
+            let namespace = html_unescape(&namespace).trim().to_lowercase();
+            if !value.is_empty() && value.len() < 60 && !value.contains('<') {
+                let list = out.entry(namespace).or_default();
+                if !list.contains(&value) {
+                    list.push(value);
+                }
+            }
+        }
+        rest = &after_href[href_end..];
+    }
+    if !out.is_empty() {
+        return out;
+    }
+
+    // 兜底：老站的 taglist 不用链接（很少见），保留按单元格抠文本的旧路。
     for row in block.split("<tr>") {
         let Some(cell) = between(row, "<td class=\"tc\">", "</td>") else {
             continue;
@@ -687,6 +750,21 @@ fn parse_tags(html: &str) -> HashMap<String, Vec<String>> {
         }
         if !values.is_empty() {
             out.entry(namespace).or_default().extend(values);
+        }
+    }
+    out
+}
+
+/// 去掉一段 HTML 里的标签、反转义实体，剩下纯文本。
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut depth = 0usize;
+    for ch in html.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
         }
     }
     out
@@ -1804,4 +1882,34 @@ mod tests {
 
     }
 
+}
+
+#[cfg(test)]
+mod parse_tags_tests {
+    use super::*;
+
+    /// exhentai 的 taglist：值单元格不带 class，锚 href 带 namespace:value。
+    #[test]
+    fn parse_tags_reads_exhentai_tag_links() {
+        let html = r#"<div id="taglist"><table>
+        <tr><td class="tc">artist:</td><td><div class="gt"><a href="https://exhentai.org/tag/artist:hono+huka">Hono Huka</a></div></td></tr>
+        <tr><td class="tc">language:</td><td><div class="gt"><a href="https://exhentai.org/tag/language:chinese">chinese</a></div><div class="gt"><a href="https://exhentai.org/tag/language:translated">translated</a></div></td></tr>
+        <tr><td class="tc">parody:</td><td><div class="gt"><a href="https://exhentai.org/tag/parody:original">original</a></div></td></tr>
+        </table></div>"#;
+        let tags = parse_tags(html);
+        assert_eq!(tags.get("artist").unwrap(), &vec!["Hono Huka".to_string()]);
+        assert_eq!(
+            tags.get("language").unwrap(),
+            &vec!["chinese".to_string(), "translated".to_string()]
+        );
+        assert_eq!(tags.get("parody").unwrap(), &vec!["original".to_string()]);
+    }
+
+    /// 没有命名空间的 tag 链接归到 misc，不丢。
+    #[test]
+    fn parse_tags_buckets_unnamespaced_links() {
+        let html = r#"<div id="taglist"><table><tr><td><a href="/tag/full%20color">full color</a></td></tr></table></div>"#;
+        let tags = parse_tags(html);
+        assert_eq!(tags.get("misc").unwrap(), &vec!["full color".to_string()]);
+    }
 }

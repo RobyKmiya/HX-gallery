@@ -2946,7 +2946,7 @@ fn poll_gm_xhr_queue(webview: &Webview) {
             let mut probe = has_progress.then(|| ProgressProbe::new(&webview, &id));
             // 取消探针总开：文本请求也可能是大 JSON/慢接口，点了取消同样该停。
             let mut canceller = CancelProbe::new(&webview, &id);
-            let outcome = curl_xhr(
+            let mut outcome = curl_xhr(
                 &url,
                 &method,
                 &headers,
@@ -2955,6 +2955,30 @@ fn poll_gm_xhr_queue(webview: &Webview) {
                 probe.as_mut().map(|probe| probe as &mut dyn ProgressSink),
                 Some(&mut canceller as &mut dyn Canceller),
             );
+            // 自动重试（管理员 2026-11-26：织机下载报错，还得手动重来）：
+            // 图床偶发超时/断流占报错的大头。只重试幂等的 GET，且页面主动
+            // abort 的不算失败、不重试；最多再补 2 次，间隔递增。
+            let mut retries = 0u32;
+            while outcome.error && !outcome.aborted && retries < 2 {
+                if !method.eq_ignore_ascii_case("GET") {
+                    break;
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(800 * u64::from(retries)));
+                if canceller.cancelled() {
+                    break;
+                }
+                probe = has_progress.then(|| ProgressProbe::new(&webview, &id));
+                outcome = curl_xhr(
+                    &url,
+                    &method,
+                    &headers,
+                    &data,
+                    binary,
+                    probe.as_mut().map(|probe| probe as &mut dyn ProgressSink),
+                    Some(&mut canceller as &mut dyn Canceller),
+                );
+            }
             let result = serde_json::json!({
                 "state": "done",
                 "status": outcome.status,

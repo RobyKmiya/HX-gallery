@@ -685,12 +685,23 @@ export default function LibraryView({
 
   // 内嵌浏览器网页下载自动入库（browser.rs on_download → d2::import_downloaded）。
   // 监听放主界面而不是 D2 面板：下载多半发生在浏览器窗口，那时面板通常没开。
+  // 2026-11-26：入库成功后**主动刷新**列表——原来只弹个 toast，新画集要
+  // 手动重新加载才出现（管理员：都下载好了也不加载）。
+  const downloadRefreshRef = useRef<number | null>(null);
   useEffect(() => {
     const unlisten = listen<{ ok: boolean; error?: string }>(
       "d2://download",
       (event) => {
         if (event.payload.ok) {
           notify("网页下载已自动导入画匣", "success");
+          // 防抖：并行下载几乎同时完成，别一秒里刷四五次。
+          if (downloadRefreshRef.current !== null) {
+            window.clearTimeout(downloadRefreshRef.current);
+          }
+          downloadRefreshRef.current = window.setTimeout(() => {
+            downloadRefreshRef.current = null;
+            void onLibraryChanged?.();
+          }, 900);
         } else {
           notify(
             `网页下载未导入：${event.payload.error ?? "未知原因"}`,
@@ -701,8 +712,12 @@ export default function LibraryView({
     );
     return () => {
       void unlisten.then((off) => off());
+      if (downloadRefreshRef.current !== null) {
+        window.clearTimeout(downloadRefreshRef.current);
+        downloadRefreshRef.current = null;
+      }
     };
-  }, [notify]);
+  }, [notify, onLibraryChanged]);
 
   // 开场把「上次更新到底成没成」说清楚，别让人自己去猜。
   // 同一次失败只提示一次（按 lastAt 去重），否则每次开都弹会很烦。

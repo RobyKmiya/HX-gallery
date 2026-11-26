@@ -143,6 +143,24 @@ fn try_maintenance() -> Result<MutexGuard<'static, ()>, String> {
         .map_err(|_| "已有导入或扫描正在进行，请等它完成".to_string())
 }
 
+/// 等维护锁（并行下载同时结束时的排队入口）。
+///
+/// `try_maintenance` 是立即失败：两本下载同时完成，后到的那本直接报
+/// 「已有导入正在进行」，用户看到的就是「导入失败还得重新下」。
+/// 这里改成排队等（下载 worker 线程多等一会儿完全无妨），默认最多 3 分钟。
+fn wait_maintenance(timeout: std::time::Duration) -> Result<MutexGuard<'static, ()>, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match MAINTENANCE.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(_) if std::time::Instant::now() >= deadline => {
+                return Err("已有导入或扫描长时间未完成，请稍后再试".to_string());
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(400)),
+        }
+    }
+}
+
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let config_dir = app
         .path()

@@ -129,7 +129,7 @@ fn sync(label: &str, webview: &Webview, parsed: &tauri::Url, host: &str) {
     let cookies = read_cookies(webview, parsed);
     let app = webview.app_handle();
 
-    if cookies.is_empty() {
+    if !has_login_cookie(host, &cookies) {
         // 浏览器里没有 → 看库里的快照，回填一次再刷新（每个标签每站只回填一次）。
         if !first_time(label, host) {
             return;
@@ -157,7 +157,7 @@ fn sync(label: &str, webview: &Webview, parsed: &tauri::Url, host: &str) {
         return;
     }
 
-    // 有 cookie → 自动存一份（内容没变就不重复写库）。
+    // 有登录态 → 自动存一份（内容没变就不重复写库）。
     if !fingerprint_changed(host, &cookies) {
         return;
     }
@@ -165,6 +165,40 @@ fn sync(label: &str, webview: &Webview, parsed: &tauri::Url, host: &str) {
         // 登录态更新了，下次下载要拿新的 cookie。
         crate::netdl::clear_cookie_cache();
     }
+}
+
+/// 各站「算登录了」的标志 cookie。
+///
+/// 回填的判定不能是「有没有任意 cookie」：`theme` / `_ga` / `cf_chl_rc_ni`
+/// 这些是**持久** cookie，重启后还留着，会把「实际已掉线」误判成已登录，
+/// 于是真正的登录 cookie（AVS 这类会话 cookie）永远没机会写回去——
+/// 管理员 2026-11-26 晚：明明给过 cookie，打开还是登录页。
+fn login_markers(host: &str) -> &'static [&'static str] {
+    if host.contains("18comic") || host.contains("jmcomic") {
+        &["AVS"]
+    } else if host.contains("exhentai") || host.contains("e-hentai") {
+        &["ipb_member_id", "ipb_pass_hash"]
+    } else if host.contains("nhentai") {
+        &["sessionid", "access_token"]
+    } else {
+        &[]
+    }
+}
+
+/// 该站当前算不算登录态在。名单外的站点退回「有任意 cookie 就算」。
+fn has_login_cookie(host: &str, cookies: &str) -> bool {
+    let markers = login_markers(host);
+    if markers.is_empty() {
+        return !cookies.trim().is_empty();
+    }
+    markers.iter().any(|marker| {
+        cookies.split(';').any(|part| {
+            let piece = part.trim();
+            piece.len() > marker.len() + 1
+                && piece[..marker.len()].eq_ignore_ascii_case(marker)
+                && piece.as_bytes()[marker.len()] == b'='
+        })
+    })
 }
 
 fn read_cookies(webview: &Webview, parsed: &tauri::Url) -> String {
