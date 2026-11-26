@@ -48,6 +48,7 @@
 | 1.1.72 | **四连修**：18comic 竖条混淆还原（`jm_decode.rs`）/ nhentai 改 v2 API / 标签面板始终挂载保状态 / 内置浏览器顶栏首帧摆位 |
 | 1.1.73 | 修 1.1.72 引入的主页空白回归（面板容器 home 时也要 hidden）；18comic tag 三路解析（data-type span / meta keywords / 旧 href） |
 | 1.1.74 | **下载管理器**：多任务并行/单项启停/防卡死（cookie 缓存绕开 WebView2 + curl 可 kill + 全局闸门）；UI 卡片化美化 |
+| 1.1.82 | 修双击点歪（单击延迟开详情）；网络画集改名链接下载；设置齿轮图标；侧栏减负（库操作迁设置）；UI 动效清单 8 项预览待确认；待办新增图片级增删/收藏夹合并/更新整合+GitHub 推流/新页美化 |
 | 1.1.81 | 下载入库把源 URL 写进画集备注，详情页可点开（新网页标签）；修 Reader 关闭时重开原生标题栏导致的「双框」；壁纸锁壁纸可拖拽平移/滚轮缩放，加载失败可见 |
 | 1.1.80 | 18comic 移动 API 源数据路线（`jm_api.rs`，jmcomic 协议 AES 解密，整本/多章一次拿全）+ 登录框从快照 `remember_id` 自动填充账密 + exhentai tag 改织机整页 /tag/ 解析；拍板不接外接浏览器 |
 | 1.1.79 | 「Edge 打开」试水口：`open_in_edge`（独立 profile + --app），登录类站点交真 Edge 管 cookie/CF/扩展；二期 CDP 互通 cookie/下载待立项 |
