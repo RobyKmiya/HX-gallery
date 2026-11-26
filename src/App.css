@@ -8899,3 +8899,222 @@ body.is-splitting {
   color: var(--text);
   margin-bottom: 8px;
 }
+
+/* ============================================================
+   UI 动效统一实施（1.1.85，管理员 2026-11-27 批复）
+   A1 卡片悬停不做（管理员自有想法）；A5 骨架屏已存在；A16 翻页过渡已可选。
+   这里落地 A2/A3/A4/A6/A7/A8/A9/A10/A11/A12/A13/A14/A15。
+   原则：只加类与 keyframes，不改业务语义；尊重系统「减少动态效果」。
+   ============================================================ */
+:root {
+  --hx-ease: cubic-bezier(0.22, 0.8, 0.3, 1);
+  --hx-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --hx-dur: 0.26s;
+}
+
+/* ---- A2 交错入场：画集网格 / 合集网格，前 16 张依次上浮 ---- */
+@keyframes hx-rise-in {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+/* backwards：动画结束后不保留 transform，hover 的 translateY(-3px) 仍生效 */
+.archive-grid > .archive-card,
+.series-grid > .series-grid-card,
+.series-strip-grid > .series-grid-card {
+  animation: hx-rise-in 0.38s var(--hx-ease) backwards;
+}
+.archive-grid > .archive-card:nth-child(1), .series-grid > .series-grid-card:nth-child(1) { animation-delay: 0ms; }
+.archive-grid > .archive-card:nth-child(2), .series-grid > .series-grid-card:nth-child(2) { animation-delay: 28ms; }
+.archive-grid > .archive-card:nth-child(3), .series-grid > .series-grid-card:nth-child(3) { animation-delay: 56ms; }
+.archive-grid > .archive-card:nth-child(4), .series-grid > .series-grid-card:nth-child(4) { animation-delay: 84ms; }
+.archive-grid > .archive-card:nth-child(5), .series-grid > .series-grid-card:nth-child(5) { animation-delay: 112ms; }
+.archive-grid > .archive-card:nth-child(6), .series-grid > .series-grid-card:nth-child(6) { animation-delay: 140ms; }
+.archive-grid > .archive-card:nth-child(7), .series-grid > .series-grid-card:nth-child(7) { animation-delay: 168ms; }
+.archive-grid > .archive-card:nth-child(8), .series-grid > .series-grid-card:nth-child(8) { animation-delay: 196ms; }
+.archive-grid > .archive-card:nth-child(9), .series-grid > .series-grid-card:nth-child(9) { animation-delay: 224ms; }
+.archive-grid > .archive-card:nth-child(10), .series-grid > .series-grid-card:nth-child(10) { animation-delay: 252ms; }
+.archive-grid > .archive-card:nth-child(11), .series-grid > .series-grid-card:nth-child(11) { animation-delay: 280ms; }
+.archive-grid > .archive-card:nth-child(12), .series-grid > .series-grid-card:nth-child(12) { animation-delay: 308ms; }
+.archive-grid > .archive-card:nth-child(13), .series-grid > .series-grid-card:nth-child(13) { animation-delay: 336ms; }
+.archive-grid > .archive-card:nth-child(14), .series-grid > .series-grid-card:nth-child(14) { animation-delay: 364ms; }
+.archive-grid > .archive-card:nth-child(15), .series-grid > .series-grid-card:nth-child(15) { animation-delay: 392ms; }
+.archive-grid > .archive-card:nth-child(16), .series-grid > .series-grid-card:nth-child(16) { animation-delay: 420ms; }
+
+/* ---- A3 面板过渡：标签页内嵌面板切换时淡入上滑 ---- */
+@keyframes hx-panel-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.panel-tab-slot:not([hidden]) {
+  animation: hx-panel-in 0.28s var(--hx-ease);
+}
+/* 浮层面板（模态形态）过渡更明显一点 */
+.modal-backdrop .queue-panel,
+.modal-backdrop .loose-panel,
+.modal-backdrop .tag-center,
+.modal-backdrop .settings-dialog {
+  animation: hx-panel-in 0.3s var(--hx-ease);
+}
+
+/* ---- A4 抽屉滑入：右侧抽屉从屏外滑入，遮罩同步淡入 ---- */
+@keyframes hx-drawer-in {
+  from { transform: translateX(100%); opacity: 0.6; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.detail-drawer:not(.is-docked),
+.series-drawer {
+  animation: hx-drawer-in 0.34s var(--hx-ease);
+}
+.drawer-backdrop:not(.is-docked),
+.series-drawer-backdrop {
+  animation: fade-in 0.22s ease;
+}
+
+/* ---- A6 高亮脉冲进度：进度条内从左往右扫光（打包/下载共用） ---- */
+.progress-fill {
+  position: relative;
+  overflow: hidden;
+}
+.progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 18%, rgba(255, 255, 255, 0.5) 50%, transparent 82%);
+  transform: translateX(-100%);
+  animation: hx-sweep 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+.progress-fill.is-paused::after,
+.progress-track.is-indeterminate .progress-fill::after {
+  animation: none;
+}
+@keyframes hx-sweep {
+  0% { transform: translateX(-100%); }
+  65%, 100% { transform: translateX(210%); }
+}
+
+/* ---- A7 反馈弹跳：按钮按下幅度夸张的回弹（管理员要求再夸张） ---- */
+@keyframes hx-btn-pop {
+  0% { transform: scale(1); }
+  32% { transform: scale(0.86); }
+  68% { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
+.btn:active:not(:disabled),
+.icon-button:active:not(:disabled),
+.nav-item:active,
+.ctx-menu button:active {
+  animation: hx-btn-pop 0.36s var(--hx-ease-spring);
+}
+
+/* ---- A8 Toast：落入带轻微回弹，图标单独弹一下 ---- */
+@keyframes hx-toast-in {
+  from { transform: translate(-50%, -20px) scale(0.92); opacity: 0; }
+  70% { transform: translate(-50%, 3px) scale(1.02); opacity: 1; }
+  to { transform: translate(-50%, 0) scale(1); opacity: 1; }
+}
+.toast { animation: hx-toast-in 0.4s var(--hx-ease-spring); }
+.toast-icon { animation: hx-btn-pop 0.42s var(--hx-ease-spring) 0.06s backwards; }
+
+/* ---- A9 分区指示条滑动：侧栏跟着 is-active 项移动的高亮竖条 ---- */
+.sidebar-nav { position: relative; }
+.nav-active-indicator {
+  position: absolute;
+  left: -6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(180deg, var(--accent-strong), var(--accent-deep));
+  box-shadow: 0 0 12px rgba(232, 163, 92, 0.45);
+  pointer-events: none;
+  z-index: 1;
+  transition: top 0.32s var(--hx-ease), height 0.32s var(--hx-ease), opacity 0.2s ease;
+}
+.nav-active-indicator.is-hidden { opacity: 0; }
+
+/* ---- A10 搜索框聚焦：边框点亮 + 外发光 ---- */
+.search-field,
+.tag-filter-search,
+.series-name-input,
+.series-note-input,
+.series-label-input {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+.search-field:focus-within,
+.tag-filter-search:focus-within {
+  border-color: rgba(232, 163, 92, 0.55);
+  background: rgba(232, 163, 92, 0.06);
+  box-shadow: 0 0 0 3px rgba(232, 163, 92, 0.1), 0 0 18px -6px rgba(232, 163, 92, 0.35);
+}
+
+/* ---- A11 列表项收缩消失：侧栏收藏夹删除时先收缩再落地 ---- */
+@keyframes hx-collapse-out {
+  from { max-height: 60px; opacity: 1; transform: translateX(0); }
+  to { max-height: 0; opacity: 0; transform: translateX(-16px); margin-top: -4px; }
+}
+.nav-row.is-removing {
+  overflow: hidden;
+  animation: hx-collapse-out 0.28s ease forwards;
+}
+
+/* ---- A12 计数滚动：数字变化时从下方滚入 ---- */
+@keyframes hx-count-roll {
+  from { transform: translateY(9px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.count-roll {
+  display: inline-block;
+  animation: hx-count-roll 0.32s var(--hx-ease);
+}
+
+/* ---- A13 右键菜单浮现：从触发点弹出（轻微放大 + 上浮） ---- */
+@keyframes hx-menu-in {
+  from { opacity: 0; transform: scale(0.9) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.ctx-menu,
+.reader-menu {
+  animation: hx-menu-in 0.18s var(--hx-ease);
+  transform-origin: top left;
+}
+
+/* ---- A14 分组展开收起：侧栏收藏夹组高度过渡（始终挂载） ---- */
+.nav-collection-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 1400px;
+  overflow: hidden;
+  transition: max-height 0.32s var(--hx-ease), opacity 0.24s ease;
+}
+.nav-collection-list.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+/* ---- A15 壁纸交叉淡化：新壁纸压在上面淡入，旧壁纸保留到淡入结束 ---- */
+@keyframes hx-wall-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.wallpaper-lock-img.is-entering { animation: hx-wall-fade 1.1s ease; }
+
+/* ---- 尊重系统「减少动态效果」：关掉装饰性动画，保留功能状态 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .archive-grid > .archive-card,
+  .series-grid > .series-grid-card,
+  .series-strip-grid > .series-grid-card,
+  .panel-tab-slot:not([hidden]),
+  .modal-backdrop .queue-panel, .modal-backdrop .loose-panel,
+  .modal-backdrop .tag-center, .modal-backdrop .settings-dialog,
+  .detail-drawer:not(.is-docked), .series-drawer,
+  .drawer-backdrop:not(.is-docked), .series-drawer-backdrop,
+  .toast, .toast-icon, .ctx-menu, .reader-menu,
+  .count-roll, .wallpaper-lock-img.is-entering,
+  .btn:active:not(:disabled), .icon-button:active:not(:disabled),
+  .nav-item:active, .ctx-menu button:active {
+    animation: none;
+  }
+  .progress-fill::after { animation: none; }
+  .nav-collection-list, .nav-active-indicator { transition: none; }
+}

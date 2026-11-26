@@ -443,12 +443,73 @@ export default function LibraryView({
       return next;
     });
   }, []);
+
+  // A9 分区指示条：测量当前 is-active 项在侧栏里的位置，切换时用 CSS transition 滑过去。
+  const sidebarNavRef = useRef<HTMLElement | null>(null);
+  const [navIndicator, setNavIndicator] = useState({
+    top: 0,
+    height: 0,
+    visible: false,
+  });
+
+  // A11 列表项收缩消失：删除收藏夹先播收缩动画，再真正落地。
+  const [removingCollectionId, setRemovingCollectionId] = useState<
+    number | null
+  >(null);
   const [d2PanelOpen, setD2PanelOpen] = useState(false);
   /**
    * 正在浏览的待看目录。非空时列表只显示这个目录的成员；
    * 它和收藏夹是两套筛选，进待看目录时把收藏夹选择清掉。
    */
   const [activeQueue, setActiveQueue] = useState<Queue | null>(null);
+
+  // A9：active 项变化后量一次位置，指示条靠 CSS transition 滑过去。
+  useLayoutEffect(() => {
+    const nav = sidebarNavRef.current;
+    if (!nav) return;
+    const measure = () => {
+      const active =
+        nav.querySelector<HTMLElement>(
+          ".nav-row.is-active .nav-item.is-active",
+        ) ?? nav.querySelector<HTMLElement>(".nav-item.is-active");
+      const navRect = nav.getBoundingClientRect();
+      if (!active || activeKind !== "home" || navRect.height === 0) {
+        setNavIndicator((prev) =>
+          prev.visible ? { ...prev, visible: false } : prev,
+        );
+        return;
+      }
+      const rect = active.getBoundingClientRect();
+      const top = rect.top - navRect.top + nav.scrollTop;
+      const height = rect.height;
+      setNavIndicator((prev) =>
+        prev.visible &&
+        Math.abs(prev.top - top) < 1 &&
+        Math.abs(prev.height - height) < 1
+          ? prev
+          : { top, height, visible: true },
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(nav);
+    window.addEventListener("resize", measure);
+    nav.addEventListener("scroll", measure, { passive: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+      nav.removeEventListener("scroll", measure);
+    };
+  }, [
+    activeKind,
+    activeCollectionId,
+    activeQueue,
+    looseView,
+    collections,
+    collectionsCollapsed,
+    sidebarCollapsed,
+    sidebarWidth,
+  ]);
 
   // 画廊里按 I：给鼠标悬停的那张卡片呼出详情浮层（管理员 11-23）。
   // 用 elementFromPoint 命中，省得给上千张卡片逐个挂焦点逻辑。
@@ -1796,13 +1857,18 @@ export default function LibraryView({
       }
 
       setPendingDeleteCollectionId(null);
+      // A11：先播 280ms 收缩动画，再真正删除（见 App.css .nav-row.is-removing）。
+      setRemovingCollectionId(collection.id);
       try {
+        await new Promise((resolve) => window.setTimeout(resolve, 280));
         await api.deleteCollection(collection.id);
         if (activeCollectionId === collection.id) setActiveCollectionId(null);
         setCollections(await api.listCollections());
         notify(`已把收藏夹「${collection.name}」移入回收站`, "success");
       } catch (error) {
         notify(`删除收藏夹失败：${String(error)}`, "error");
+      } finally {
+        setRemovingCollectionId(null);
       }
     },
     [activeCollectionId, notify, pendingDeleteCollectionId],
@@ -2229,7 +2295,12 @@ export default function LibraryView({
           )}
         </section>
 
-        <nav className="sidebar-nav" aria-label="画廊导航">
+        <nav className="sidebar-nav" ref={sidebarNavRef} aria-label="画廊导航">
+          <span
+            className={`nav-active-indicator${navIndicator.visible ? "" : " is-hidden"}`}
+            style={{ top: navIndicator.top, height: navIndicator.height }}
+            aria-hidden="true"
+          />
           <button
             type="button"
             className={`nav-item${
@@ -2244,7 +2315,11 @@ export default function LibraryView({
           >
             <BookIcon />
             <span className="nav-label">全部画集</span>
-            <span className="nav-count">{library.archiveCount}</span>
+            <span className="nav-count">
+              <span className="count-roll" key={library.archiveCount}>
+                {library.archiveCount}
+              </span>
+            </span>
           </button>
 
           <button
@@ -2266,11 +2341,17 @@ export default function LibraryView({
           >
             <span className={`nav-caret${collectionsCollapsed ? "" : " is-open"}`}>▸</span>
             <span className="nav-label">收藏夹</span>
-            <span className="nav-count">{collections.length}</span>
+            <span className="nav-count">
+              <span className="count-roll" key={collections.length}>
+                {collections.length}
+              </span>
+            </span>
           </button>
 
-          {!collectionsCollapsed && (
-            <>
+          <div
+            className={`nav-collection-list${collectionsCollapsed ? " is-collapsed" : ""}`}
+            aria-hidden={collectionsCollapsed}
+          >
             {collections.map((collection, index) => {
             const isRenaming = renamingCollectionId === collection.id;
             if (isRenaming) {
@@ -2324,7 +2405,9 @@ export default function LibraryView({
               pendingDeleteCollectionId === collection.id;
             return (
               <div
-                className={`nav-row${isActive ? " is-active" : ""}`}
+                className={`nav-row${isActive ? " is-active" : ""}${
+                  removingCollectionId === collection.id ? " is-removing" : ""
+                }`}
                 key={collection.id}
               >
                 <button
@@ -2341,7 +2424,11 @@ export default function LibraryView({
                     color={collection.color}
                   />
                   <span className="nav-label">{displayName}</span>
-                  <span className="nav-count">{collection.count}</span>
+                  <span className="nav-count">
+                    <span className="count-roll" key={collection.count}>
+                      {collection.count}
+                    </span>
+                  </span>
                 </button>
                 <div className="nav-row-actions">
                   <button
@@ -2426,8 +2513,7 @@ export default function LibraryView({
               <span className="nav-label">散图收藏夹</span>
             </button>
           </div>
-            </>
-          )}
+          </div>
 
           <div className="nav-divider" aria-hidden="true" />
 
@@ -2442,7 +2528,11 @@ export default function LibraryView({
           >
             <TagIcon width={16} height={16} />
             <span className="nav-label">标签中心</span>
-            <span className="nav-count">{tags.length}</span>
+            <span className="nav-count">
+              <span className="count-roll" key={tags.length}>
+                {tags.length}
+              </span>
+            </span>
           </button>
 
           <button
@@ -2491,7 +2581,12 @@ export default function LibraryView({
                 <BookIcon width={16} height={16} />
                 <span className="nav-label">{activeQueue.name}</span>
                 <span className="nav-count">
-                  {activeQueue.finished}/{activeQueue.count}
+                  <span
+                    className="count-roll"
+                    key={`${activeQueue.finished}/${activeQueue.count}`}
+                  >
+                    {activeQueue.finished}/{activeQueue.count}
+                  </span>
                 </span>
               </button>
               <div className="nav-row-actions">

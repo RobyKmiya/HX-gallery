@@ -32,6 +32,8 @@ const EMPTY: NetDlStatus = {
   stage: "",
   done: 0,
   total: 0,
+  pack_done: 0,
+  pack_total: 0,
   title: "",
   tags: [],
   path: "",
@@ -47,7 +49,13 @@ function shortUrl(url: string): string {
 }
 
 function itemPercent(s: NetDlStatus): number {
-  return s.total > 0 ? Math.min(100, Math.round((s.done / s.total) * 100)) : 0;
+  // A6：下载占 0→90，打包占 90→100，进度条只前进不倒退；
+  // 配合扫光提示打包阶段在动，不再「下载 100% → 卡住 → 突然完成」。
+  if (s.pack_total > 0) {
+    return 90 + Math.min(10, Math.round((s.pack_done / s.pack_total) * 10));
+  }
+  const download = s.total > 0 ? s.done / s.total : 0;
+  return Math.min(90, Math.round(download * 90));
 }
 
 function itemState(s: NetDlStatus): "idle" | "running" | "paused" | "done" | "failed" | "canceled" {
@@ -353,9 +361,11 @@ export default function NetGalleryDialog({
                       </div>
                       <div className="net-dl-item-stage">
                         {item.status.stage}
-                        {item.status.total > 0
-                          ? ` · ${item.status.done}/${item.status.total} 页`
-                          : ""}
+                        {item.status.pack_total > 0
+                          ? ` · 打包 ${item.status.pack_done}/${item.status.pack_total} 张`
+                          : item.status.total > 0
+                            ? ` · ${item.status.done}/${item.status.total} 页`
+                            : ""}
                       </div>
                     </div>
                     <div className="net-dl-item-actions">

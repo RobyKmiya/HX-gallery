@@ -41,6 +41,10 @@ pub struct NetDlStatus {
     pub stage: String,
     pub done: usize,
     pub total: usize,
+    /// A6：打包入库阶段的细粒度进度（图片写进 CBZ 的张数 / 总张数）。
+    /// 下载阶段为 0；打包阶段逐张推进，前端据此显示扫光，不再「卡 100% 后突变」。
+    pub pack_done: usize,
+    pub pack_total: usize,
     pub title: String,
     pub tags: Vec<(String, String)>,
     pub path: String,
@@ -828,7 +832,12 @@ fn sanitize(name: &str) -> String {
     }
 }
 
-fn package_cbz(files: &[PathBuf], target: &Path) -> Result<(), String> {
+/// 打包回调：(已写入张数, 总张数)。None 表示不报进度（测试/内部调用）。
+fn package_cbz(
+    files: &[PathBuf],
+    target: &Path,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<(), String> {
     use zip::write::SimpleFileOptions;
     use zip::{CompressionMethod, ZipWriter};
     let file = std::fs::File::create(target).map_err(|e| format!("创建压缩包失败：{e}"))?;
@@ -844,6 +853,9 @@ fn package_cbz(files: &[PathBuf], target: &Path) -> Result<(), String> {
             .map_err(|e| format!("写压缩包失败：{e}"))?;
         let mut source = std::fs::File::open(path).map_err(|e| format!("读图片失败：{e}"))?;
         std::io::copy(&mut source, &mut zip).map_err(|e| format!("写压缩包失败：{e}"))?;
+        if let Some(report) = progress {
+            report(index + 1, files.len());
+        }
     }
     zip.finish().map_err(|e| format!("收尾压缩包失败：{e}"))?;
     Ok(())
@@ -879,6 +891,8 @@ pub async fn net_dl_preview(app: AppHandle, url: String) -> Result<NetDlStatus, 
         },
         done: 0,
         total,
+        pack_done: 0,
+        pack_total: 0,
         title,
         tags: flat,
         path: String::new(),
@@ -974,6 +988,8 @@ fn preview_nhentai(app: &AppHandle, url: &str) -> Result<NetDlStatus, String> {
         },
         done: 0,
         total,
+        pack_done: 0,
+        pack_total: 0,
         title,
         tags,
         path: String::new(),
@@ -1192,7 +1208,11 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
         return Err("一张都没下载成功".to_string());
     }
 
-    set_status(|s| s.stage = "打包 CBZ…".to_string());
+    set_status(|s| {
+        s.stage = "打包 CBZ…".to_string();
+        s.pack_done = 0;
+        s.pack_total = ordered.len();
+    });
     let dir = app
         .path()
         .app_cache_dir()
@@ -1200,7 +1220,13 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
         .join("netdl");
     std::fs::create_dir_all(&dir).map_err(|e| format!("建缓存目录失败：{e}"))?;
     let target = dir.join(format!("{}.cbz", sanitize(&title)));
-    package_cbz(&ordered, &target)?;
+    package_cbz(&ordered, &target, Some(&|done, total| {
+        set_status(|s| {
+            s.pack_done = done;
+            s.pack_total = total;
+            s.stage = format!("打包 CBZ… {done}/{total}");
+        });
+    }))?;
     let _ = std::fs::remove_dir_all(&temp);
 
     set_status(|s| s.stage = "导入画匣…".to_string());
@@ -1776,7 +1802,11 @@ pub(crate) fn download_and_package(
         return Err("一张都没下载成功".to_string());
     }
 
-    set_status(|s| s.stage = "打包 CBZ…".to_string());
+    set_status(|s| {
+        s.stage = "打包 CBZ…".to_string();
+        s.pack_done = 0;
+        s.pack_total = ordered.len();
+    });
     let dir = app
         .path()
         .app_cache_dir()
@@ -1784,7 +1814,13 @@ pub(crate) fn download_and_package(
         .join("netdl");
     std::fs::create_dir_all(&dir).map_err(|e| format!("建缓存目录失败：{e}"))?;
     let target = dir.join(format!("{}.cbz", sanitize(title)));
-    package_cbz(&ordered, &target)?;
+    package_cbz(&ordered, &target, Some(&|done, total| {
+        set_status(|s| {
+            s.pack_done = done;
+            s.pack_total = total;
+            s.stage = format!("打包 CBZ… {done}/{total}");
+        });
+    }))?;
     let _ = std::fs::remove_dir_all(&temp);
     set_status(|s| s.stage = "导入画匣…".to_string());
     crate::d2::import_downloaded_meta(app, target.clone(), title, tag_map, Some(referer))?;

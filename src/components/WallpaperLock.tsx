@@ -11,6 +11,8 @@ import { wallpaperUrl } from "../wallpapers";
  *
  * 2026-11-26 补：壁纸支持**拖拽平移 + 滚轮缩放**（之前是死图看不全）；
  * 加载失败明确提示，不再整屏黑掉装作没生效。
+ *
+ * 2026-11-27 补（A15）：多张轮换时新壁纸压在旧图上淡入，避免整屏闪一下。
  */
 export default function WallpaperLock({
   config,
@@ -34,6 +36,9 @@ export default function WallpaperLock({
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
 
   const current = urls.length > 0 ? urls[index % urls.length] : null;
+  // A15 交叉淡化：换片时保留上一张垫底，新片压上来淡入，淡入结束再撤掉旧片。
+  const [outgoing, setOutgoing] = useState<string | null>(null);
+  const crossfadeTimer = useRef<number | null>(null);
 
   // 多张时按配置的间隔轮换；只有一张或间隔为 0 就定住。
   useEffect(() => {
@@ -45,12 +50,32 @@ export default function WallpaperLock({
     return () => window.clearInterval(timer);
   }, [urls.length, config.intervalSecs]);
 
-  // 换壁纸时把视角复位。
+  // 换壁纸时把视角复位，并启动交叉淡化。
   useEffect(() => {
     setZoom(1);
     setOffset({ x: 0, y: 0 });
     setLoadFailed(false);
-  }, [index]);
+    if (crossfadeTimer.current !== null) {
+      window.clearTimeout(crossfadeTimer.current);
+      crossfadeTimer.current = null;
+    }
+    if (urls.length > 1) {
+      const previous = urls[(index - 1 + urls.length) % urls.length];
+      if (previous && previous !== urls[index % urls.length]) {
+        setOutgoing(previous);
+        crossfadeTimer.current = window.setTimeout(() => {
+          setOutgoing(null);
+          crossfadeTimer.current = null;
+        }, 1200);
+      }
+    }
+    return () => {
+      if (crossfadeTimer.current !== null) {
+        window.clearTimeout(crossfadeTimer.current);
+        crossfadeTimer.current = null;
+      }
+    };
+  }, [index, urls.length]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -103,9 +128,22 @@ export default function WallpaperLock({
         dragRef.current = null;
       }}
     >
-      {current && !loadFailed && (
+      {outgoing && !loadFailed && (
         <img
           className="wallpaper-lock-img"
+          src={outgoing}
+          alt=""
+          draggable={false}
+          aria-hidden="true"
+          style={{
+            transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+          }}
+        />
+      )}
+      {current && !loadFailed && (
+        <img
+          key={current}
+          className={`wallpaper-lock-img${outgoing ? " is-entering" : ""}`}
           src={current}
           alt=""
           draggable={false}

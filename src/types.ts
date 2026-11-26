@@ -352,6 +352,9 @@ export interface NetDlStatus {
   stage: string;
   done: number;
   total: number;
+  /** A6 打包阶段进度：打包中的张数 / 总张数（下载阶段为 0）。 */
+  pack_done: number;
+  pack_total: number;
   title: string;
   tags: [string, string][];
   path: string;
