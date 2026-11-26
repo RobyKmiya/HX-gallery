@@ -708,19 +708,32 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
         .filter(|text| !text.trim().is_empty())
         .unwrap_or("UNTITLE")
         .to_string();
-    let mut tags: Vec<(String, String)> = Vec::new();
+    // 入库要 HashMap<namespace, Vec<tag>>；进度条用展平后的 Vec。
+    let mut tag_map: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(list) = value["tags"].as_array() {
         for tag in list {
             let kind = tag["type"].as_str().unwrap_or("tag");
             let name = tag["name"].as_str().unwrap_or("");
             if !name.is_empty() {
-                tags.push((kind.to_string(), name.to_string()));
+                tag_map
+                    .entry(kind.to_string())
+                    .or_default()
+                    .push(name.to_string());
             }
         }
     }
+    let flat: Vec<(String, String)> = tag_map
+        .iter()
+        .flat_map(|(kind, names)| {
+            names
+                .iter()
+                .map(move |name| (kind.clone(), name.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     set_status(|s| {
         s.title = title.clone();
-        s.tags = tags.clone();
+        s.tags = flat;
         s.total = pages.len();
         s.stage = "准备下载…".to_string();
     });
@@ -827,7 +840,7 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
     package_cbz(&ordered, &target)?;
     let _ = std::fs::remove_dir_all(&temp);
     set_status(|s| s.stage = "导入画匣…".to_string());
-    crate::d2::import_downloaded_meta(app, target.clone(), &title, &tags)?;
+    crate::d2::import_downloaded_meta(app, target.clone(), &title, &tag_map)?;
     Ok(target.to_string_lossy().to_string())
 }
 
