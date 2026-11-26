@@ -1206,6 +1206,55 @@ async fn site_login_detail(
     .await
 }
 
+/// 用画匣专属配置的**真 Edge** 打开一个站点（--app 无边框窗）。
+///
+/// 这是「接入浏览器」路线的试水口：cookie、Cloudflare、扩展全归 Edge 自己管，
+/// 登录一次永久有效，不再依赖我们的快照/回填。画匣只负责启动；
+/// 二期再接 CDP 把 cookie/下载接管回来。
+#[tauri::command]
+fn open_in_edge(app: AppHandle, url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("网址不对：{e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("只支持 http/https 网址".to_string());
+    }
+    const CANDIDATES: &[&str] = &[
+        "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    ];
+    let exe = CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .ok_or("没找到 Microsoft Edge，请先确认系统里有 Edge")?;
+    // 独立 profile：和你日常用的 Edge 数据完全隔离，画匣专属。
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("拿配置目录失败：{e}"))?
+        .join("edge-profile");
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(exe)
+            .creation_flags(0x0800_0000) // 不弹控制台
+            .arg(format!("--user-data-dir={}", dir.display()))
+            .arg("--no-first-run")
+            .arg(format!("--app={parsed}"))
+            .spawn()
+            .map_err(|e| format!("启动 Edge 失败：{e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(exe)
+            .arg(format!("--user-data-dir={}", dir.display()))
+            .arg("--no-first-run")
+            .arg(format!("--app={parsed}"))
+            .spawn()
+            .map_err(|e| format!("启动 Edge 失败：{e}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn site_login_list(
     state: State<'_, AppState>,
@@ -2494,6 +2543,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             site_login_delete,
             site_login_import,
             site_login_detail,
+            open_in_edge,
             adblock_read_custom,
             adblock_write_custom,
             blocked_list,

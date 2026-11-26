@@ -271,6 +271,16 @@ export default function BrowserDataSettings() {
     }
   };
 
+  /** 用画匣专属配置的真 Edge 打开站点（接入浏览器路线的试水口）。 */
+  const openInEdgeFor = async (host: string) => {
+    try {
+      await api.openInEdge(`https://${host}/`);
+      setHint(`已用画匣专属的 Edge 打开 ${host}：在这里登录一次，cookie 由 Edge 自己保管，不再过期丢失`);
+    } catch (error) {
+      setHint(`Edge 打开失败：${String(error)}`);
+    }
+  };
+
   return (
     <>
       <h3>浏览器数据</h3>
@@ -532,6 +542,14 @@ export default function BrowserDataSettings() {
                       title="从当前打开的网页标签里直接抓一份"
                     >
                       从标签抓取
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-quiet btn-compact"
+                      onClick={() => void openInEdgeFor(site.host)}
+                      title="用画匣专属配置的真 Edge 打开：cookie/Cloudflare/扩展全归 Edge 管，登录一次永久有效"
+                    >
+                      Edge 打开
                     </button>
                   </div>
                 </div>
