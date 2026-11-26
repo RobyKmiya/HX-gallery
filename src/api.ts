@@ -113,6 +113,22 @@ export const api = {
   setNote: (id: number, note: string | null) =>
     invoke<string | null>("set_note", { id, note }),
 
+  /** 图片管理：zip/cbz 的单页清单。 */
+  galleryPageList: (id: number) =>
+    invoke<{
+      kind: "zip" | "unsupported";
+      encrypted: boolean;
+      pages: { index: number; name: string; size: number }[];
+      pageCount: number;
+    }>("gallery_page_list", { id }),
+  /** 删除第 index 页（0 基）：重打包，被删页进回收站。返回剩余页数。 */
+  galleryPageDelete: (id: number, index: number) =>
+    invoke<number>("gallery_page_delete", { id, index }),
+  /** 追加图片：原生选择器挑图。返回（新增页数，总页数）。 */
+  galleryPageAdd: (
+    id: number,
+  ) => invoke<[number, number]>("gallery_page_add", { id }),
+
   deleteArchive: (archiveId: number) =>
     invoke<void>("delete_archive", { archiveId }),
 

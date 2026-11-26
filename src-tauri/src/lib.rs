@@ -15,6 +15,7 @@ mod jm_api;
 mod jm_decode;
 pub mod library;
 pub mod loose_images;
+pub mod page_ops;
 pub mod models;
 mod pagecache;
 mod paths;
@@ -1429,6 +1430,52 @@ async fn set_tag_translations(
 }
 
 #[tauri::command]
+async fn gallery_page_list(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<crate::page_ops::PageList, String> {
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            crate::page_ops::page_list(&library.conn, &library.root, id)
+        })
+    })
+    .await
+}
+
+/// 删除第 index 页（0 基）：重打包 zip/cbz，被删页进 .gallery/trash/pages/。
+#[tauri::command]
+async fn gallery_page_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    index: i64,
+) -> Result<i64, String> {
+    let app = app.clone();
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            crate::page_ops::page_delete(&app, &library.conn, &library.root, id, index)
+        })
+    })
+    .await
+}
+
+/// 追加图片：原生选择器挑图，追加到包尾。返回（新增页数，总页数）。
+#[tauri::command]
+async fn gallery_page_add(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(usize, i64), String> {
+    let app = app.clone();
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            crate::page_ops::page_add(&app, &library.conn, &library.root, id)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 async fn set_note(
     state: State<'_, AppState>,
     id: i64,
@@ -2596,6 +2643,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             scan_library,
             query_archives,
             set_rating,
+            gallery_page_list,
+            gallery_page_delete,
+            gallery_page_add,
             set_note,
             delete_archive,
             restore_archive,

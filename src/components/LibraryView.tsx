@@ -2269,8 +2269,9 @@ export default function LibraryView({
             <span className="nav-count">{collections.length}</span>
           </button>
 
-          {!collectionsCollapsed &&
-            collections.map((collection, index) => {
+          {!collectionsCollapsed && (
+            <>
+            {collections.map((collection, index) => {
             const isRenaming = renamingCollectionId === collection.id;
             if (isRenaming) {
               return (
@@ -2411,7 +2412,22 @@ export default function LibraryView({
                 </div>
               </div>
             );
-          })}
+            })}
+
+            {/* 散图收藏夹并入收藏夹组（管理员 2026-11-26：取消分栏，都折叠进收藏夹） */}
+          <div className={`nav-row${looseView ? " is-active" : ""}`}>
+            <button
+              type="button"
+              className={`nav-item${looseView ? " is-active" : ""}`}
+              onClick={() => setLooseView((open) => !open)}
+              title="散图收藏夹：单图多区收藏，文件夹形式只记引用"
+            >
+              <FolderIcon width={16} height={16} />
+              <span className="nav-label">散图收藏夹</span>
+            </button>
+          </div>
+            </>
+          )}
 
           <div className="nav-divider" aria-hidden="true" />
 
@@ -2440,16 +2456,6 @@ export default function LibraryView({
           >
             <BookIcon width={16} height={16} />
             <span className="nav-label">待看目录</span>
-          </button>
-
-          <button
-            type="button"
-            className={`nav-item${looseView ? " is-active" : ""}`}
-            onClick={() => setLooseView((open) => !open)}
-            title="散图收藏夹：单图多区收藏，文件夹形式只记引用"
-          >
-            <FolderIcon width={16} height={16} />
-            <span className="nav-label">散图收藏夹</span>
           </button>
 
           <div className="nav-divider" aria-hidden="true" />

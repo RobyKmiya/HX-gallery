@@ -8834,3 +8834,36 @@ body.is-splitting {
   margin-top: 10px;
 }
 .settings-library-ops .settings-hint { flex-basis: 100%; }
+
+/* 详情页：图片管理（单页增删）。 */
+.page-ops { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.page-ops-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  display: flex;
+  flex-direction: column;
+}
+.page-ops-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+.page-ops-row:last-child { border-bottom: none; }
+.page-ops-index {
+  min-width: 34px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.page-ops-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-soft);
+}
