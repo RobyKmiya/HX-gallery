@@ -567,6 +567,14 @@ fn adblock_url_blocked(uri: &tauri::http::Uri) -> bool {
         "aff_id=",
         "affiliate_id=",
         "click_id=",
+        // 2026-11-26 补：ourdreamland.ai 这类广告跳转常用 clickid/tracker/ref 组合。
+        // ref= 太宽（正常站也用），只认 ref=tr / ref=ad 这种推广值。
+        "clickid=",
+        "tracker=",
+        "affiliate=",
+        "ref=tr",
+        "ref=ad",
+        "ref=aff",
     ];
     let query = uri.query().unwrap_or("").to_lowercase();
     !query.is_empty() && TRACKING_PARAMS.iter().any(|param| query.contains(param))
@@ -1752,6 +1760,35 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
 (function () {
   if (window.__xkKeys) return;
   window.__xkKeys = true;
+  // SPA 路由（pushState/replaceState）不会触发引擎的 on_navigation，
+  // 地址栏会一直停在进入时的 URL（管理员 2026-11-26：拿不到画廊链接）。
+  // hook history 把真实地址推给引擎。
+  (function () {
+    function report() {
+      try {
+        (window.__xkReqQ = window.__xkReqQ || []).push({
+          action: "noteUrl",
+          url: location.href,
+        });
+      } catch (e) {}
+    }
+    try {
+      var push = history.pushState;
+      history.pushState = function () {
+        var result = push.apply(this, arguments);
+        report();
+        return result;
+      };
+      var replace = history.replaceState;
+      history.replaceState = function () {
+        var result = replace.apply(this, arguments);
+        report();
+        return result;
+      };
+    } catch (e) {}
+    window.addEventListener("popstate", report);
+    window.addEventListener("hashchange", report);
+  })();
   // 默认开；引擎在每次「加载完成」和「保存设置」后写入真实开关值。
   if (window.__xkShortcuts === undefined) window.__xkShortcuts = true;
   function push(action, extra) {
@@ -2101,6 +2138,16 @@ fn handle_toolbar_action(
         "back" => history_action(label, "back"),
         "forward" => history_action(label, "forward"),
         "reload" => history_action(label, "reload"),
+        // SPA 路由通知（pushState/replaceState/popstate）：更新激活标签的真实 URL。
+        "noteUrl" => {
+            let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            if !url.is_empty() {
+                if let Some(tab_id) = with_state(label, |state| state.active.clone()) {
+                    note_tab_url(label, &tab_id, url);
+                }
+            }
+            Ok(())
+        }
         // 元素选择器（画匣盾悬浮圆点）：把选中的选择器永久写进屏蔽列表。
         "blockElement" => {
             let selector = req.get("selector").and_then(|v| v.as_str()).unwrap_or("");

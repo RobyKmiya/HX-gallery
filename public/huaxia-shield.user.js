@@ -40,6 +40,8 @@
     "exoclick", "popads", "popcash", "propellerads", "trafficjunky",
     "juicyads", "adsterra", "hilltopads", "onclickmega", "clickadu",
     "popunder", "popmyads", "adcash", "adspyglass", "tsyndicate",
+    // 2026-11-26 补：ourdreamland.ai 那类推广跳转的参数组合。
+    "clickid=", "tracker=", "affiliate=", "ref=tr", "ref=ad", "ref=aff",
   ];
 
   function isAdUrl(url) {
