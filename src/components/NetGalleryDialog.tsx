@@ -5,7 +5,7 @@ import type { NetDlStatus } from "../types";
 import { CloseIcon, PlayIcon, PauseIcon, TrashIcon } from "./Icons";
 
 /**
- * 网络画集下载管理器。
+ * 链接下载下载管理器。
  *
  * 管理员 2026-11-26：多链接下载时画匣卡死、操作不了；要能「细看每项、预览内容、
  * 启停各项、并行下载」。后端已改成多任务（每项独立状态/取消/暂停 + 全局闸门），
@@ -255,7 +255,7 @@ export default function NetGalleryDialog({
       >
         <header className="modal-title-row">
           <div>
-            <h2>网络画集</h2>
+            <h2>链接下载</h2>
             <p className="modal-hint">
               贴作品页链接，解析标题 / 标签 / 页数，下载整本打包入库。多项并行，每项可单独启停。
             </p>

@@ -8807,3 +8807,30 @@ body.is-splitting {
 }
 .wallpaper-lock-hint { top: 18px; }
 .wallpaper-lock-tip { bottom: 14px; }
+
+/* 侧栏库信息卡压缩版 + 设置页库操作区。 */
+.library-card.is-compact { padding: 10px 12px; }
+.library-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.library-line strong {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library-line span {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.settings-library-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.settings-library-ops .settings-hint { flex-basis: 100%; }

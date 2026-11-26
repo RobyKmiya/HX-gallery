@@ -1,7 +1,7 @@
 /**
  * 工作台多标签（P1，方案见 docs/浏览器内置阅读器方案.md）。
  *
- * 形态：顶部标签条。主页与「标签中心 / 回收站 / 发版 / 设置 / 网络画集」
+ * 形态：顶部标签条。主页与「标签中心 / 回收站 / 发版 / 设置 / 链接下载」
  * 都是标签，共用同一个 LibraryView 实例（按 activeKind 内部分发渲染），
  * 浏览器标签：url 为空时显示 React 新页（NewTab），有 url 才挂原生子 webview。
  *
@@ -73,7 +73,7 @@ const TAB_TITLE: Record<TabKind, string> = {
   trash: "回收站",
   release: "发版",
   settings: "设置",
-  net: "网络画集",
+  net: "链接下载",
 };
 
 const KNOWN_KINDS = Object.keys(TAB_TITLE) as TabKind[];

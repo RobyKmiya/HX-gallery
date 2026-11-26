@@ -45,8 +45,19 @@ type SettingsTab =
   | "guide"
   | "more";
 
+interface LibraryOps {
+  importing: boolean;
+  scanning: boolean;
+  onPickFiles: () => void;
+  onPickFolder: () => void;
+  onRunScan: () => void;
+  onSwitchLibrary: () => void;
+}
+
 interface SettingsDialogProps {
   library: LibraryState;
+  /** 库操作（导入/重扫/切换目录）：从侧栏迁移过来，侧栏只留浏览。 */
+  libraryOps?: LibraryOps;
   /** 收藏夹列表：启动页「指定收藏」下拉用。 */
   collections?: Collection[];
   viewMode: ViewMode;
@@ -93,6 +104,7 @@ const FIXED_KEYS: { keys: string; action: string }[] = [
  */
 export default function SettingsDialog({
   library,
+  libraryOps,
   collections = [],
   viewMode,
   onViewModeChange,
@@ -547,6 +559,43 @@ export default function SettingsDialog({
                 <p className="settings-hint">
                   更换库目录请用左上角的库选择器；封面缓存与备份都在库目录的 .gallery 下。
                 </p>
+                {libraryOps && (
+                  <div className="settings-library-ops">
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-compact"
+                      disabled={libraryOps.importing}
+                      onClick={libraryOps.onPickFiles}
+                    >
+                      导入压缩包
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-compact"
+                      disabled={libraryOps.importing}
+                      onClick={libraryOps.onPickFolder}
+                    >
+                      导入文件夹
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-compact"
+                      disabled={libraryOps.scanning || libraryOps.importing}
+                      onClick={libraryOps.onRunScan}
+                    >
+                      {libraryOps.scanning ? "正在同步…" : "重新扫描"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-quiet btn-compact"
+                      disabled={libraryOps.importing}
+                      onClick={libraryOps.onSwitchLibrary}
+                    >
+                      切换库目录
+                    </button>
+                    <p className="settings-hint">导入与扫描从侧栏迁到这里，侧栏只留浏览。</p>
+                  </div>
+                )}
               </>
             )}
 

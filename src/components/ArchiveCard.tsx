@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { assetUrl } from "../api";
 import { formatBytes, formatDate, formatDateTime } from "../format";
 import type { ArchiveCardData } from "../types";
@@ -74,12 +74,32 @@ function ArchiveCard({
       ? "继续阅读"
       : "开始阅读";
 
+  // 单击延迟 240ms 再开详情：详情抽屉一弹出来网格就重排，双击的第二下
+  // 会落在别的卡片上（「双击点歪」，辅屏上必现）。延迟期间来了第二下就
+  // 取消详情、直接开看。
+  const clickTimerRef = useRef<number | null>(null);
+  const clearClickTimer = () => {
+    if (clickTimerRef.current !== null) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+  };
+  useEffect(() => clearClickTimer, []);
+
   const activate = () => {
     if (selectionMode && onToggleSelect) {
       onToggleSelect(card.id);
-    } else {
-      onOpen(card);
+      return;
     }
+    if (!onOpenReader) {
+      onOpen(card);
+      return;
+    }
+    clearClickTimer();
+    clickTimerRef.current = window.setTimeout(() => {
+      clickTimerRef.current = null;
+      onOpen(card);
+    }, 240);
   };
 
   return (
@@ -99,7 +119,8 @@ function ArchiveCard({
       onClick={activate}
       onDoubleClick={(event) => {
         if (!onOpenReader) return;
-        // 双击是「直接开看」：别让单击的详情再拦一次。
+        // 双击是「直接开看」：把还没落地的单击详情取消掉。
+        clearClickTimer();
         event.preventDefault();
         event.stopPropagation();
         onOpenReader(card);

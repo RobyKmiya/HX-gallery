@@ -162,7 +162,7 @@ export default function NewTab({ libraryName, onNavigate, onOpenTab, onBrowse }:
             </button>
             <button type="button" onClick={() => onOpenTab("net")}>
               <span className="new-tab-glyph">↓</span>
-              <span>网络画集</span>
+              <span>链接下载</span>
             </button>
           </div>
 

@@ -288,3 +288,13 @@ export function DownloadIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** 设置：齿轮。 */
+export function GearIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 16 16" width={props.width ?? 16} height={props.height ?? 16} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="2.4" />
+      <path d="M8 1.6l1 1.9 2.1-.4 1.2 1.8-1.3 1.7 1.3 1.7-1.2 1.8-2.1-.4-1 1.9-1-1.9-2.1.4-1.2-1.8 1.3-1.7-1.3-1.7 1.2-1.8 2.1.4z" />
+    </svg>
+  );
+}

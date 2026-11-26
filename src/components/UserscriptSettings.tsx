@@ -87,7 +87,7 @@ export default function UserscriptSettings() {
       <h3>用户脚本（油猴）</h3>
       <p className="settings-hint">
         支持 Chrome/Edge 生态的 .user.js；脚本在「画匣浏览器」的内容页执行，画匣自己的库页面不跑。
-        与「网络画集」面板里那份脚本列表是同一套。
+        与「链接下载」面板里那份脚本列表是同一套。
       </p>
 
       <div className="browser-data-toolbar">

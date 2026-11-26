@@ -80,6 +80,7 @@ import {AlertIcon,
   RefreshIcon,
   SearchIcon,
   StarIcon,
+  GearIcon,
   SwapIcon,
   TagIcon,
   TrashIcon, DownloadIcon } from "./Icons";
@@ -389,7 +390,7 @@ export default function LibraryView({
   const [filterOpen, setFilterOpen] = useState(false);
   const [tagQuery, setTagQuery] = useState("");
 
-  // 每次进主页自动刷一次库：网页端织机下完包、网络画集入库后，
+  // 每次进主页自动刷一次库：网页端织机下完包、链接下载入库后，
   // 回到主页就能立刻看到新内容，不用手动刷新（管理员 2026-11-25 要求）。
   useEffect(() => {
     void onLibraryChanged?.();
@@ -2210,17 +2211,15 @@ export default function LibraryView({
           </button>
         </div>
 
-        <section className="library-card">
-          <p className="eyebrow">CURRENT LIBRARY</p>
-          <h2 title={library.libraryName ?? ""}>
-            {library.libraryName ?? "未命名库"}
-          </h2>
-          <p className="library-path" title={library.libraryPath ?? ""}>
-            {library.libraryPath}
-          </p>
-          <div className="library-stats">
-            <span>{library.archiveCount} 个画集</span>
-            <span>{formatBytes(library.totalSize)}</span>
+        <section
+          className="library-card is-compact"
+          title={`${library.libraryName ?? "未命名库"}\n${library.libraryPath ?? ""}`}
+        >
+          <div className="library-line">
+            <strong>{library.libraryName ?? "未命名库"}</strong>
+            <span>
+              {library.archiveCount} 个 · {formatBytes(library.totalSize)}
+            </span>
           </div>
           {library.missingCount > 0 && (
             <div className="missing-chip">
@@ -2255,7 +2254,7 @@ export default function LibraryView({
             title="贴作品页链接，下载整本并入库"
           >
             <DownloadIcon />
-            <span className="nav-label">网络画集</span>
+            <span className="nav-label">链接下载</span>
           </button>
 
           <button
@@ -2471,7 +2470,7 @@ export default function LibraryView({
             onClick={() => onOpenTab?.("settings")}
             title="统一设置：视图 / 快捷键 / 存储 / 各面板入口"
           >
-            <SwapIcon width={16} height={16} />
+            <GearIcon width={16} height={16} />
             <span className="nav-label">设置</span>
           </button>
 
@@ -2524,40 +2523,7 @@ export default function LibraryView({
           </button>
         </nav>
 
-        <div className="sidebar-actions">
-          <button
-            className="btn btn-primary"
-            onClick={() => void pickFiles()}
-            disabled={importing}
-          >
-            <ImportIcon />
-            导入压缩包
-          </button>
-          <button
-            className="btn btn-ghost"
-            onClick={() => void pickFolder()}
-            disabled={importing}
-          >
-            <FolderIcon />
-            导入文件夹
-          </button>
-          <button
-            className="btn btn-ghost"
-            onClick={() => void runScan(false)}
-            disabled={scanning || importing}
-          >
-            <RefreshIcon />
-            {scanning ? "正在同步…" : "重新扫描"}
-          </button>
-          <button
-            className="btn btn-quiet"
-            onClick={onSwitchLibrary}
-            disabled={importing}
-          >
-            <SwapIcon />
-            切换库目录
-          </button>
-        </div>
+
 
         <div className="sidebar-footer">
           <span className="footer-dot" />
@@ -4144,6 +4110,14 @@ export default function LibraryView({
             embedded
             active={activeKind === "settings"}
             library={library}
+            libraryOps={{
+              importing,
+              scanning,
+              onPickFiles: () => void pickFiles(),
+              onPickFolder: () => void pickFolder(),
+              onRunScan: () => void runScan(false),
+              onSwitchLibrary,
+            }}
             collections={collections}
             viewMode={viewMode}
             onViewModeChange={setViewMode}
