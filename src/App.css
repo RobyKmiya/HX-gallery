@@ -7643,6 +7643,16 @@ body.is-splitting {
   flex-direction: column;
 }
 
+/* 面板「始终挂载 + 显隐」：slot 撑满标签区，hidden 的 slot 彻底不占位。 */
+.panel-tab-slot {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.panel-tab-slot[hidden] {
+  display: none !important;
+}
+
 /* ---------- 启动遮罩（--masked 雏形） ---------- */
 .startup-mask {
   position: fixed;

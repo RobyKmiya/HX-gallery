@@ -4104,57 +4104,62 @@ export default function LibraryView({
 
       </div>
 
-      {/* 非 home 标签：在这里统一分发嵌入式面板，标签壳只管激活哪个 kind。 */}
-      {activeKind !== "home" && (
-        <div className="panel-tab-host">
-          {activeKind === "tags" && (
-            <TagCenter
-              embedded
-              onClose={() => onActivateTab?.("home")}
-              onNotify={notify}
-              onChanged={loadTags}
-              onBrowseTag={browseTag}
-            />
-          )}
-          {activeKind === "trash" && (
-            <TrashCenter
-              embedded
-              onClose={() => onActivateTab?.("home")}
-              onChanged={refreshAfterTrashChange}
-              onNotify={notify}
-            />
-          )}
-          {activeKind === "release" && (
-            <ReleasePanel
-              embedded
-              onClose={() => onActivateTab?.("home")}
-              onNotify={notify}
-            />
-          )}
-          {activeKind === "settings" && (
-            <SettingsDialog
-              embedded
-              library={library}
-              collections={collections}
-              viewMode={viewMode}
-              onViewModeChange={setViewMode}
-              detailDock={detailDock}
-              onDetailDockChange={setDetailDock}
-              onOpenTagCenter={() => onOpenTab?.("tags")}
-              onOpenD2={() => setD2PanelOpen(true)}
-              onOpenRelease={() => onOpenTab?.("release")}
-              onClose={() => onActivateTab?.("home")}
-            />
-          )}
-          {activeKind === "net" && (
-            <NetGalleryDialog
-              embedded
-              onClose={() => onActivateTab?.("home")}
-              onDone={() => void onLibraryChanged?.()}
-            />
-          )}
+      {/* 非 home 标签：统一分发嵌入式面板。
+          2026-11-26：面板改为「始终挂载 + hidden 显隐」，不再条件渲染卸载。
+          管理员反馈标签离开再返回状态全重置（搜索词/子页签/输入草稿/进度）。
+          注意：隐藏的面板仍活着，所以给有全局键盘监听的面板传 active=false，
+          避免它们抢 Esc / 快捷键。 */}
+      <div className="panel-tab-host">
+        <div hidden={activeKind !== "tags"} className="panel-tab-slot">
+          <TagCenter
+            embedded
+            active={activeKind === "tags"}
+            onClose={() => onActivateTab?.("home")}
+            onNotify={notify}
+            onChanged={loadTags}
+            onBrowseTag={browseTag}
+          />
         </div>
-      )}
+        <div hidden={activeKind !== "trash"} className="panel-tab-slot">
+          <TrashCenter
+            embedded
+            active={activeKind === "trash"}
+            onClose={() => onActivateTab?.("home")}
+            onChanged={refreshAfterTrashChange}
+            onNotify={notify}
+          />
+        </div>
+        <div hidden={activeKind !== "release"} className="panel-tab-slot">
+          <ReleasePanel
+            embedded
+            onClose={() => onActivateTab?.("home")}
+            onNotify={notify}
+          />
+        </div>
+        <div hidden={activeKind !== "settings"} className="panel-tab-slot">
+          <SettingsDialog
+            embedded
+            active={activeKind === "settings"}
+            library={library}
+            collections={collections}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            detailDock={detailDock}
+            onDetailDockChange={setDetailDock}
+            onOpenTagCenter={() => onOpenTab?.("tags")}
+            onOpenD2={() => setD2PanelOpen(true)}
+            onOpenRelease={() => onOpenTab?.("release")}
+            onClose={() => onActivateTab?.("home")}
+          />
+        </div>
+        <div hidden={activeKind !== "net"} className="panel-tab-slot">
+          <NetGalleryDialog
+            embedded
+            onClose={() => onActivateTab?.("home")}
+            onDone={() => void onLibraryChanged?.()}
+          />
+        </div>
+      </div>
 
       {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
     </LibraryActionsContext.Provider>

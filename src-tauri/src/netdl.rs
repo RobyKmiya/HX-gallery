@@ -448,6 +448,16 @@ fn parse_image_url(html: &str) -> Option<String> {
     crate::gallery_dl::extract_image_url(html)
 }
 
+/// 从图片 URL 取不带扩展名的文件名（18comic 的 md5 要用，如 `00042`）。
+fn image_file_stem(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let name = without_query.rsplit('/').next().unwrap_or(without_query);
+    name.rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(name)
+        .to_string()
+}
+
 fn extension_of(url: &str) -> &'static str {
     let lower = url.to_ascii_lowercase();
     for ext in ["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif"] {
@@ -542,12 +552,68 @@ pub async fn net_dl_preview(app: AppHandle, url: String) -> Result<NetDlStatus, 
     })
 }
 
+/// 取 nhentai v2 作品 JSON。
+///
+/// 2026-11-26 根因：旧接口 `/api/gallery/{id}` 已下线，只回一句
+/// "Use new API https://nhentai.net/api/v2/docs"（JSON 解析失败 → 回退 HTML）；
+/// 而作品页改成 JS 渲染，HTML 里没有 data-src/i.nhentai.net，回退也失败 →
+/// 管理员看到「nhentai 页面里没找到图片」。新版走 `/api/v2/galleries/{id}`，
+/// 且 `pages[].path` 直接给出图片路径，不再依赖 HTML 抓取。
+fn fetch_nhentai_v2(app: &AppHandle, id: &str) -> Result<serde_json::Value, String> {
+    let raw = fetch_text(app, &format!("https://nhentai.net/api/v2/galleries/{id}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        format!("nhentai v2 接口返回不是 JSON（可能被验证页拦截）：{e}；原文：{}", &raw[..raw.len().min(120)])
+    })?;
+    if value.get("error").is_some() {
+        return Err(format!(
+            "nhentai 作品 {id} 不存在或已删除：{}",
+            value["error"].as_str().unwrap_or("")
+        ));
+    }
+    Ok(value)
+}
+
+/// v2 的 pages[].path 形如 galleries/4354295/1.webp，拼图床域名取原图。
+fn nhentai_v2_image_urls(value: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(pages) = value["pages"].as_array() {
+        for page in pages {
+            let path = page["path"].as_str().unwrap_or("").trim_start_matches('/');
+            if path.is_empty() {
+                continue;
+            }
+            let ext = page["path"].as_str().and_then(|p| p.rsplit('.').next()).unwrap_or("jpg");
+            let base = path.strip_suffix(ext).unwrap_or(path).trim_end_matches('.');
+            // 缩略图路径（.../1t.webp）去掉 t 后缀拿原图，兼容站点偶尔回缩略图。
+            let original = if base.ends_with('t')
+                && base
+                    .rsplit('/')
+                    .next()
+                    .map(|s| s[..s.len() - 1].chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or(false)
+            {
+                let trimmed = &base[..base.len() - 1];
+                format!("{trimmed}.{ext}")
+            } else {
+                path.to_string()
+            };
+            let url = if original.starts_with("http") {
+                original
+            } else {
+                format!("https://i.nhentai.net/{original}")
+            };
+            if !out.contains(&url) {
+                out.push(url);
+            }
+        }
+    }
+    out
+}
+
 fn preview_nhentai(app: &AppHandle, url: &str) -> Result<NetDlStatus, String> {
     let id = nhentai_gallery_id(url)
         .ok_or("链接里没找到作品 id（应形如 nhentai.net/g/615034/）".to_string())?;
-    let raw = fetch_text(app, &format!("https://nhentai.net/api/gallery/{id}"))?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("nhentai 接口返回不是 JSON（可能被登录墙或验证页拦截）：{e}"))?;
+    let value = fetch_nhentai_v2(app, &id)?;
     let title = value["title"]["pretty"]
         .as_str()
         .or_else(|| value["title"]["english"].as_str())
@@ -759,22 +825,13 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
     let id = nhentai_gallery_id(url)
         .ok_or("链接里没找到作品 id（应形如 nhentai.net/g/615034/）".to_string())?;
     set_status(|s| s.stage = format!("读取 nhentai 作品 {id}…"));
-    let api = format!("https://nhentai.net/api/gallery/{id}");
-    let raw = fetch_text(app, &api)?;
-    // 接口被 Cloudflare / 登录墙拦时会返回 HTML；退回解析作品页本体
-    // （管理员 2026-11-26：接口返回不是 JSON）。
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return run_nhentai_from_html(app, url),
-    };
-    let media_id = value["media_id"]
-        .as_str()
-        .ok_or("nhentai 接口没有 media_id（可能未登录或作品已删除）")?
-        .to_string();
-    let pages = value["images"]["pages"]
-        .as_array()
-        .ok_or("nhentai 接口没有 pages")?
-        .clone();
+    // 旧接口 /api/gallery/{id} 已下线（返回 "Use new API ..."），改走 v2；
+    // v2 的 pages[].path 直接给出图片路径，作品页 HTML 兜底已无意义。
+    let value = fetch_nhentai_v2(app, &id)?;
+    let urls = nhentai_v2_image_urls(&value);
+    if urls.is_empty() {
+        return Err("nhentai 接口没返回图片页（作品可能已删除或需要登录）".to_string());
+    }
     let title = value["title"]["pretty"]
         .as_str()
         .or_else(|| value["title"]["english"].as_str())
@@ -807,24 +864,11 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
     set_status(|s| {
         s.title = title.clone();
         s.tags = flat;
-        s.total = pages.len();
+        s.total = urls.len();
         s.stage = "准备下载…".to_string();
     });
 
-    let mut urls: Vec<String> = Vec::new();
-    for (index, page) in pages.iter().enumerate() {
-        let ext = match page["t"].as_str().unwrap_or("j") {
-            "p" => "png",
-            "g" => "gif",
-            "w" => "webp",
-            _ => "jpg",
-        };
-        urls.push(format!(
-            "https://i.nhentai.net/galleries/{media_id}/{}.{ext}",
-            index + 1
-        ));
-    }
-    download_and_package(app, urls, &title, &tag_map, url)
+    download_and_package(app, urls, &title, &tag_map, url, None)
 }
 
 fn nhentai_gallery_id(url: &str) -> Option<String> {
@@ -863,7 +907,7 @@ fn run_nhentai_from_html(app: &AppHandle, page_url: &str) -> Result<String, Stri
         s.tags = flat;
         s.total = urls.len();
     });
-    download_and_package(app, urls, &title, &tag_map, page_url)
+    download_and_package(app, urls, &title, &tag_map, page_url, None)
 }
 
 fn nhentai_title_from_html(html: &str) -> Option<String> {
@@ -963,12 +1007,60 @@ fn run_18comic_download(app: &AppHandle, url: &str) -> Result<String, String> {
                 .collect::<Vec<_>>()
         })
         .collect();
+    // 18comic 对图片做了竖条混淆，浏览器端用 JS/CSS 拼回正常画面；curl 拿到的
+    // 是混淆原图，必须按站点算法还原，否则下出来的漫画一条条错位（管理员截图）。
+    let aid = jm_aid_from_url(url).unwrap_or(0);
+    let scramble_id = jm_scramble_id(&html).unwrap_or(220980); // 站点兜底值
     set_status(|s| {
         s.title = title.clone();
         s.tags = flat;
         s.total = urls.len();
+        if aid > 0 {
+            s.stage = format!("下载 {} 张（含图片还原）…", urls.len());
+        }
     });
-    download_and_package(app, urls, &title, &tags, url)
+    let jm = if aid > 0 {
+        Some(JmDecode { scramble_id, aid })
+    } else {
+        None
+    };
+    download_and_package(app, urls, &title, &tags, url, jm.as_ref())
+}
+
+/// 从 /photo/{id} 或 /album/{id} 取章节/作品 id。
+fn jm_aid_from_url(url: &str) -> Option<u64> {
+    for marker in ["/photo/", "/album/"] {
+        if let Some(pos) = url.find(marker) {
+            let rest = &url[pos + marker.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// 页面里的 `var scramble_id = 123456;`，取不到返回 None（调用方用站点默认值）。
+fn jm_scramble_id(html: &str) -> Option<u64> {
+    const KEY: &str = "scramble_id";
+    let mut rest = html;
+    while let Some(pos) = rest.find(KEY) {
+        let after = &rest[pos + KEY.len()..];
+        // 形如 ` = 268850;` 或 `=268850`，宽松取等号后的数字。
+        if let Some(eq) = after.find('=') {
+            let digits: String = after[eq + 1..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+        rest = &after[1..];
+    }
+    None
 }
 
 fn jm_title(html: &str) -> Option<String> {
@@ -1065,13 +1157,21 @@ fn jm_tags(html: &str) -> HashMap<String, Vec<String>> {
     out
 }
 
+/// 18comic 图片解码参数（站点把图片切成竖条打乱，见 jm_decode.rs）。
+struct JmDecode {
+    scramble_id: u64,
+    aid: u64,
+}
+
 /// 下载一组图片并打包入库（nhentai API / HTML / 18comic 共用）。
+/// `jm` 非空时，每张图下载完按 18comic 算法还原混淆。
 fn download_and_package(
     app: &AppHandle,
     urls: Vec<String>,
     title: &str,
     tag_map: &HashMap<String, Vec<String>>,
     referer: &str,
+    jm: Option<&JmDecode>,
 ) -> Result<String, String> {
     let count = urls.len();
     if count == 0 {
@@ -1106,6 +1206,22 @@ fn download_and_package(
                 let dest = temp.join(format!("{index:04}.{}", extension_of(image)));
                 match fetch_file(app, image, referer, &dest) {
                     Ok(()) => {
+                        // 18comic：按站点算法把混淆的竖条还原成正常图。
+                        if let Some(jm) = jm {
+                            let filename = image_file_stem(image);
+                            let num = crate::jm_decode::segmentation_num(
+                                jm.scramble_id,
+                                jm.aid,
+                                &filename,
+                            );
+                            if num > 0 {
+                                if let Err(error) = crate::jm_decode::decode_image_file(&dest, num) {
+                                    set_status(|s| {
+                                        s.stage = format!("第 {} 张还原失败：{error}", index + 1)
+                                    });
+                                }
+                            }
+                        }
                         if let Ok(mut guard) = files.lock() {
                             guard[index] = Some(dest);
                         }

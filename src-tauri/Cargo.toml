@@ -38,6 +38,8 @@ image-webp = "0.2.4"
 # 读取 gif 帧延迟/帧数时只用块头信息（next_frame_info），不逐帧解像素，避免进页卡顿
 gif = "0.14"
 base64 = "0.23"
+# 18comic 图片混淆：get_num 用 md5(aid+文件名) 算分割数
+md-5 = "0.10"
 walkdir = "2.5.0"
 natord = "1.0.9"
 blake3 = "1.8.7"

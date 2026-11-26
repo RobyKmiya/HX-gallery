@@ -156,12 +156,20 @@ function BrowserHost({
       try {
         // home 按设置走：默认 huaxia:newtab（⌂ 发事件 → 主窗切回新页），
         // 而不是把 e-hentai 当成主页（管理员 2026-11-25 反馈的小房子问题）。
+        // 先量占位矩形再开引擎：Rust 从第一帧就把工具栏摆到位。
+        // 以前不传，Rust 用 (0,0)+900px 建工具栏，首次 embed_sync 又必失败，
+        // 顶栏会错位并列 ~800ms（管理员 2026-11-26 截图）。
+        const rectEl = holderRef.current;
+        const rect = rectEl?.getBoundingClientRect();
         const opened = await api.d2EmbedOpen({
           url,
           adblock: true,
           home,
           // 设置→广告拦截 里的「显示元素选择圆点」开关（默认开）。
           picker: window.localStorage.getItem("huaxia.d2.picker") !== "0",
+          rect: rect
+            ? { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
+            : undefined,
         });
         if (dead) {
           void api.d2EmbedClose(opened).catch(() => {});

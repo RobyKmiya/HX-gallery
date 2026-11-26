@@ -492,6 +492,7 @@ fn open_browser_window(
             extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
             userscript_store: crate::userscripts::store_dir(app),
             size: (1180.0, 860.0),
+            initial_rect: None,
             adblock,
             picker: true,
             log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),
@@ -1304,6 +1305,15 @@ pub fn d2_open(
 
 // ---------- 内置模式（P0 探针）：浏览器引擎挂进 main 窗 ----------
 
+/// 前端在打开内置浏览器前量好的占位矩形（逻辑像素），用于第一帧摆位。
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct EmbedRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// 打开内置浏览器（宿主 = main 窗）。返回引擎 label，前端拿它做 embed 同步。
 #[tauri::command]
 pub fn d2_embed_open(
@@ -1312,6 +1322,7 @@ pub fn d2_embed_open(
     adblock: Option<bool>,
     home: Option<String>,
     picker: Option<bool>,
+    rect: Option<EmbedRect>,
 ) -> Result<String, String> {
     let parsed = normalize_url(&url)?;
     crate::browser::start_watchdog(&app);
@@ -1335,6 +1346,7 @@ pub fn d2_embed_open(
     let label_for_thread = label.clone();
     let adblock = adblock.unwrap_or(true);
     let picker = picker.unwrap_or(true);
+    let initial_rect = rect.map(|r| (r.x, r.y, r.w, r.h));
     // add_child 不能在同步命令回调里跑（会死锁），照旧线程 + 日志回执。
     std::thread::spawn(move || {
         match open_browser_window_embedded(
@@ -1345,6 +1357,7 @@ pub fn d2_embed_open(
             &home,
             picker,
             host,
+            initial_rect,
         ) {
             Ok(opened) => log(&app_for_thread, &format!("内置浏览器已挂载：{opened}")),
             Err(error) => {
@@ -1381,6 +1394,7 @@ fn open_browser_window_embedded(
     home: &str,
     picker: bool,
     host: tauri::Window,
+    initial_rect: Option<(f64, f64, f64, f64)>,
 ) -> Result<String, String> {
     let app_for_log = app.clone();
     let home_url = tauri::Url::parse(home)
@@ -1395,6 +1409,7 @@ fn open_browser_window_embedded(
             extra_init_scripts: vec![D2_INIT_SCRIPT.to_string()],
             userscript_store: crate::userscripts::store_dir(app),
             size: (900.0, 600.0),
+            initial_rect,
             adblock,
             picker,
             log: Some(std::sync::Arc::new(move |message| log(&app_for_log, message))),

@@ -36,6 +36,8 @@ interface TagCenterProps {
   onBrowseTag?: (tagId: number) => void;
   /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮（标签条负责关）。 */
   embedded?: boolean;
+  /** 始终挂载的面板：非激活时忽略键盘事件，避免隐藏面板抢 Esc。 */
+  active?: boolean;
 }
 
 type TagTab = "active" | "categories" | "deleted";
@@ -46,6 +48,7 @@ export default function TagCenter({
   onChanged: onChangedProp,
   onBrowseTag: onBrowseTagProp,
   embedded = false,
+  active = true,
 }: TagCenterProps) {
   // 标签里没有外层传 props 时，用 LibraryView 注入的库级动作桥兜底。
   const actions = useLibraryActions();
@@ -177,7 +180,7 @@ export default function TagCenter({
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (!active || event.key !== "Escape") return;
       if (graph) {
         setGraph(null);
       } else {
@@ -186,7 +189,7 @@ export default function TagCenter({
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [graph, onClose]);
+  }, [active, graph, onClose]);
 
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();

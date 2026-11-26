@@ -13,6 +13,8 @@ interface TrashCenterProps {
   onNotify?: (message: string, kind?: "info" | "success" | "error") => void;
   /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮。 */
   embedded?: boolean;
+  /** 始终挂载的面板：非激活时忽略键盘事件。 */
+  active?: boolean;
 }
 
 const TAB_LABELS: Record<TrashTab, string> = {
@@ -26,6 +28,7 @@ export default function TrashCenter({
   onChanged: onChangedProp,
   onNotify: onNotifyProp,
   embedded = false,
+  active = true,
 }: TrashCenterProps) {
   const actions = useLibraryActions();
   const onNotify = onNotifyProp ?? actions.notify;
@@ -62,11 +65,11 @@ export default function TrashCenter({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (active && event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [active, onClose]);
 
   function confirmPurge(key: string): boolean {
     if (pendingPurgeKey !== key) {

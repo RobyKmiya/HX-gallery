@@ -58,6 +58,8 @@ interface SettingsDialogProps {
   onOpenRelease: () => void;
   /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮。 */
   embedded?: boolean;
+  /** 始终挂载的面板：非激活时不监听快捷键录制。 */
+  active?: boolean;
   onClose: () => void;
 }
 
@@ -100,6 +102,7 @@ export default function SettingsDialog({
   onOpenD2,
   onOpenRelease,
   embedded = false,
+  active = true,
   onClose,
 }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
@@ -147,7 +150,7 @@ export default function SettingsDialog({
 
   // 录制：按下的第一枚非修饰键直接作为绑定；Esc 取消。
   useEffect(() => {
-    if (!recording) return;
+    if (!active || !recording) return;
     const onKeyDown = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopPropagation();
@@ -181,7 +184,7 @@ export default function SettingsDialog({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [recording, bindings]);
+  }, [active, recording, bindings]);
 
   return (
     <div

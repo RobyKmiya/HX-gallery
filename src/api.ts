@@ -361,6 +361,8 @@ export const api = {
     adblock?: boolean;
     home?: string;
     picker?: boolean;
+    /** 初始占位矩形（逻辑像素）：从第一帧就把工具栏摆到位，避免开新标签时顶栏错位。 */
+    rect?: { x: number; y: number; w: number; h: number };
   }) => invoke<string>("d2_embed_open", args),
 
   /** 同步 React 占位矩形（逻辑像素）。 */

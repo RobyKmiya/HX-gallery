@@ -322,6 +322,10 @@ pub struct BrowserOptions {
     pub userscript_store: Option<PathBuf>,
     /// 窗口初始尺寸。
     pub size: (f64, f64),
+    /// 内置模式的初始占位矩形（逻辑像素 x,y,w,h）。从第一帧就按它摆工具栏，
+    /// 避免开新标签时工具栏停在 (0,0)+900px 与 React 顶栏错位并列（2026-11-26）。
+    /// None = 前端没给，仍用 size 兜底（老调用方不变）。
+    pub initial_rect: Option<(f64, f64, f64, f64)>,
     /// 广告拦截开关（管理员 11-23；标签页创建时读一次）。
     pub adblock: bool,
     /// 网页元素选择器悬浮圆点开关（管理员 2026-11-26）。
@@ -340,6 +344,7 @@ impl Default for BrowserOptions {
             extra_init_scripts: Vec::new(),
             userscript_store: None,
             size: (1180.0, 860.0),
+            initial_rect: None,
             adblock: true,
             picker: true,
             log: None,
@@ -759,11 +764,21 @@ fn open_hosted(
 
             let scale = window.scale_factor().unwrap_or(1.0);
             let inner = window.inner_size().unwrap_or_default();
-            // 内置模式：React 马上会同步真实占位矩形，先按约定尺寸兜底摆位。
+            // 内置模式优先用前端传来的真实占位矩形，从第一帧就摆到位；
+            // 没传才退回约定尺寸（老调用方行为不变）。
             let (width, height) = if embedded {
-                (opts.size.0, opts.size.1)
+                opts.initial_rect
+                    .map(|(_, _, w, h)| (w, h))
+                    .unwrap_or((opts.size.0, opts.size.1))
             } else {
                 (inner.width as f64 / scale, inner.height as f64 / scale)
+            };
+            let (origin_x, origin_y) = if embedded {
+                opts.initial_rect
+                    .map(|(x, y, _, _)| (x, y))
+                    .unwrap_or((0.0, 0.0))
+            } else {
+                (0.0, 0.0)
             };
 
             // 工具栏：本仓公共页（真实占位，不遮内容；与引擎走队列契约）。
@@ -779,7 +794,7 @@ fn open_hosted(
                             "browser-toolbar.html".into()
                         }),
                     ),
-                    LogicalPosition::new(0.0, 0.0),
+                    LogicalPosition::new(origin_x, origin_y),
                     LogicalSize::new(width, TOOLBAR_HEIGHT),
                 )
                 .map_err(|error| format!("创建工具栏失败：{error}"))?;
@@ -808,7 +823,7 @@ fn open_hosted(
             let webview = window
                 .add_child(
                     tab_builder,
-                    LogicalPosition::new(0.0, TOOLBAR_HEIGHT),
+                    LogicalPosition::new(origin_x, origin_y + TOOLBAR_HEIGHT),
                     LogicalSize::new(width, height - TOOLBAR_HEIGHT),
                 )
                 .map_err(|error| format!("创建内容标签失败：{error}"))?;
@@ -831,7 +846,9 @@ fn open_hosted(
                 settings: load_settings_with_fallback(Some(opts.home.as_str())),
                 settings_view: None,
                 embedded,
-                embed_rect: None,
+                // 有初始矩形就直接记为已同步：register_browser 里的 reposition
+                // 会立刻按它摆位，不必等前端 800ms 兜底，顶栏不会先错位一瞬。
+                embed_rect: if embedded { opts.initial_rect } else { None },
                 opts,
                 last_pushed: String::new(),
             };
@@ -955,19 +972,28 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
     // add_child 不能在同步命令/事件回调里跑（tauri 明说会死锁），线程 + channel。
     std::thread::spawn(move || {
         let run = || -> Result<(), String> {
-            let (window, extra_init, store) = with_state(&label_for_tab, |state| {
+            let (window, extra_init, store, embed_rect) = with_state(&label_for_tab, |state| {
                 (
                     state.window.clone(),
                     state.opts.extra_init_scripts.clone(),
                     state.opts.userscript_store.clone(),
+                    state.embed_rect,
                 )
             })
             .ok_or("浏览器不存在")?;
 
             let scale = window.scale_factor().unwrap_or(1.0);
             let inner = window.inner_size().unwrap_or_default();
-            let width = inner.width as f64 / scale;
-            let height = inner.height as f64 / scale;
+            // 内置模式用占位矩形摆新标签；没有才退回整窗尺寸。
+            let (origin_x, origin_y, width, height) = match embed_rect {
+                Some((x, y, w, h)) => (x, y, w, h),
+                None => (
+                    0.0,
+                    0.0,
+                    inner.width as f64 / scale,
+                    inner.height as f64 / scale,
+                ),
+            };
 
             let mut tab_builder = WebviewBuilder::new(
                 tab_id_for_thread.clone(),
@@ -985,7 +1011,7 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
             let webview = window
                 .add_child(
                     tab_builder,
-                    LogicalPosition::new(0.0, TOOLBAR_HEIGHT),
+                    LogicalPosition::new(origin_x, origin_y + TOOLBAR_HEIGHT),
                     LogicalSize::new(width, height - TOOLBAR_HEIGHT),
                 )
                 .map_err(|error| format!("创建标签失败：{error}"))?;
