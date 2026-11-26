@@ -32,6 +32,7 @@ import type {
   HistoryEntry,
   CredentialEntry,
   SiteLoginEntry,
+  NetDlStatus,
   BlockedEntry,
 } from "./types";
 
@@ -77,33 +78,25 @@ export const api = {
   d2CurrentUrl: () => invoke<string>("d2_current_url"),
 
   /** 网络画集：解析作品页（标题 / 标签 / 页数），不下载。 */
-  netDlPreview: (url: string) =>
-    invoke<{
-      running: boolean;
-      finished: boolean;
-      error: string;
-      stage: string;
-      done: number;
-      total: number;
-      title: string;
-      tags: [string, string][];
-      path: string;
-    }>("net_dl_preview", { url }),
-  /** 网络画集：开始下载整本并入库。 */
+  netDlPreview: (url: string) => invoke<NetDlStatus>("net_dl_preview", { url }),
+  /** 网络画集：开始下载整本（旧单任务入口，保留兼容）。 */
   netDlStart: (url: string) => invoke<void>("net_dl_start", { url }),
-  netDlStatus: () =>
-    invoke<{
-      running: boolean;
-      finished: boolean;
-      error: string;
-      stage: string;
-      done: number;
-      total: number;
-      title: string;
-      tags: [string, string][];
-      path: string;
-    }>("net_dl_status"),
+  netDlStatus: () => invoke<NetDlStatus>("net_dl_status"),
   netDlCancel: () => invoke<void>("net_dl_cancel"),
+
+  // ---------- 网络画集多任务管理器（2026-11-26：并行 + 单项启停） ----------
+  /** 以指定 id 启动一项下载（id 由前端 crypto.randomUUID() 生成）。 */
+  netDlStartTask: (taskId: string, url: string) =>
+    invoke<void>("net_dl_start_task", { taskId, url }),
+  /** 一次拉回所有任务的进度快照。 */
+  netDlStatusAll: () => invoke<[string, NetDlStatus][]>("net_dl_status_all"),
+  /** 只取消某一项（立即 kill 在途 curl）。 */
+  netDlCancelTask: (taskId: string) => invoke<void>("net_dl_cancel_task", { taskId }),
+  /** 暂停 / 继续某一项。 */
+  netDlPauseTask: (taskId: string, paused: boolean) =>
+    invoke<void>("net_dl_pause_task", { taskId, paused }),
+  /** 从列表移除某一项（会先取消）。 */
+  netDlRemoveTask: (taskId: string) => invoke<void>("net_dl_remove_task", { taskId }),
 
   /** 打开独立的下载面板（范围 / 并发 / 打包都在那儿定）。 */
   dlOpenPanel: () => invoke<void>("dl_open_panel"),

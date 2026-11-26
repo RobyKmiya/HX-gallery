@@ -344,6 +344,19 @@ export interface CredentialEntry {
   updatedAt: number;
 }
 
+/** 网络画集下载任务状态（多任务管理器：每项一份）。 */
+export interface NetDlStatus {
+  running: boolean;
+  finished: boolean;
+  error: string;
+  stage: string;
+  done: number;
+  total: number;
+  title: string;
+  tags: [string, string][];
+  path: string;
+}
+
 /** 站点登录态快照一条（Cookie 密文不下发，只显示站点与保存时间）。 */
 export interface SiteLoginEntry {
   id: number;

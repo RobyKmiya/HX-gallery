@@ -2546,8 +2546,13 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             gallery_dl::dl_open_folder,
             netdl::net_dl_preview,
             netdl::net_dl_start,
+            netdl::net_dl_start_task,
             netdl::net_dl_status,
-            netdl::net_dl_cancel
+            netdl::net_dl_status_all,
+            netdl::net_dl_cancel,
+            netdl::net_dl_cancel_task,
+            netdl::net_dl_pause_task,
+            netdl::net_dl_remove_task
         ])
         .on_window_event(|window, event| {
             if matches!(

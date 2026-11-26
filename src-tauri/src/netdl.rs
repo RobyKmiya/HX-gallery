@@ -16,16 +16,20 @@
 //!   缩略图分页 `?p=N`，每个缩略图链到 `/s/<hash>/<id>-<n>`；
 //! - 图片页：原图在 `<img id="img" src="...">`。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-/// 并发上限：图站高峰期 8 路足够，再高只会触发限速。
+/// 单本内部的图片并发上限：图站高峰期 8 路足够，再高只会触发限速。
 const CONCURRENCY: usize = 8;
+/// 全局图片并发闸门：多本并行时也别把 WebView2 / 系统代理打爆。
+/// 2026-11-26 卡死根因之一：8 路 worker × 多本同时请求，WebView2 探针互等。
+const GLOBAL_CONCURRENCY: usize = 12;
 /// 单页缩略图数量（站点固定 20，用来算总页数）。
 const THUMBS_PER_PAGE: usize = 20;
 
@@ -42,32 +46,205 @@ pub struct NetDlStatus {
     pub path: String,
 }
 
-static STATUS: Mutex<Option<NetDlStatus>> = Mutex::new(None);
-static CANCEL: AtomicBool = AtomicBool::new(false);
+/// 一个下载任务：进度 + 各自的取消/暂停标志 + 在途 curl 子进程。
+/// 每项独立，才能做到「启停单项」而互不影响。
+struct DownloadTask {
+    status: Mutex<NetDlStatus>,
+    cancel: AtomicBool,
+    pause: AtomicBool,
+    /// 当前在途的 curl 子进程（图片下载），取消时 kill 掉立即生效。
+    children: Mutex<Vec<std::process::Child>>,
+}
+
+impl DownloadTask {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(NetDlStatus::default()),
+            cancel: AtomicBool::new(false),
+            pause: AtomicBool::new(false),
+            children: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        // 立刻 kill 所有在途 curl：老实现只置标志，worker 卡在 300s 的 curl 里
+        // 根本看不到，表现就是「取消没反应、画匣卡死」。
+        if let Ok(mut children) = self.children.lock() {
+            for child in children.iter_mut() {
+                let _ = child.kill();
+            }
+        }
+        if let Ok(mut status) = self.status.lock() {
+            status.stage = "正在取消…".to_string();
+        }
+    }
+}
+
+/// 全部任务。key = task_id（前端生成，uuid）。
+static TASKS: Mutex<Option<HashMap<String, Arc<DownloadTask>>>> = Mutex::new(None);
+
+/// 当前线程所属的任务。worker 线程开始时绑定，之后所有 set_status /
+/// cookie_for / fetch_file 都自动认领自己的任务，不用改函数签名。
+thread_local! {
+    static CURRENT_TASK: RefCell<Option<Arc<DownloadTask>>> = const { RefCell::new(None) };
+}
+
+/// 全局图片并发闸门（信号量用 AtomicUsize 手写，避免引入依赖）。
+static GATE_USED: AtomicUsize = AtomicUsize::new(0);
+
+struct GatePermit;
+impl Drop for GatePermit {
+    fn drop(&mut self) {
+        GATE_USED.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 拿一个全局并发名额；满了就等（每 50ms 重试，同时响应取消）。
+fn acquire_gate(task: &DownloadTask) -> Result<GatePermit, String> {
+    loop {
+        if task.cancel.load(Ordering::SeqCst) {
+            return Err("已取消".to_string());
+        }
+        let used = GATE_USED.load(Ordering::SeqCst);
+        if used < GLOBAL_CONCURRENCY
+            && GATE_USED
+                .compare_exchange(used, used + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            return Ok(GatePermit);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// 暂停时阻塞等待，直到继续 / 取消。只在每张图片之间检查，不打断在途请求。
+fn wait_if_paused(task: &DownloadTask) -> Result<(), String> {
+    while task.pause.load(Ordering::SeqCst) {
+        if task.cancel.load(Ordering::SeqCst) {
+            return Err("已取消".to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if task.cancel.load(Ordering::SeqCst) {
+        return Err("已取消".to_string());
+    }
+    Ok(())
+}
+
+/// 每个网络请求前的统一检查：暂停则等待，取消则报错退出。
+fn wait_check() -> Result<(), String> {
+    if let Some(task) = current_task() {
+        wait_if_paused(&task)?;
+    }
+    Ok(())
+}
+
+fn current_task() -> Option<Arc<DownloadTask>> {
+    CURRENT_TASK.with(|cell| cell.borrow().clone())
+}
 
 fn set_status(f: impl FnOnce(&mut NetDlStatus)) {
-    let mut guard = match STATUS.lock() {
+    let Some(task) = current_task() else { return };
+    if let Ok(mut guard) = task.status.lock() {
+        f(&mut guard);
+    }
+}
+
+fn task_is_canceled() -> bool {
+    current_task()
+        .map(|t| t.cancel.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// 前端批量轮询：一次拿回所有任务快照（不再每本单独轮询）。
+#[tauri::command]
+pub fn net_dl_status_all() -> Vec<(String, NetDlStatus)> {
+    let guard = match TASKS.lock() {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    let status = guard.get_or_insert_with(NetDlStatus::default);
-    f(status);
+    let Some(map) = guard.as_ref() else { return Vec::new() };
+    map.iter()
+        .filter_map(|(id, task)| {
+            task.status.lock().ok().map(|s| (id.clone(), s.clone()))
+        })
+        .collect()
 }
 
-/// 前端轮询用的进度快照。
+/// 兼容旧调用：返回当前线程任务的状态（前端迁移期用）。
 #[tauri::command]
 pub fn net_dl_status() -> NetDlStatus {
-    let guard = match STATUS.lock() {
+    let guard = match TASKS.lock() {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    guard.clone().unwrap_or_default()
+    guard
+        .as_ref()
+        .and_then(|map| map.values().find(|t| t.status.lock().map(|s| s.running).unwrap_or(false)))
+        .and_then(|t| t.status.lock().ok().map(|s| s.clone()))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
+pub fn net_dl_cancel_task(task_id: String) {
+    let guard = match TASKS.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(task) = guard.as_ref().and_then(|map| map.get(&task_id)) {
+        task.cancel();
+    }
+}
+
+#[tauri::command]
+pub fn net_dl_pause_task(task_id: String, paused: bool) {
+    let guard = match TASKS.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(task) = guard.as_ref().and_then(|map| map.get(&task_id)) {
+        task.pause.store(paused, Ordering::SeqCst);
+        if let Ok(mut status) = task.status.lock() {
+            status.stage = if paused {
+                "已暂停".to_string()
+            } else {
+                "继续下载…".to_string()
+            };
+        }
+    }
+}
+
+#[tauri::command]
+pub fn net_dl_remove_task(task_id: String) {
+    let guard = match TASKS.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(map) = guard.as_ref() {
+        if let Some(task) = map.get(&task_id) {
+            task.cancel(); // 移除前先杀掉在途请求
+        }
+    }
+    if let Ok(mut guard) = TASKS.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(&task_id);
+        }
+    }
+}
+
+/// 兼容旧的单全局取消（前端旧按钮 / 紧急停止用）：取消所有任务。
+#[tauri::command]
 pub fn net_dl_cancel() {
-    CANCEL.store(true, Ordering::SeqCst);
-    set_status(|s| s.stage = "正在取消…".to_string());
+    let guard = match TASKS.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(map) = guard.as_ref() {
+        for task in map.values() {
+            task.cancel();
+        }
+    }
 }
 
 /// 本机代理：**系统代理优先**，环境变量兜底。
@@ -141,16 +318,52 @@ fn curl_base() -> std::process::Command {
     command
 }
 
+/// Cookie 按 host 缓存。卡死根因：每张图都问 WebView2（alive_labels 持锁做 5s 探针），
+/// 8 路 worker × 几百张图 = 上千次 WebView2 同步调用，主线程互等整窗卡死。
+/// 现在一个 host 只问一次，结果缓存复用（登录态变了可清缓存）。
+static COOKIE_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// 清空 Cookie 缓存（用户重新登录后调用，避免沿用旧登录态）。
+pub fn clear_cookie_cache() {
+    if let Ok(mut guard) = COOKIE_CACHE.lock() {
+        *guard = None;
+    }
+}
+
 fn cookie_for(app: &AppHandle, url: &str) -> String {
-    // 登录态在**浏览器的 webview** 里，不在工作台主窗。以前只问主窗，
-    // 结果 curl 裸奔：exhentai 重定向到登录页甚至打转（退出码 47），
-    // nhentai/18comic 被当未登录（管理员 2026-11-26 的报错）。
-    // 现在先问「当前打开目标站点」的浏览器 webview，再退回其它浏览器，最后才问主窗。
     let Ok(parsed) = tauri::Url::parse(url) else {
         return String::new();
     };
     let target_host = parsed.host_str().unwrap_or("").to_lowercase();
 
+    // ① 缓存命中直接返回：热路径上彻底不碰 WebView2（防卡死的关键）。
+    if let Ok(guard) = COOKIE_CACHE.lock() {
+        if let Some(map) = guard.as_ref() {
+            if let Some(cached) = map.get(&target_host) {
+                return cached.clone();
+            }
+        }
+    }
+
+    // ② 落盘快照：DPAPI 加密存在库里，同样不经 WebView2。
+    //    这是「保存登录态」后最稳的来源，优先于问活着的浏览器窗口。
+    let mut result = crate::stored_cookie_for_host(app, &target_host).unwrap_or_default();
+
+    // ③ 快照没有才问 WebView2（一次性，之后进缓存）。
+    if result.is_empty() {
+        result = cookie_from_webview(app, &parsed, &target_host);
+    }
+
+    // 写缓存（空值也缓存：没登录就别每张图反复问 WebView2）。
+    if let Ok(mut guard) = COOKIE_CACHE.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(target_host, result.clone());
+    }
+    result
+}
+
+/// 从活着的浏览器 webview / 主窗取 cookie（慢路径，仅缓存未命中时调用一次）。
+fn cookie_from_webview(app: &AppHandle, parsed: &tauri::Url, target_host: &str) -> String {
     let mut labels: Vec<String> = crate::browser::alive_labels();
     labels.sort_by_key(|label| {
         let matched = crate::browser::active_tab_url(label)
@@ -181,7 +394,7 @@ fn cookie_for(app: &AppHandle, url: &str) -> String {
     // 兜底：主窗（同一 WebView2 profile 时也能查到）。原来这里只要 cookies_for_url
     // 成功就 return，哪怕拿到的是空列表——那样下面的落盘快照永远没机会生效。
     if let Some(window) = app.get_webview_window("main") {
-        if let Ok(list) = window.cookies_for_url(parsed) {
+        if let Ok(list) = window.cookies_for_url(parsed.clone()) {
             if !list.is_empty() {
                 return list
                     .iter()
@@ -192,21 +405,14 @@ fn cookie_for(app: &AppHandle, url: &str) -> String {
         }
     }
 
-    // 最后的兜底：落盘登录态快照。浏览窗口可能已关、画匣也可能重启过——这正是
-    // 管理员 2026-11-26「每次下载都要重新登录」的根因：老实现只认活着的 webview。
-    // 快照是用户登录后在设置里点「保存当前站点登录态」抓下来的，DPAPI 加密存库。
-    if let Some(saved) = crate::stored_cookie_for_host(app, &target_host) {
-        if !saved.is_empty() {
-            return saved;
-        }
-    }
     String::new()
 }
 
 /// 抓一段文本（页面 HTML）。
 fn fetch_text(app: &AppHandle, url: &str) -> Result<String, String> {
+    wait_check()?;
     let mut command = curl_base();
-    command.arg("--max-time").arg("60");
+    command.arg("--max-time").arg("45");
     let cookie = cookie_for(app, url);
     if !cookie.is_empty() {
         command.arg("-H").arg(format!("Cookie: {cookie}"));
@@ -256,13 +462,14 @@ fn fetch_html_smart(app: &AppHandle, url: &str) -> Result<String, String> {
 
 /// 抓一个二进制文件到磁盘。
 fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<(), String> {
+    wait_check()?;
     let mut command = curl_base();
     command
         .arg("--fail")
         .arg("--max-time")
-        .arg("300")
+        .arg("90")
         .arg("--retry")
-        .arg("3");
+        .arg("1");
     let cookie = cookie_for(app, url);
     if !cookie.is_empty() {
         command.arg("-H").arg(format!("Cookie: {cookie}"));
@@ -279,9 +486,59 @@ fn fetch_file(app: &AppHandle, url: &str, referer: &str, dest: &Path) -> Result<
         .arg("-o")
         .arg(dest)
         .arg(url);
-    let output = command
-        .output()
-        .map_err(|e| format!("调用 curl 失败：{e}"))?;
+    // spawn 而非 output：把子进程登记到当前任务，取消时 kill 立即中断。
+    // 轮询 try_wait 而不阻塞在 output()：这样取消能及时生效，也不会在
+    // 主线程互等（老实现 Command::output 最长 300s 不可中断 = 卡死）。
+    let mut child = command.spawn().map_err(|e| format!("调用 curl 失败：{e}"))?;
+    let pid = child.id();
+    if let Some(task) = current_task() {
+        if let Ok(mut children) = task.children.lock() {
+            children.push(child);
+        }
+    }
+    // 轮到本任务的 child：它一直在表里，由 cancel() 负责 kill。
+    loop {
+        if task_is_canceled() {
+            return Err("已取消".to_string());
+        }
+        let (done, found) = if let Some(task) = current_task() {
+            if let Ok(mut children) = task.children.lock() {
+                match children.iter_mut().find(|c| c.id() == pid) {
+                    Some(c) => (c.try_wait().map_err(|e| format!("等待 curl 失败：{e}"))?, true),
+                    None => (None, false), // 句柄不在表里（理论上只会被 cancel 清掉）
+                }
+            } else {
+                (None, true)
+            }
+        } else {
+            (None, true)
+        };
+        if done.is_some() || !found {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    // 请求完成，取回 child 读 stdout（content_type）。
+    let mut child = if let Some(task) = current_task() {
+        if let Ok(mut children) = task.children.lock() {
+            children
+                .iter()
+                .position(|c| c.id() == pid)
+                .map(|i| children.remove(i))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .ok_or_else(|| "curl 子进程句柄丢失".to_string())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("读取 curl 结果失败：{e}"))?;
+    // 被取消时 child 已被 kill，这里不报具体错，让上层循环看到 CANCEL 自行退出。
+    if task_is_canceled() {
+        return Err("已取消".to_string());
+    }
     if !output.status.success() {
         return Err(format!(
             "下载失败（curl 退出码 {:?}）：{url}",
@@ -410,7 +667,7 @@ fn collect_page_links(app: &AppHandle, gallery_url: &str, total: usize) -> Resul
     };
     let base = gallery_url.trim_end_matches('/');
     for page in 0..pages {
-        if CANCEL.load(Ordering::SeqCst) {
+        if task_is_canceled() {
             break;
         }
         set_status(|s| s.stage = format!("收集第 {}/{} 页缩略图…", page + 1, pages));
@@ -647,35 +904,69 @@ fn preview_nhentai(app: &AppHandle, url: &str) -> Result<NetDlStatus, String> {
     })
 }
 
-/// 开始下载整本并入库。
+/// 开始下载整本并入库（多任务版：每项有自己的 task_id，可独立启停）。
+/// 前端传 task_id（uuid）；同一 id 重复调用会先取消旧任务。
 #[tauri::command]
-pub async fn net_dl_start(app: AppHandle, url: String) -> Result<(), String> {
-    CANCEL.store(false, Ordering::SeqCst);
-    set_status(|s| {
-        *s = NetDlStatus {
-            running: true,
-            stage: "解析作品页…".to_string(),
-            ..Default::default()
+pub async fn net_dl_start_task(app: AppHandle, task_id: String, url: String) -> Result<(), String> {
+    let task = Arc::new(DownloadTask::new());
+    {
+        let mut guard = match TASKS.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let map = guard.get_or_insert_with(HashMap::new);
+        // 同 id 已存在：先取消旧的（防重复下载）。
+        if let Some(old) = map.get(&task_id) {
+            old.cancel();
         }
-    });
+        if let Ok(mut status) = task.status.lock() {
+            *status = NetDlStatus {
+                running: true,
+                stage: "解析作品页…".to_string(),
+                ..Default::default()
+            };
+        }
+        map.insert(task_id.clone(), task.clone());
+    }
+
     let handle = app.clone();
+    let task_for_thread = task.clone();
     std::thread::spawn(move || {
+        // 绑定当前线程的任务身份：之后所有 set_status / cookie_for / fetch_file
+        // 都自动认领这一项，不用改几百处调用签名。
+        CURRENT_TASK.with(|cell| *cell.borrow_mut() = Some(task_for_thread.clone()));
         let result = run_download(&handle, &url);
         match result {
             Ok(path) => set_status(|s| {
                 s.running = false;
                 s.finished = true;
-                s.path = path;
-                s.stage = format!("完成：共 {} 张", s.done);
+                let canceled = path.is_empty();
+                s.path = if canceled { "已取消".to_string() } else { path };
+                s.stage = if canceled {
+                    "已取消".to_string()
+                } else {
+                    format!("完成：共 {} 张", s.done)
+                };
             }),
             Err(error) => set_status(|s| {
                 s.running = false;
-                s.error = error.clone();
-                s.stage = format!("失败：{error}");
+                let canceled = error == "已取消";
+                s.error = if canceled { String::new() } else { error.clone() };
+                s.stage = if canceled {
+                    "已取消".to_string()
+                } else {
+                    format!("失败：{error}")
+                };
             }),
         }
     });
     Ok(())
+}
+
+/// 开始下载整本并入库（旧单任务兼容入口：用固定 id）。
+#[tauri::command]
+pub async fn net_dl_start(app: AppHandle, url: String) -> Result<(), String> {
+    net_dl_start_task(app, "__legacy__".to_string(), url).await
 }
 
 fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
@@ -738,10 +1029,20 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
     let files: Mutex<Vec<Option<PathBuf>>> = Mutex::new(vec![None; count]);
     let first_error: Mutex<Option<String>> = Mutex::new(None);
 
+    let worker_task = current_task();
+    // 共享变量取引用：move 闭包只搬引用 + task Arc，不搬所有权，
+    // 否则 scope 外后续代码（打包/入库）就拿不到 files/temp 了。
+    let (cursor, done) = (&cursor, &done);
+    let (files, first_error) = (&files, &first_error);
+    let (links, temp, app) = (&links, &temp, &app);
     std::thread::scope(|scope| {
         for _ in 0..CONCURRENCY.min(count) {
-            scope.spawn(|| loop {
-                if CANCEL.load(Ordering::SeqCst) {
+            let worker_task = worker_task.clone();
+            scope.spawn(move || {
+                // 子线程继承任务身份，set_status / fetch_file 才能认领这一项。
+                CURRENT_TASK.with(|cell| *cell.borrow_mut() = worker_task);
+                loop {
+                if task_is_canceled() {
                     return;
                 }
                 let index = cursor.fetch_add(1, Ordering::SeqCst);
@@ -750,6 +1051,13 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
                 }
                 let entry = &links[index];
                 let result = (|| -> Result<PathBuf, String> {
+                    // 全局闸门：多本并行时总并发不超 GLOBAL_CONCURRENCY。
+                    let _gate = if let Some(task) = current_task() {
+                        Some(acquire_gate(&task)?)
+                    } else {
+                        None
+                    };
+                    wait_check()?;
                     let page = fetch_text(app, entry)?;
                     let image = parse_image_url(&page)
                         .ok_or_else(|| format!("图片页里没找到原图：{entry}"))?;
@@ -769,18 +1077,22 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
                         });
                     }
                     Err(error) => {
-                        if let Ok(mut guard) = first_error.lock() {
-                            if guard.is_none() {
-                                *guard = Some(error);
+                        // 取消 / 暂停退出不算真失败，别记进 first_error。
+                        if error != "已取消" {
+                            if let Ok(mut guard) = first_error.lock() {
+                                if guard.is_none() {
+                                    *guard = Some(error);
+                                }
                             }
                         }
                     }
+                }
                 }
             });
         }
     });
 
-    if CANCEL.load(Ordering::SeqCst) {
+    if task_is_canceled() {
         let _ = std::fs::remove_dir_all(&temp);
         set_status(|s| s.stage = "已取消".to_string());
         return Ok(String::new());
@@ -793,10 +1105,11 @@ fn run_download(app: &AppHandle, url: &str) -> Result<String, String> {
     }
 
     let ordered: Vec<PathBuf> = files
-        .into_inner()
-        .map_err(|e| format!("收集结果失败：{e}"))?
-        .into_iter()
+        .lock()
+        .map_err(|_| "收集结果失败：状态锁已损坏".to_string())?
+        .iter()
         .flatten()
+        .cloned()
         .collect();
     if ordered.is_empty() {
         let _ = std::fs::remove_dir_all(&temp);
@@ -1244,19 +1557,40 @@ fn download_and_package(
     let files: Mutex<Vec<Option<PathBuf>>> = Mutex::new(vec![None; count]);
     let first_error: Mutex<Option<String>> = Mutex::new(None);
 
+    let worker_task = current_task();
+    let (cursor, done) = (&cursor, &done);
+    let (files, first_error) = (&files, &first_error);
+    let (urls, temp, app, referer) = (&urls, &temp, &app, &referer);
     std::thread::scope(|scope| {
         for _ in 0..CONCURRENCY.min(count) {
-            scope.spawn(|| loop {
-                if CANCEL.load(Ordering::SeqCst) {
+            let worker_task = worker_task.clone();
+            scope.spawn(move || {
+                CURRENT_TASK.with(|cell| *cell.borrow_mut() = worker_task);
+                loop {
+                if task_is_canceled() {
                     return;
                 }
                 let index = cursor.fetch_add(1, Ordering::SeqCst);
                 if index >= count {
                     return;
                 }
+                // 全局闸门 + 暂停等待：多本并行也不打爆 WebView2 / 代理。
+                let gate = if let Some(task) = current_task() {
+                    match acquire_gate(&task) {
+                        Ok(g) => Some(g),
+                        Err(_) => return,
+                    }
+                } else {
+                    None
+                };
+                if let Err(_) = wait_check() {
+                    return;
+                }
                 let image = &urls[index];
                 let dest = temp.join(format!("{index:04}.{}", extension_of(image)));
-                match fetch_file(app, image, referer, &dest) {
+                let fetch_result = fetch_file(app, image, referer, &dest);
+                drop(gate); // 图片抓完立刻释放名额
+                match fetch_result {
                     Ok(()) => {
                         // 18comic：按站点算法把混淆的竖条还原成正常图。
                         if let Some(jm) = jm {
@@ -1284,18 +1618,22 @@ fn download_and_package(
                         });
                     }
                     Err(error) => {
-                        if let Ok(mut guard) = first_error.lock() {
-                            if guard.is_none() {
-                                *guard = Some(error);
+                        // 取消 / 暂停退出不算真失败，别记进 first_error。
+                        if error != "已取消" {
+                            if let Ok(mut guard) = first_error.lock() {
+                                if guard.is_none() {
+                                    *guard = Some(error);
+                                }
                             }
                         }
                     }
+                }
                 }
             });
         }
     });
 
-    if CANCEL.load(Ordering::SeqCst) {
+    if task_is_canceled() {
         let _ = std::fs::remove_dir_all(&temp);
         set_status(|s| s.stage = "已取消".to_string());
         return Ok(String::new());
@@ -1308,10 +1646,11 @@ fn download_and_package(
     }
 
     let ordered: Vec<PathBuf> = files
-        .into_inner()
-        .map_err(|e| format!("收集结果失败：{e}"))?
-        .into_iter()
+        .lock()
+        .map_err(|_| "收集结果失败：状态锁已损坏".to_string())?
+        .iter()
         .flatten()
+        .cloned()
         .collect();
     if ordered.is_empty() {
         let _ = std::fs::remove_dir_all(&temp);

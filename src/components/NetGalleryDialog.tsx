@@ -1,33 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { notifyModalOpen, notifyModalClose } from "../modalBus";
-import { CloseIcon } from "./Icons";
+import type { NetDlStatus } from "../types";
+import { CloseIcon, PlayIcon, PauseIcon, TrashIcon } from "./Icons";
 
 /**
- * 网络画集下载：粘贴作品页链接 → 解析标题/标签/页数 → 下载整本并入库。
+ * 网络画集下载管理器。
  *
- * 管理员 2026-11-25 要求：能在画匣里直接按链接下书，别再开浏览器插件绕一圈。
- * 下载走 Rust 侧的 curl（复用主窗 cookie），标签随作品页一起抓，入库后
- * 在详情抽屉里就能看到。
+ * 管理员 2026-11-26：多链接下载时画匣卡死、操作不了；要能「细看每项、预览内容、
+ * 启停各项、并行下载」。后端已改成多任务（每项独立状态/取消/暂停 + 全局闸门），
+ * 这里做对应的任务卡片面板：一次轮询拉回所有任务，每项自己有 暂停/继续/取消/移除。
  */
 interface NetGalleryDialogProps {
   onClose: () => void;
-  /** 下载完成回调：让外层刷新库列表。 */
   onDone?: () => void;
-  /** 嵌入标签：不画全屏遮罩、不显示自带关闭按钮、不占用模态让位。 */
   embedded?: boolean;
 }
 
-interface NetDlStatus {
-  running: boolean;
-  finished: boolean;
-  error: string;
-  stage: string;
-  done: number;
-  total: number;
-  title: string;
-  tags: [string, string][];
-  path: string;
+interface DownloadItem {
+  id: string;
+  url: string;
+  status: NetDlStatus;
+  /** 预览元数据（解析后填，下载中也会随状态更新标题/标签）。 */
+  previewed: boolean;
 }
 
 const EMPTY: NetDlStatus = {
@@ -42,48 +37,98 @@ const EMPTY: NetDlStatus = {
   path: "",
 };
 
+function shortUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.hostname + (u.pathname.length > 1 ? u.pathname.slice(0, 42) : "");
+  } catch {
+    return url.length > 46 ? `${url.slice(0, 46)}…` : url;
+  }
+}
+
+function itemPercent(s: NetDlStatus): number {
+  return s.total > 0 ? Math.min(100, Math.round((s.done / s.total) * 100)) : 0;
+}
+
+function itemState(s: NetDlStatus): "idle" | "running" | "paused" | "done" | "failed" | "canceled" {
+  if (s.stage === "已暂停") return "paused";
+  if (s.stage === "已取消") return "canceled";
+  if (s.finished) return "done";
+  if (s.error) return "failed";
+  if (s.running) return "running";
+  return "idle";
+}
+
+const STATE_LABEL: Record<ReturnType<typeof itemState>, string> = {
+  idle: "等待",
+  running: "下载中",
+  paused: "已暂停",
+  done: "已完成",
+  failed: "失败",
+  canceled: "已取消",
+};
+
 export default function NetGalleryDialog({
   onClose,
   onDone,
   embedded = false,
 }: NetGalleryDialogProps) {
   const [url, setUrl] = useState("");
-  const [status, setStatus] = useState<NetDlStatus>(EMPTY);
-  const [busy, setBusy] = useState(false);
+  const [items, setItems] = useState<DownloadItem[]>([]);
   const [error, setError] = useState("");
-  const timerRef = useRef<number | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+  const doneNotified = useRef(false);
 
   useEffect(() => {
     if (!embedded) notifyModalOpen();
     return () => {
       if (!embedded) notifyModalClose();
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
+      if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
   }, [embedded]);
 
-  const preview = async () => {
-    const target = url.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-    if (!target) {
-      setError("先把作品页链接贴进来");
-      return;
-    }
-    setError("");
-    setBusy(true);
-    try {
-      const info = await api.netDlPreview(target);
-      setStatus(info);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
+  // 一次轮询拉回所有任务进度；这是唯一的定时器，不会再每项各开一个。
+  useEffect(() => {
+    if (items.length === 0) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const all = await api.netDlStatusAll();
+        if (!alive) return;
+        const map = new Map(all);
+        setItems((prev) =>
+          prev.map((item) => {
+            const status = map.get(item.id);
+            if (!status) return item;
+            return {
+              ...item,
+              status,
+              previewed: item.previewed || Boolean(status.title),
+            };
+          }),
+        );
+        // 全部结束且至少完成过一项 → 刷新库一次。
+        const allDone = all.length > 0 && all.every(([, s]) => !s.running);
+        if (allDone && !doneNotified.current) {
+          doneNotified.current = true;
+          onDone?.();
+        }
+        if (!allDone) doneNotified.current = false;
+      } catch {
+        /* 轮询失败下次再来，不打断 */
+      }
+    };
+    void tick();
+    pollRef.current = window.setInterval(() => void tick(), 600);
+    return () => {
+      alive = false;
+      if (pollRef.current !== null) window.clearInterval(pollRef.current);
+    };
+  }, [items.length, onDone]);
 
-  /**
-   * 多链接队列：一行一个，逐个下（引擎的抓取是复用同一个浏览器窗口，
-   * 并行会互相抢标签，所以串行更稳）。每本打完后接着下一本。
-   */
-  const start = async () => {
+  /** 开始：把每行链接做成一个独立任务，全部提交（后端并行 + 闸门限流）。 */
+  const startAll = async () => {
     const targets = url
       .split(/\r?\n+/)
       .map((line) => line.trim())
@@ -93,46 +138,81 @@ export default function NetGalleryDialog({
       return;
     }
     setError("");
-    setBusy(true);
-    for (let index = 0; index < targets.length; index++) {
-      const label = `第 ${index + 1}/${targets.length} 本`;
+    doneNotified.current = false;
+    const newItems: DownloadItem[] = targets.map((target) => ({
+      id: crypto.randomUUID(),
+      url: target,
+      status: { ...EMPTY, running: true, stage: "准备中…" },
+      previewed: false,
+    }));
+    setItems((prev) => [...prev, ...newItems]);
+    setUrl("");
+    for (const item of newItems) {
       try {
-        setStatus({ ...EMPTY, running: true, stage: `${label}：准备中…` });
-        await api.netDlStart(targets[index]);
-        await new Promise<void>((resolve) => {
-          const timer = window.setInterval(async () => {
-            try {
-              const next = await api.netDlStatus();
-              setStatus({ ...next, stage: `${label} · ${next.stage}` });
-              if (!next.running) {
-                window.clearInterval(timer);
-                resolve();
-              }
-            } catch {
-              window.clearInterval(timer);
-              resolve();
-            }
-          }, 700);
-        });
+        await api.netDlStartTask(item.id, item.url);
       } catch (e) {
-        setError(`${label} 失败：${String(e)}`);
+        setError(`提交失败：${String(e)}`);
+        setItems((prev) =>
+          prev.map((it) =>
+            it.id === item.id
+              ? { ...it, status: { ...EMPTY, error: String(e), stage: "提交失败" } }
+              : it,
+          ),
+        );
       }
     }
-    setBusy(false);
-    setStatus((prev) => ({ ...prev, running: false, finished: true }));
-    onDone?.();
   };
 
-  const cancel = async () => {
+  /** 预览单项：解析标题/标签/页数，填进卡片（不下载）。 */
+  const previewOne = async (item: DownloadItem) => {
     try {
-      await api.netDlCancel();
-    } catch {
-      /* 取消失败不影响轮询收尾 */
+      const info = await api.netDlPreview(item.url);
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === item.id
+            ? { ...it, status: { ...it.status, ...info, stage: info.stage || "已解析" }, previewed: true }
+            : it,
+        ),
+      );
+      setExpanded(item.id);
+    } catch (e) {
+      setError(`解析失败：${String(e)}`);
     }
   };
 
-  const percent =
-    status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
+  const togglePause = useCallback(async (item: DownloadItem) => {
+    const paused = itemState(item.status) !== "paused";
+    try {
+      await api.netDlPauseTask(item.id, paused);
+    } catch (e) {
+      setError(`操作失败：${String(e)}`);
+    }
+  }, []);
+
+  const cancelOne = useCallback(async (id: string) => {
+    try {
+      await api.netDlCancelTask(id);
+    } catch (e) {
+      setError(`取消失败：${String(e)}`);
+    }
+  }, []);
+
+  const removeOne = useCallback(async (id: string) => {
+    try {
+      await api.netDlRemoveTask(id);
+    } catch {
+      /* 移除本地项即可 */
+    }
+    setItems((prev) => prev.filter((it) => it.id !== id));
+  }, []);
+
+  const cancelAll = async () => {
+    for (const item of items) {
+      if (item.status.running) await cancelOne(item.id);
+    }
+  };
+
+  const activeCount = items.filter((it) => itemState(it.status) === "running" || itemState(it.status) === "paused").length;
 
   return (
     <div
@@ -141,145 +221,192 @@ export default function NetGalleryDialog({
     >
       <div
         className={`modal net-dl-dialog${embedded ? " is-embedded" : ""}`}
-        style={embedded ? undefined : { width: "min(620px, 92vw)" }}
+        style={embedded ? undefined : { width: "min(760px, 94vw)" }}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="modal-title-row">
           <div>
             <h2>网络画集</h2>
             <p className="modal-hint">
-              贴作品页链接（exhentai / e-hentai），抓全书图片和标签，打包进画匣。
+              贴作品页链接，解析标题 / 标签 / 页数，下载整本打包入库。多项并行，每项可单独启停。
             </p>
           </div>
-          {!embedded && (
-            <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-              <CloseIcon />
-            </button>
-          )}
+          <div className="net-dl-head-right">
+            {activeCount > 0 && (
+              <span className="status-chip net-dl-active">
+                <span className="net-dl-pulse" />
+                {activeCount} 项进行中
+              </span>
+            )}
+            {!embedded && (
+              <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+                <CloseIcon />
+              </button>
+            )}
+          </div>
         </header>
 
-        <div style={{ padding: "0 18px 8px" }}>
+        <section className="net-dl-compose">
           <textarea
             value={url}
             onChange={(event) => setUrl(event.target.value)}
-            placeholder={"一行一个作品页链接，例如：\nhttps://exhentai.org/g/1234567/abcdef1234/\nhttps://nhentai.net/g/615034/"}
+            placeholder={
+              "一行一个作品页链接，例如：\nhttps://18comic.vip/photo/1492995\nhttps://exhentai.org/g/1234567/abcdef1234/\nhttps://nhentai.net/g/615034/"
+            }
             spellCheck={false}
             rows={3}
-            style={{
-              width: "100%",
-              padding: "9px 11px",
-              borderRadius: 8,
-              border: "1px solid var(--line, #2a2a33)",
-              background: "var(--panel-2, #16161c)",
-              color: "var(--text, #e6e6ea)",
-              fontSize: 13,
-              resize: "vertical",
-              fontFamily: "inherit",
-            }}
+            className="net-dl-input"
             onKeyDown={(event) => {
               if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault();
-                void preview();
+                void startAll();
               }
             }}
           />
-          <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--text-dim, #9a9aa4)" }}>
-            支持多行：一行一个，会按顺序逐本下载。目前支持 exhentai / e-hentai / nhentai / 18comic（先贴单章 /photo/ 链接）。
-            若提示需要登录：在内置浏览器登录一次，再到「设置 → 浏览器数据 → 登录态」保存该站点域名，下载会自动沿用，不用每次重登。
-          </p>
+          <div className="net-dl-compose-bar">
+            <p className="net-dl-tip">
+              支持 exhentai / e-hentai / nhentai / 18comic（单章 /photo/）。
+              需要登录时，在内置浏览器登录后到「设置 → 浏览器数据 → 登录态」保存站点域名。
+            </p>
+            <button type="button" className="btn btn-primary" onClick={() => void startAll()}>
+              <span className="net-dl-btn-icon">＋</span> 加入下载
+            </button>
+          </div>
+        </section>
+
+        {error ? <p className="net-dl-error">{error}</p> : null}
+
+        <div className="net-dl-list-head">
+          <span>下载项</span>
+          <span className="net-dl-count">{items.length} 项</span>
+        </div>
+        <div className="net-dl-list">
+          {items.length === 0 ? (
+            <div className="empty-state net-dl-empty">
+              <div className="net-dl-empty-icon">⬇</div>
+              <p>还没有下载项</p>
+              <p className="net-dl-empty-sub">把作品页链接贴到上面，一行一个，点「加入下载」</p>
+            </div>
+          ) : (
+            items.map((item) => {
+              const state = itemState(item.status);
+              const percent = itemPercent(item.status);
+              const isOpen = expanded === item.id;
+              return (
+                <div className={`net-dl-item is-${state}`} key={item.id}>
+                  <div className="net-dl-item-main">
+                    <button
+                      type="button"
+                      className="net-dl-item-toggle"
+                      onClick={() => setExpanded(isOpen ? null : item.id)}
+                      title={isOpen ? "收起" : "细看 / 预览"}
+                    >
+                      {isOpen ? "▾" : "▸"}
+                    </button>
+                    <div className="net-dl-item-body">
+                      <div className="net-dl-item-line1">
+                        <span className="net-dl-item-title">
+                          {item.status.title || shortUrl(item.url)}
+                        </span>
+                        <span className={`net-dl-state net-dl-state-${state}`}>
+                          {STATE_LABEL[state]}
+                        </span>
+                      </div>
+                      <div className="net-dl-item-url">{shortUrl(item.url)}</div>
+                      <div className="net-dl-progress-row">
+                        <div className="progress-track net-dl-track">
+                          <div
+                            className={`progress-fill net-dl-fill${state === "paused" ? " is-paused" : ""}`}
+                            style={{ width: `${state === "done" ? 100 : percent}%` }}
+                          />
+                        </div>
+                        <span className="net-dl-percent">{percent}%</span>
+                      </div>
+                      <div className="net-dl-item-stage">
+                        {item.status.stage}
+                        {item.status.total > 0
+                          ? ` · ${item.status.done}/${item.status.total} 页`
+                          : ""}
+                      </div>
+                    </div>
+                    <div className="net-dl-item-actions">
+                      {!item.previewed && state !== "running" && (
+                        <button type="button" className="btn btn-quiet btn-compact" onClick={() => void previewOne(item)}>
+                          预览
+                        </button>
+                      )}
+                      {state === "running" || state === "paused" ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-quiet btn-compact"
+                            onClick={() => void togglePause(item)}
+                            title={state === "paused" ? "继续" : "暂停"}
+                          >
+                            {state === "paused" ? <PlayIcon /> : <PauseIcon />}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-quiet btn-compact net-dl-danger"
+                            onClick={() => void cancelOne(item.id)}
+                            title="取消"
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-quiet btn-compact net-dl-danger"
+                          onClick={() => void removeOne(item.id)}
+                          title="移除"
+                        >
+                          <TrashIcon />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {isOpen ? (
+                    <div className="net-dl-item-detail">
+                      <div className="net-dl-detail-url">{item.url}</div>
+                      {item.status.tags.length > 0 ? (
+                        <div className="tag-list net-dl-tags">
+                          {item.status.tags.slice(0, 60).map(([namespace, value]) => (
+                            <span className="tag-chip" key={`${namespace}:${value}`}>
+                              {namespace}: {value}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="net-dl-detail-hint">还没有标签，点「预览」解析作品页。</p>
+                      )}
+                      {item.status.error ? (
+                        <p className="net-dl-error">{item.status.error}</p>
+                      ) : null}
+                      {item.status.path && item.status.path !== "已取消" ? (
+                        <p className="net-dl-detail-hint">已入库：{item.status.path}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
         </div>
 
-        {status.title || status.total > 0 ? (
-          <div style={{ padding: "4px 18px 0" }}>
-            <p style={{ margin: "6px 0", fontSize: 14, fontWeight: 600 }}>
-              {status.title || "（未识别到标题）"}
-              {status.total > 0 ? ` · ${status.total} 页` : ""}
-            </p>
-            {status.tags.length > 0 ? (
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  gap: 6,
-                  maxHeight: 120,
-                  overflow: "auto",
-                  marginBottom: 6,
-                }}
-              >
-                {status.tags.slice(0, 60).map(([namespace, value]) => (
-                  <span
-                    key={`${namespace}:${value}`}
-                    style={{
-                      fontSize: 11,
-                      padding: "2px 7px",
-                      borderRadius: 999,
-                      background: "var(--panel-2, #1b1b22)",
-                      border: "1px solid var(--line, #2a2a33)",
-                      color: "var(--text-dim, #b6b6bf)",
-                    }}
-                  >
-                    {namespace}: {value}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {status.running || status.finished ? (
-          <div style={{ padding: "8px 18px 0" }}>
-            <div
-              style={{
-                height: 6,
-                borderRadius: 999,
-                background: "var(--panel-2, #1b1b22)",
-                overflow: "hidden",
-              }}
-            >
-              <div
-                style={{
-                  width: `${status.finished ? 100 : percent}%`,
-                  height: "100%",
-                  background: "var(--accent, #6ea8fe)",
-                  transition: "width .25s ease",
-                }}
-              />
-            </div>
-            <p style={{ margin: "7px 0 0", fontSize: 12, color: "var(--text-dim, #9a9aa4)" }}>
-              {status.stage}
-              {status.total > 0 ? `（${status.done}/${status.total}）` : ""}
-            </p>
-          </div>
-        ) : null}
-
-        {error ? (
-          <p style={{ margin: "10px 18px 0", fontSize: 12, color: "#ff8080" }}>{error}</p>
-        ) : null}
-        {status.error ? (
-          <p style={{ margin: "10px 18px 0", fontSize: 12, color: "#ff8080" }}>{status.error}</p>
-        ) : null}
-
-        <footer className="modal-actions" style={{ padding: "14px 18px 18px" }}>
+        <footer className="modal-actions net-dl-footer">
           <button type="button" className="btn" onClick={onClose}>
             关闭
           </button>
-          {status.running ? (
-            <button type="button" className="btn" onClick={() => void cancel()}>
-              取消下载
+          {activeCount > 0 ? (
+            <button type="button" className="btn" onClick={() => void cancelAll()}>
+              全部取消
             </button>
-          ) : (
-            <button type="button" className="btn" disabled={busy} onClick={() => void preview()}>
-              解析
-            </button>
-          )}
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={busy || status.running}
-            onClick={() => void start()}
-          >
-            {status.running ? "下载中…" : "下载并入库"}
-          </button>
+          ) : null}
+          <span className="net-dl-footer-hint">
+            Ctrl + Enter 快速加入 · 下载在后台进行，关掉本页也会继续
+          </span>
         </footer>
       </div>
     </div>
