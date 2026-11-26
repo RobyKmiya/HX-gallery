@@ -48,6 +48,7 @@
 | 1.1.72 | **四连修**：18comic 竖条混淆还原（`jm_decode.rs`）/ nhentai 改 v2 API / 标签面板始终挂载保状态 / 内置浏览器顶栏首帧摆位 |
 | 1.1.73 | 修 1.1.72 引入的主页空白回归（面板容器 home 时也要 hidden）；18comic tag 三路解析（data-type span / meta keywords / 旧 href） |
 | 1.1.74 | **下载管理器**：多任务并行/单项启停/防卡死（cookie 缓存绕开 WebView2 + curl 可 kill + 全局闸门）；UI 卡片化美化 |
+| 1.1.78 | 登录态快照可见化：设置→登录态 显示各站已存 cookie 名，缺标志 cookie 直接给补救指引（`site_login_detail` 只回名不回值） |
 | 1.1.77 | 18comic 深度适配：登录回填按**标志 cookie** 判定（18comic=AVS / exhentai=ipb_member_id / nhentai=sessionid）；导入维护锁改排队等；下载完成自动刷新列表；下载图与织机 XHR 自动重试；exhentai tag 改 /tag/ 链接解析 |
 | 1.1.76 | 18comic 段数改**画面自校验**（公式段数不可信时自动纠正）；浏览器性能：GM 轮询改轮转、队列先查长度、广告匹配零分配、UA 探测后台化；前进/后退到底给提示；登录态同步节流；登录态加快捷粘贴块 |
 | 1.1.75 | **下载全挂/登录态丢失/广告劫持三连修**：图片判定改文件头魔数（CT 常为空）、curl 复用 WebView2 真实 UA（cf_clearance 绑 UA）、抓页改已登录标签同源 fetch（不再 navigate 劫持标签）、`site_login` 自动快照+回填、`site_login_import` 粘贴 Cookie 入库、广告域名导航级拦截、侧栏移除画匣浏览器 |
