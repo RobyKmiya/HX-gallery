@@ -2442,8 +2442,10 @@ export default function LibraryView({
           </button>
 
           <div
-            className={`nav-collection-list${collectionsCollapsed ? " is-collapsed" : ""}`}
-            aria-hidden={collectionsCollapsed}
+            className={`nav-collection-list${
+              collectionsCollapsed && sidebarWidth >= 150 ? " is-collapsed" : ""
+            }`}
+            aria-hidden={collectionsCollapsed && sidebarWidth >= 150}
           >
             {collections.map((collection, index) => {
             const isRenaming = renamingCollectionId === collection.id;
@@ -2513,7 +2515,7 @@ export default function LibraryView({
                   }}
                 >
                   <CollectionGlyph
-                    icon={collection.icon}
+                    icon={collection.icon ?? "heart"}
                     color={collection.color}
                   />
                   <span className="nav-label">{displayName}</span>
@@ -2539,7 +2541,7 @@ export default function LibraryView({
                     aria-label={`自定义 ${collection.name} 的图标`}
                   >
                     <CollectionGlyph
-                      icon={collection.icon}
+                      icon={collection.icon ?? "heart"}
                       color={collection.color}
                       size={12}
                     />

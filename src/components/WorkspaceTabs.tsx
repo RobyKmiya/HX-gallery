@@ -404,6 +404,33 @@ export default function WorkspaceTabs({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 引擎 Ctrl+Tab → 循环切换工作台标签（内嵌引擎里只有一个内容标签，
+  // 切内层看不到变化；外壳标签才是用户感知的「标签页」。1.1.100）。
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  useEffect(() => {
+    let dead = false;
+    let unlisten: (() => void) | null = null;
+    void listen<number>("huaxia://cycle-tab", (event) => {
+      const list = tabsRef.current;
+      if (list.length < 2) return;
+      const index = list.findIndex((tab) => tab.id === activeIdRef.current);
+      if (index < 0) return;
+      const step = event.payload > 0 ? 1 : -1;
+      const next = list[(index + step + list.length) % list.length];
+      if (next) setActiveId(next.id);
+    }).then((un) => {
+      if (dead) un();
+      else unlisten = un;
+    });
+    return () => {
+      dead = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   /** 新页里输入网址 / 小房子回新页：url=null 时退回 React 新页。 */
   const setTabUrl = (id: string, url: string | null) => {
     setTabs((prev) =>

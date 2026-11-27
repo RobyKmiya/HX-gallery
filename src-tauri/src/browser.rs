@@ -3167,9 +3167,28 @@ fn handle_toolbar_action(
             }
         }
         "switch" => switch_tab(label, arg),
-        // Ctrl+Tab / Ctrl+Shift+Tab：在所有标签间循环。
-        "nextTab" => cycle_tab(label, 1),
-        "prevTab" => cycle_tab(label, -1),
+        // Ctrl+Tab：循环切换标签。**内嵌模式切外壳**：引擎里通常只有 1 个内容
+        // 标签（「新建」都转成外壳工作台标签了），切内层看不到任何变化——
+        // 管理员 2026-11-28「ctrl+tab 是不是被前进后退挡住了」的真因。
+        // 发事件让外壳工作台切到下一个标签；独立窗口仍切内层标签。
+        "nextTab" => {
+            if is_embedded(label) {
+                use tauri::Emitter;
+                let _ = app.emit("huaxia://cycle-tab", 1i32);
+                Ok(())
+            } else {
+                cycle_tab(label, 1)
+            }
+        }
+        "prevTab" => {
+            if is_embedded(label) {
+                use tauri::Emitter;
+                let _ = app.emit("huaxia://cycle-tab", -1i32);
+                Ok(())
+            } else {
+                cycle_tab(label, -1)
+            }
+        }
         "zoomIn" => adjust_zoom(label, zoom_step(label)),
         "zoomOut" => adjust_zoom(label, -zoom_step(label)),
         "zoomReset" => set_zoom(label, 1.0),

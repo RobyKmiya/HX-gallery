@@ -111,7 +111,11 @@ pub fn decode_image_file(path: &std::path::Path, computed: usize) -> Result<usiz
     if computed == 0 {
         return Ok(0);
     }
-    let img = image::open(path).map_err(|e| format!("读图失败（{}）：{e}", path.display()))?;
+    // 走统一的 decode_image：Adobe CMYK JPEG 的反相修正也在里面（1.1.100）。
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("读图失败（{}）：{e}", path.display()))?;
+    let img = crate::archive::decode_image(&bytes, crate::archive::PAGE_DECODE_ALLOC)
+        .map_err(|e| format!("读图失败（{}）：{e}", path.display()))?;
     let rgb = img.to_rgb8();
     let out = permute(&rgb, computed);
     out.save(path)

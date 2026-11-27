@@ -19,9 +19,99 @@ pub(crate) const THUMB_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 /// 阅读器整页解码允许的最大分配量。
 pub(crate) const PAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
+/// Adobe CMYK JPEG 嗅探：SOF 组件数 == 4 且带 APP14 Adobe 标记。
+///
+/// 这类 JPEG 按 Adobe 惯例**存储值是反相的**（libjpeg 系解码器读的时候会自动
+/// 反相），而 image 0.25 的 JPEG 解码器 zune-jpeg **不做这个反相** → 解出来
+/// 整图品红罩（管理员 2026-11-28：18comic/exhentai 封面色偏的根因）。
+fn jpeg_adobe_cmyk(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return false;
+    }
+    let mut components4 = false;
+    let mut adobe_cmyk_family = false;
+    let mut i = 2usize;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = bytes[i + 1];
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let seglen = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        // SOF0~SOF15（排除 DHT/DAC/JPG/RST 扩展段）：第 9 字节是组件数。
+        if (0xC0..=0xCF).contains(&marker)
+            && !matches!(marker, 0xC4 | 0xC8 | 0xCC)
+            && i + 9 < bytes.len()
+        {
+            components4 = bytes[i + 9] == 4;
+        }
+        if marker == 0xEE && seglen >= 14 && bytes.get(i + 4..i + 9) == Some(b"Adobe") {
+            // Adobe 段尾字节是 transform：0=CMYK、1=YCbCr、2=YCCK。
+            // 注意 APP14 通常在 SOF **之前**出现，不能在这里提前 return。
+            let transform = bytes[i + 2 + seglen - 1];
+            adobe_cmyk_family = matches!(transform, 0 | 2);
+        }
+        if marker == 0xDA {
+            break; // SOS：扫描结束，综合判定
+        }
+        i += 2 + seglen;
+    }
+    components4 && adobe_cmyk_family
+}
+
+/// Adobe CMYK JPEG 的正确解码：让 zune 输出 CMYK 四通道，按 Adobe 惯例反相
+/// 存储值，再用标准公式（RGB = (1-C)(1-K) 等）转 RGB。
+fn decode_cmyk_jpeg(bytes: &[u8]) -> Result<DynamicImage, String> {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+        std::io::Cursor::new(bytes),
+        DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::CMYK),
+    );
+    let pixels = decoder
+        .decode()
+        .map_err(|error| format!("CMYK JPEG 解码失败: {error}"))?;
+    let info = decoder.info().ok_or("CMYK JPEG 缺少图片信息")?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    if pixels.len() < (width as usize) * (height as usize) * 4 {
+        return Err("CMYK JPEG 像素数据不足".to_string());
+    }
+
+    let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    for px in pixels.chunks_exact(4) {
+        // Adobe 惯例：存储值 = 255 - 真实值，先反相回真实 CMYK。
+        let c = 255 - px[0];
+        let m = 255 - px[1];
+        let y = 255 - px[2];
+        let k = 255 - px[3] as u16;
+        // RGB = (1 - C) × (1 - K)，与 zune/libjpeg 的 blinn 内积同式。
+        rgb.push((((255 - c) as u16 * (255 - k as u16)) / 255) as u8);
+        rgb.push((((255 - m) as u16 * (255 - k as u16)) / 255) as u8);
+        rgb.push((((255 - y) as u16 * (255 - k as u16)) / 255) as u8);
+    }
+    image::RgbImage::from_raw(width, height, rgb)
+        .map(DynamicImage::ImageRgb8)
+        .ok_or_else(|| "CMYK JPEG 像素尺寸不匹配".to_string())
+}
+
 /// 带资源上限的图片解码。`image::load_from_memory` 内部使用 `Limits::default()`
 /// （max_alloc 512 MB、宽高无上限），对高压缩比或声明超大尺寸的图片不安全。
 pub(crate) fn decode_image(bytes: &[u8], max_alloc: u64) -> Result<DynamicImage, String> {
+    // Adobe CMYK JPEG 特殊路径：zune-jpeg（image 0.25 的 JPEG 解码器）不处理
+    // Adobe 存储反相 → 解出整图品红罩（管理员 2026-11-28 封面色偏）。
+    if jpeg_adobe_cmyk(bytes) {
+        return decode_cmyk_jpeg(bytes);
+    }
+
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|error| format!("图片格式无法识别: {error}"))?;
@@ -261,4 +351,43 @@ pub(crate) fn is_cover_key(key: &str) -> bool {
         return false;
     };
     !stem.is_empty() && stem.len() <= 64 && stem.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod cmyk_tests {
+    use super::*;
+
+    /// 最小合法 JPEG 骨架：SOI + 给定 SOF/APP14/SOS 段 + EOI。
+    fn minimal_jpeg(sof_marker: u8, components: u8, adobe_transform: Option<u8>) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xD8];
+        if let Some(t) = adobe_transform {
+            // APP14："Adobe" 5 字节 + version 2 + flags0/flags1 4 + transform 1 = 12 载荷
+            let mut payload = b"Adobe".to_vec();
+            payload.extend_from_slice(&[0x64, 0x00, 0x00, 0x00, 0x00, 0x00, t]);
+            out.extend_from_slice(&[0xFF, 0xEE]);
+            out.extend_from_slice(&(payload.len() as u16 + 2).to_be_bytes());
+            out.extend_from_slice(&payload);
+        }
+        // SOF0：precision 1 + 高 2 + 宽 2 + 组件数 1 + 每组件 3 字节
+        let sof_len = 8 + 3 * components as u16;
+        out.extend_from_slice(&[0xFF, sof_marker]);
+        out.extend_from_slice(&sof_len.to_be_bytes());
+        out.push(8);
+        out.extend_from_slice(&[0x00, 0x10, 0x00, 0x10, components]);
+        for i in 0..components {
+            out.extend_from_slice(&[i + 1, 0x11, 0]);
+        }
+        out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]); // SOS 头（截断无妨）
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    #[test]
+    fn detects_adobe_cmyk_and_ycck() {
+        assert!(jpeg_adobe_cmyk(&minimal_jpeg(0xC0, 4, Some(0))));
+        assert!(jpeg_adobe_cmyk(&minimal_jpeg(0xC2, 4, Some(2))));
+        assert!(!jpeg_adobe_cmyk(&minimal_jpeg(0xC0, 3, Some(1))));
+        assert!(!jpeg_adobe_cmyk(&minimal_jpeg(0xC0, 4, None)), "无 Adobe 段不反相");
+        assert!(!jpeg_adobe_cmyk(&[0x89, 0x50, 0x4E, 0x47]), "PNG 不误判");
+    }
 }
