@@ -489,23 +489,41 @@ pub fn apply_picker_to_tabs(picker: bool) {
 ///（with_webview 的闭包在主线程异步执行，时序天然满足）。
 #[cfg(windows)]
 fn disable_browser_accelerator_keys(webview: &Webview) {
-    use windows_core::Interface;
     let view = webview.clone();
-    let _ = view.with_webview(move |platform| {
-        use webview2_com::Microsoft::Web::WebView2::Win32::{
-            ICoreWebView2Controller, ICoreWebView2Settings9,
-        };
-        let controller: ICoreWebView2Controller = platform.controller();
-        let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
-            return;
-        };
-        let Ok(settings) = (unsafe { core.Settings() }) else {
-            return;
-        };
-        let Ok(settings9) = settings.cast::<ICoreWebView2Settings9>() else {
-            return;
-        };
-        let _ = unsafe { settings9.SetAreBrowserAcceleratorKeysEnabled(false) };
+    // WebView2 的 CoreWebView2 是异步初始化的：add_child 返回时 controller 可能
+    // 还没就绪，`CoreWebView2()` 返回 Err 时静默退出等于白关（1.1.96 实测——
+    // 只设一次没生效，Ctrl+T/Tab 仍被吞）。这里起个后台线程，每 200ms 重试，
+    // with_webview 内部会把闭包派发到主线程执行，最多等 ~2.5s。
+    std::thread::spawn(move || {
+        for _attempt in 0..12 {
+            let (tx, rx) = std::sync::mpsc::channel::<bool>();
+            let view_for_attempt = view.clone();
+            let _ = view_for_attempt.with_webview(move |platform| {
+                use windows_core::Interface;
+                // 用 Settings3 而不是 Settings9：wry 自己就是用 Settings3 设这个开关
+                //（见 wry webview2/mod.rs `SetAreBrowserAcceleratorKeysEnabled`），
+                // 接口更老、兼容面更广，避免 cast 到 Settings9 失败。
+                use webview2_com::Microsoft::Web::WebView2::Win32::{
+                    ICoreWebView2Controller, ICoreWebView2Settings3,
+                };
+                let ok = (|| -> windows_core::Result<()> {
+                    let controller: ICoreWebView2Controller = platform.controller();
+                    let core = (unsafe { controller.CoreWebView2() })?;
+                    let settings = (unsafe { core.Settings() })?;
+                    let settings3 = settings.cast::<ICoreWebView2Settings3>()?;
+                    unsafe { settings3.SetAreBrowserAcceleratorKeysEnabled(false) }
+                })()
+                .is_ok();
+                let _ = tx.send(ok);
+            });
+            if rx
+                .recv_timeout(std::time::Duration::from_millis(1200))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
     });
 }
 
@@ -1427,6 +1445,13 @@ pub fn open_settings_window(app: &AppHandle, label: &str) -> Result<(), String> 
             let inner = window.inner_size().unwrap_or_default();
             let width = inner.width as f64 / scale;
             let height = inner.height as f64 / scale;
+            // 悬浮窗：webview 缩到卡片大小、居中，不再铺满整窗（管理员 2026-11-28：
+            // 遮罩去掉后铺满窗的透明 webview 会露出 webview 自带的白色底）。
+            // 卡片尺寸与 browser-settings.html 里的内容匹配，留边不贴死窗口边缘。
+            let card_w = (width - 24.0).clamp(360.0, 540.0);
+            let card_h = (height - 24.0).clamp(420.0, 640.0);
+            let origin_x = ((width - card_w) / 2.0).max(0.0);
+            let origin_y = ((height - card_h) / 2.0).max(0.0);
             // 当前设置走 initialization_script 注入：add_child 返回后立刻 eval
             // 会打在 about:blank 上，页面一导航上下文就重置、值全丢。
             let payload = serde_json::to_string(&settings).unwrap_or_else(|_| "{}".to_string());
@@ -1434,13 +1459,13 @@ pub fn open_settings_window(app: &AppHandle, label: &str) -> Result<(), String> 
                 view_label,
                 WebviewUrl::App("browser-settings.html".into()),
             )
-            .auto_resize()
+            .background_color(tauri::window::Color(0x17, 0x1a, 0x21, 0xff))
             .initialization_script(&format!("window.__xkSettings = {payload};"));
             let view = window
                 .add_child(
                     builder,
-                    LogicalPosition::new(0.0, 0.0),
-                    LogicalSize::new(width, height),
+                    LogicalPosition::new(origin_x, origin_y),
+                    LogicalSize::new(card_w, card_h),
                 )
                 .map_err(|error| format!("打开设置面板失败：{error}"))?;
             let _ = view.set_focus();
@@ -1939,6 +1964,8 @@ fn attach_tab_hooks(
             }
         })
         .initialization_script(CONTENT_SHORTCUTS_SCRIPT)
+        // 元素选择器（恒注入，Alt+E 等依赖 __hxPickerApi）。
+        .initialization_script(CONTENT_PICKER_SCRIPT)
         // 登录框自动填充：探测到密码框就问账号簿要凭据（账号簿里没这站就什么都不做）。
         .initialization_script(AUTOFILL_SCRIPT)
         // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
@@ -2286,6 +2313,11 @@ const AUTOFILL_SCRIPT: &str = r###"
 "###;
 
 /// 内容页快捷键脚本（引擎级，所有内容标签注入）。
+/// 元素选择器（圆点 + __hxPickerApi）：引擎恒注入，不依赖「画匣盾」用户脚本
+///（用户脚本可被停用/某页漏注入，导致 Alt+E 弹「没启用」——管理员 2026-11-28）。
+/// 源码在 public/huaxia-picker.js，编译时内嵌。
+const CONTENT_PICKER_SCRIPT: &str = include_str!("../../public/huaxia-picker.js");
+
 ///
 /// 内嵌 WebView2 里，焦点在网页上时工具栏收不到键盘事件，所以快捷键必须
 /// 在内容页捕获、写成 `__xkReqQ` 交给引擎执行。`window.__xkShortcuts` 是
@@ -2645,7 +2677,8 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
       }));
     }
     // 屏蔽元素：广告把右下角圆点盖住时，右键这里照样能进选择模式
-    // （管理员 2026-11-27：圆点被覆盖就没法操作了）。
+    // （管理员 2026-11-27：圆点被覆盖就没法操作了）。__hxPickerApi 由画匣盾
+    // 恒注册（圆点开关只管圆点显隐），只有脚本没注入的页面才会走到兜底。
     menu.appendChild(item("屏蔽这个元素…（Alt+E）", function () {
       try {
         if (window.__hxPickerApi && window.__hxPickerApi.start) {
@@ -2653,7 +2686,7 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
           return;
         }
       } catch (err) {}
-      ack("元素选择器没启用：设置 → 广告拦截");
+      ack("这个页面没有元素屏蔽（脚本未注入，刷新后再试）");
     }));
     menu.appendChild(sep());
     // 历史导航页面内直接执行——本来就不需要宿主，绕队列只会多一层失灵面。

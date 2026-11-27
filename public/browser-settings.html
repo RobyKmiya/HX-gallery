@@ -19,26 +19,21 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
-    /* 1.1.96：去掉暗化背景遮罩（管理员嫌丑）。body 只是透明的事件层，
-       点卡片外任意处仍会关闭（浏览器-settings.js 里有 body click 关闭逻辑）。 */
+    /* 1.1.97：设置改成真正的悬浮窗——引擎把这条 webview 缩到卡片大小并居中，
+       不再铺满整窗。body 只是卡片容器，不要遮罩、不要居中定位。 */
     background: transparent;
     color: var(--text);
     font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif;
-    display: flex; align-items: center; justify-content: center;
     user-select: none;
   }
   .card {
-    width: min(520px, 82vw);
-    max-height: min(620px, 86vh);
+    width: 100%;
+    height: 100%;
     display: flex; flex-direction: column;
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 14px;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, .55);
     overflow: hidden;
-    animation: rise .16s ease-out;
   }
-  @keyframes rise { from { transform: translateY(8px); opacity: .4; } to { transform: none; opacity: 1; } }
   header {
     display: flex; align-items: center; gap: 10px;
     padding: 14px 18px 12px;

@@ -86,9 +86,8 @@
 
   $("close").addEventListener("click", close);
   $("cancel").addEventListener("click", close);
-  // 点遮罩关闭；点卡片内部不关。
-  document.body.addEventListener("click", close);
-  $("card").addEventListener("click", function (e) { e.stopPropagation(); });
+  // 1.1.97：设置是悬浮窗（webview 就卡片这么大），没有「点外部关闭」一说，
+  // 关闭只走 × / 取消 / 保存 / Esc。
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") { e.preventDefault(); close(); return; }
     var ctrl = e.ctrlKey || e.metaKey;
@@ -107,8 +106,9 @@
     }
     var home = $("home").value.trim();
     var search = $("searchUrl").value.trim();
-    if (!/^https?:\/\//i.test(home)) {
-      msg("主页要填完整网址，比如 https://e-hentai.org/", "err");
+    // 主页允许三种：普通 http(s) 网址、huaxia:newtab（⌂ 回画匣新页）、about:blank。
+    if (!/^https?:\/\//i.test(home) && home !== "huaxia:newtab" && home !== "about:blank") {
+      msg("主页要填完整网址（如 https://e-hentai.org/），或 huaxia:newtab / about:blank", "err");
       $("home").focus();
       return;
     }
