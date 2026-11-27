@@ -205,6 +205,10 @@ struct BrowserState {
     embedded: bool,
     /// 内置占位矩形（逻辑像素 x, y, w, h）；None = 前端还没同步过，先不摆位。
     embed_rect: Option<(f64, f64, f64, f64)>,
+    /// 原生加速键拦截器压进来的动作队列（action, arg）。
+    /// COM 回调线程不能直接执行动作（会带 30s 等待的建标签流程），
+    /// 压队、由工具栏轮询器统一消费（与页面 JS 队列同一条通路）。
+    accel_queue: std::collections::VecDeque<(String, String)>,
 }
 
 struct TabRecord {
@@ -526,6 +530,111 @@ fn disable_browser_accelerator_keys(webview: &Webview) {
         }
     });
 }
+
+/// 原生加速键拦截：在 Controller 层注册 AcceleratorKeyPressed，把画匣快捷键
+/// 在 WebView2 处理之前截下（SetHandled(true)），压进 accel_queue 由工具栏
+/// 轮询器统一消费。
+///
+/// 为什么必须做这一层：`AreBrowserAcceleratorKeysEnabled=false` 只让 WebView2
+/// 「不处理」这些组合键，但它们同样**不会以 DOM keydown 的形式到达页面**——
+/// 页面脚本的 Ctrl+T 分支天然收不到键（管理员三轮反馈「快捷键没反应」的
+/// 最终根因）。Controller 级事件是唯一既截得住、又能派发动作的口子。
+/// 每个引擎自建 webview（工具栏/内容标签/设置浮层）都要挂。
+#[cfg(windows)]
+fn attach_accelerator_interceptor(webview: &Webview, label: &str) {
+    let label = label.to_string();
+    let view = webview.clone();
+    let _ = view.with_webview(move |platform| {
+        use webview2_com::AcceleratorKeyPressedEventHandler;
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+        };
+        let controller: ICoreWebView2Controller = platform.controller();
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(
+            move |_sender, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+                let _ = unsafe { args.KeyEventKind(&mut kind) };
+                if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN {
+                    return Ok(());
+                }
+                let mut vk: u32 = 0;
+                let _ = unsafe { args.VirtualKey(&mut vk) };
+                if let Some((action, arg)) = map_accelerator(vk) {
+                    // 截住，不让 WebView2 再做任何默认处理（打印/查找/建标签…）。
+                    let _ = unsafe { args.SetHandled(true) };
+                    if let Ok(mut map) = BROWSERS.lock() {
+                        if let Some(state) = map.get_mut(&label) {
+                            state.accel_queue.push_back((action.to_string(), arg.to_string()));
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut token: i64 = 0;
+        let _ = unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) };
+    });
+}
+
+/// 读物理修饰键状态（COM 回调在 UI 线程，GetAsyncKeyState 安全）。
+#[cfg(windows)]
+fn modifier_down(vk: u32) -> bool {
+    unsafe {
+        (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32)
+            as u16
+            & 0x8000)
+            != 0
+    }
+}
+
+/// 虚拟键 → 画匣动作。返回 None 表示不拦截（键原样放行给页面）。
+#[cfg(windows)]
+fn map_accelerator(vk: u32) -> Option<(&'static str, &'static str)> {
+    let ctrl = modifier_down(0x11); // VK_CONTROL
+    let alt = modifier_down(0x12); // VK_MENU
+    let shift = modifier_down(0x10); // VK_SHIFT
+    let action: &'static str = match (ctrl, alt, shift, vk) {
+        // Ctrl 系
+        (true, false, false, 0x54) => "new",              // T
+        (true, false, false, 0x57) => "close",            // W
+        (true, false, false, 0x52) => "reload",           // R
+        (true, false, false, 0x4C) => "focusAddr",        // L
+        (true, false, false, 0xBB) => "zoomIn",           // OEM_PLUS（=/+）
+        (true, false, false, 0xBD) => "zoomOut",          // OEM_MINUS
+        (true, false, false, 0x30) => "zoomReset",        // 0
+        (true, false, false, 0xBC) => "openSettings",     // OEM_COMMA（,）
+        // Ctrl+Shift 系
+        (true, false, true, 0x09) => "prevTab",           // Tab
+        (true, false, true, 0x45) => "pickElement",       // E
+        (true, false, true, 0x49) => "devtools",          // I
+        // Alt 系
+        (false, true, false, 0x25) => "back",             // ←
+        (false, true, false, 0x27) => "forward",          // →
+        (false, true, false, 0x48) => "home",             // H
+        (false, true, false, 0x43) => "copyAddr",         // C
+        (false, true, false, 0x45) => "pickElement",      // E
+        // 单键
+        (false, false, false, 0x74) => "reload",          // F5
+        (false, false, false, 0x7B) => "devtools",        // F12
+        _ => return None,
+    };
+    Some((action, ""))
+}
+
+/// 两件套：关掉 WebView2 自带加速键处理 + 挂原生拦截器。
+/// 所有引擎自建 webview 统一走这里。
+#[cfg(windows)]
+fn harden_webview_keys(webview: &Webview, label: &str) {
+    disable_browser_accelerator_keys(webview);
+    attach_accelerator_interceptor(webview, label);
+}
+
+/// 非 Windows 占位（引擎只在 Windows 跑，但保持 cfg 对称）。
+#[cfg(not(windows))]
+fn harden_webview_keys(_webview: &Webview, _label: &str) {}
 
 
 /// 内置拦截名单：主流广告/弹窗/统计网络 + 漫画站常用广告源。
@@ -1083,9 +1192,9 @@ fn open_hosted(
                 )
                 .map_err(|error| format!("创建工具栏失败：{error}"))?;
             crumb("工具栏就绪");
-            // 关掉 WebView2 浏览器加速键（Ctrl+T/W/Tab 被它吞掉，见函数注释）。
+            // 加速键双保险：关 WebView2 内置处理 + 挂原生拦截器。
             #[cfg(windows)]
-            disable_browser_accelerator_keys(&toolbar);
+            harden_webview_keys(&toolbar, &label);
 
             let tab_url = url.to_string();
             let mut tab_builder = WebviewBuilder::new(
@@ -1118,9 +1227,9 @@ fn open_hosted(
                 )
                 .map_err(|error| format!("创建内容标签失败：{error}"))?;
             crumb("内容 webview 就绪");
-            // 同上：内容页的 Ctrl+T/W/Tab/,, 必须到达页面 keydown 才有人接。
+            // 同上：内容页的 Ctrl+T/W/Tab/,, 必须走原生拦截器才有人接。
             #[cfg(windows)]
-            disable_browser_accelerator_keys(&webview);
+            harden_webview_keys(&webview, &label);
             // 问一次真实 UA 存起来：curl 下载要用同一套身份过 Cloudflare。
             // 放后台线程：建标签的主流程不能被这一次 IPC 拖住（右键开新标签会「卡一下」）。
             spawn_user_agent_refresh(webview.clone());
@@ -1147,6 +1256,7 @@ fn open_hosted(
                 embed_rect: if embedded { opts.initial_rect } else { None },
                 opts,
                 last_pushed: String::new(),
+                accel_queue: std::collections::VecDeque::new(),
             };
             crumb("注册浏览器状态");
             register_browser(&label, state, &app_for_window);
@@ -1348,9 +1458,9 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 )
                 .map_err(|error| format!("创建标签失败：{error}"))?;
             crumb("新标签 webview 就绪");
-            // 同上：新标签也要关 WebView2 浏览器加速键。
+            // 同上：新标签也要挂原生加速键拦截。
             #[cfg(windows)]
-            disable_browser_accelerator_keys(&webview);
+            harden_webview_keys(&webview, &label_for_tab);
             spawn_user_agent_refresh(webview.clone());
 
             let tab_url = url_for_thread.to_string();
@@ -1470,9 +1580,9 @@ pub fn open_settings_window(app: &AppHandle, label: &str) -> Result<(), String> 
                 .map_err(|error| format!("打开设置面板失败：{error}"))?;
             let _ = view.set_focus();
             with_state(&label_for_view, |state| state.settings_view = Some(view.clone()));
-            // 设置浮层同样是引擎 webview：Ctrl+,（关浮层）等键要自己处理。
+            // 设置浮层同样是引擎 webview：Ctrl+,（开关浮层）走原生拦截器。
             #[cfg(windows)]
-            disable_browser_accelerator_keys(&view);
+            harden_webview_keys(&view, &label_for_view);
             start_settings_poller(&label_for_view, &app_for_view);
             Ok(())
         };
@@ -2819,6 +2929,22 @@ fn start_toolbar_poller(label: &str, app: AppHandle) {
             let Some(toolbar) = toolbar_of(&label) else {
                 continue;
             };
+            // 原生加速键拦截器压进来的动作优先消费（COM 回调只压队不执行，
+            // 动作统一走工具栏那套分发，与页面 JS 队列同一通路）。
+            let accel: Vec<(String, String)> = with_state(&label, |state| {
+                std::mem::take(&mut state.accel_queue)
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+            for (action, arg) in accel {
+                let req = serde_json::json!({ "action": action, "url": arg });
+                if let Err(error) =
+                    handle_toolbar_action(&app, &label, &toolbar, &req, &action, &arg)
+                {
+                    log_for(&label, &format!("加速键动作 {action} 失败：{error}"));
+                }
+            }
             // 读取与清空放在同一次 eval 里完成（原子取走），避免执行期间新点的
             // 动作被误清，也避免同一批动作重复执行。
             // 队列有两个来源：工具栏 webview（按钮）和**当前内容页**（快捷键 / 鼠标侧键 /
@@ -3026,6 +3152,16 @@ fn handle_toolbar_action(
             let _ = toolbar.set_focus();
             let _ = toolbar.eval(
                 "window.__xkFocusAddr = true; setTimeout(function(){ window.__xkFocusAddr = false; }, 800);",
+            );
+            Ok(())
+        }
+        // Alt+C：复制当前页地址（原生拦截器路径；页面脚本被站点脚本覆盖时也能用）。
+        "copyAddr" => {
+            let webview = active_webview(label)?;
+            let _ = webview.eval(
+                "try{navigator.clipboard.writeText(location.href).then(\
+function(){if(window.__xkTip)window.__xkTip('已复制当前页地址');},\
+function(){if(window.__xkTip)window.__xkTip(location.href);});}catch(e){}",
             );
             Ok(())
         }
@@ -4187,10 +4323,16 @@ fn reposition(label: &str) {
         let _ = webview.set_position(LogicalPosition::new(origin_x, origin_y + TOOLBAR_HEIGHT));
         let _ = webview.set_size(LogicalSize::new(width, height - TOOLBAR_HEIGHT));
     }
-    // 设置浮层铺满整个窗口，窗口拉伸时要跟着长。
+    // 设置浮层是悬浮卡片：摆位变化时重新居中，不再铺满整窗
+    // （1.1.97 悬浮窗化——以前这里会把它重置回整窗，卡片尺寸立刻被冲掉）。
     if let Some(view) = settings_view {
-        let _ = view.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = view.set_size(LogicalSize::new(width, height));
+        let card_w = (width - 24.0).clamp(360.0, 540.0);
+        let card_h = (height - 24.0).clamp(420.0, 640.0);
+        let _ = view.set_position(LogicalPosition::new(
+            origin_x + ((width - card_w) / 2.0).max(0.0),
+            origin_y + ((height - card_h) / 2.0).max(0.0),
+        ));
+        let _ = view.set_size(LogicalSize::new(card_w, card_h));
     }
 }
 

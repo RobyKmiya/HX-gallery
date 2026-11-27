@@ -61,7 +61,29 @@ export default function App() {
         await new Promise((resolve) => setTimeout(resolve, 400));
       }
     } catch (bootError) {
-      setError(`启动失败：${String(bootError)}`);
+      const message = String(bootError);
+      // 双保险：Tauri 窗口先于 setup 闭包创建，首屏命令有极小概率撞上
+      // Rust 侧 manage 之前（报 "state not managed"）。退避重试而不是把
+      // 欢迎页钉死在报错上（管理员三轮反馈的启动报错）。
+      if (/state not managed/.test(message)) {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          try {
+            const state = await api.getLibraryState();
+            if (state.libraryPath) {
+              setLastLibraryPath(state.lastLibraryPath);
+              setError(state.error);
+              setLibrary(state);
+              setPhase("library");
+              return;
+            }
+            if (!state.loading) break;
+          } catch (retryError) {
+            if (!/state not managed/.test(String(retryError))) break;
+          }
+        }
+      }
+      setError(`启动失败：${message}`);
       setPhase("welcome");
     }
   }, []);

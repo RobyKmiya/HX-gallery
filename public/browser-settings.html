@@ -18,12 +18,20 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
+  /* 深色滚动条：默认白色拖条和主题不搭（管理员 2026-11-28） */
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: #3a4150; border-radius: 5px; border: 2px solid var(--panel);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #4a5265; }
+  ::-webkit-scrollbar-corner { background: transparent; }
   body {
     /* 1.1.97：设置改成真正的悬浮窗——引擎把这条 webview 缩到卡片大小并居中，
        不再铺满整窗。body 只是卡片容器，不要遮罩、不要居中定位。 */
     background: transparent;
     color: var(--text);
-    font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font: 13.5px/1.75 "Segoe UI", "Microsoft YaHei UI", sans-serif;
     user-select: none;
   }
   .card {
@@ -39,19 +47,19 @@
     padding: 14px 18px 12px;
     border-bottom: 1px solid var(--line);
   }
-  header h1 { margin: 0; font-size: 14px; font-weight: 600; flex: 1; }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
   header .ver { color: var(--muted); font-size: 11px; }
   header .x {
     width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--line);
     background: var(--raised); color: var(--muted); cursor: pointer; font-size: 13px;
   }
   header .x:hover { color: var(--danger); border-color: #5a2a30; }
-  .body { padding: 6px 18px 16px; overflow-y: auto; }
-  .row { margin: 14px 0; }
-  .row > label { display: block; font-weight: 600; margin-bottom: 6px; }
-  .row .hint { color: var(--muted); font-size: 11.5px; margin-top: 5px; }
+  .body { padding: 6px 20px 18px; overflow-y: auto; }
+  .row { margin: 18px 0; }
+  .row > label { display: block; font-weight: 600; font-size: 13.5px; margin-bottom: 7px; }
+  .row .hint { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 6px; }
   input[type="text"], input[type="number"], select {
-    width: 100%; height: 32px; padding: 0 10px;
+    width: 100%; height: 34px; padding: 0 12px;
     border: 1px solid var(--line); border-radius: 8px;
     background: #0f1116; color: var(--text);
     font: inherit; outline: 0;
@@ -62,22 +70,25 @@
   .inline .val { min-width: 52px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
   .check {
     display: flex; align-items: flex-start; gap: 10px;
-    padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px 13px; margin: 12px 0;
+    border: 1px solid var(--line); border-radius: 10px;
     background: var(--raised); cursor: pointer;
+    transition: border-color .15s;
   }
-  .check input { margin-top: 2px; accent-color: var(--accent); }
-  .check b { display: block; font-weight: 600; }
-  .check span { color: var(--muted); font-size: 11.5px; }
+  .check:hover { border-color: #3d4353; }
+  .check input { margin-top: 3px; accent-color: var(--accent); width: 15px; height: 15px; }
+  .check b { display: block; font-weight: 600; font-size: 13.5px; }
+  .check span { color: var(--muted); font-size: 12px; line-height: 1.7; }
   .keys {
-    border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
   }
   .keys div {
-    display: flex; gap: 10px; padding: 6px 10px; font-size: 12px;
+    display: flex; gap: 12px; padding: 8px 13px; font-size: 12.5px;
     border-bottom: 1px solid var(--line);
   }
   .keys div:last-child { border-bottom: 0; }
   .keys kbd {
-    min-width: 108px; font: 11.5px "Cascadia Mono", Consolas, monospace;
+    min-width: 118px; font: 12px "Cascadia Mono", Consolas, monospace;
     color: var(--accent);
   }
   .keys span { color: var(--muted); }
@@ -86,11 +97,11 @@
     padding: 12px 18px; border-top: 1px solid var(--line);
     background: #14171d;
   }
-  footer .msg { flex: 1; font-size: 12px; color: var(--muted); }
+  footer .msg { flex: 1; font-size: 12.5px; color: var(--muted); }
   footer .msg.ok { color: var(--ok); }
   footer .msg.err { color: var(--danger); }
   button.btn {
-    height: 30px; padding: 0 14px; border-radius: 8px;
+    height: 32px; padding: 0 16px; border-radius: 8px;
     border: 1px solid var(--line); background: var(--raised);
     color: var(--text); font: inherit; cursor: pointer;
   }

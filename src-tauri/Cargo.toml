@@ -60,6 +60,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 # 关 WebView2 自带「浏览器加速键」用（Ctrl+T/W/Tab 被它吞掉，页面收不到——1.1.96）。
 # 版本必须与 tauri 内部的 webview2-com 完全一致（COM 接口类型跨 crate 不能混）。

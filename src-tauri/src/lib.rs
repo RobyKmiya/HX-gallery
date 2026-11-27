@@ -2729,6 +2729,15 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             serve_wallpaper_cache(context.app_handle(), request)
         })
         .setup(move |app| {
+            // **manage 必须是 setup 闭包的第一件事**。Tauri 2 的窗口创建发生在
+            // setup 闭包之前（tauri::app::setup(): 先 for window_config build()
+            // 再跑用户闭包），前端首屏的 getLibraryState 很可能抢在 manage 之前
+            // 到达 IPC → 必报「state not managed」（管理员三轮反馈的启动报错根因）。
+            // 以前 manage 排在闭包末尾（老板键/几何恢复之后），竞态窗口更大。
+            {
+                let state = AppState::new(app.handle());
+                app.manage(state);
+            }
             // 兜底定时器必须先于一切可能阻塞的活儿启动：外接硬盘在休眠时，
             // 下面 AppState::new → db::open_library 会把 setup 整个卡住几十秒。
             // 前端首帧就绪会调 splash_finish 正常交接；这条定时器防的是
@@ -2819,8 +2828,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                     }
                 }
             }
-            let state = AppState::new(app.handle());
-            app.manage(state);
+            // AppState 已在闭包顶部 manage（见上）；这里只补单实例守卫——
             // 守卫交给 Tauri 托管，活到进程结束；提前 drop 会立刻放开互斥体。
             app.manage(guard);
             // 后台开库：验证目录 + SQLite 打开放到独立线程。外接硬盘在休眠时，
