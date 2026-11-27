@@ -163,6 +163,19 @@
     </div>
 
     <div class="row">
+      <label class="check">
+        <input type="checkbox" id="saveAskDir" />
+        <b>另存原图时询问目的地<span>右键「打开原图并另存」先弹保存对话框，可直接选散图收藏夹等任意文件夹</span></b>
+      </label>
+    </div>
+
+    <div class="row">
+      <label for="saveDir">另存默认文件夹</label>
+      <input id="saveDir" type="text" spellcheck="false" placeholder="留空 = 图片\画匣下载" />
+      <div class="hint">不开「询问目的地」时用这里；文件夹不存在会自动创建。</div>
+    </div>
+
+    <div class="row">
       <label>快捷键</label>
       <div class="keys">
         <div><kbd>Ctrl + T</kbd><span>新建标签</span></div>

@@ -29,6 +29,7 @@ import type {
   TagTranslationInput,
   TrashedArchive,
   WallpaperLockConfig,
+  WallpaperSource,
   HistoryEntry,
   CredentialEntry,
   SiteLoginEntry,
@@ -358,6 +359,10 @@ export const api = {
   /** 前端首帧就绪：亮主窗、关原生启动屏（splash.html）。 */
   splashFinish: () => invoke<void>("splash_finish"),
 
+  /** 壁纸本地缓存文件名（null = 未缓存，前端退回原地址）。 */
+  wallpaperCacheUrls: (walls: WallpaperSource[]) =>
+    invoke<(string | null)[]>("wallpaper_cache_urls", { walls }),
+
   /** 老板键全局呼回键：读当前绑定（Rust 侧持久化 + 注册）。 */
   getBossRecall: () => invoke<string>("get_boss_recall"),
 
@@ -507,6 +512,11 @@ export function assetUrl(path: string): string {
   return convertFileSrc(path);
 }
 
+/** 壁纸本地缓存 URL（文件名来自 wallpaperCacheUrls）。 */
+export function wallpaperCacheFileUrl(name: string): string {
+  return `${WCACHE_ORIGIN}/${name}`;
+}
+
 /**
  * `gallery://` 自定义协议的 URL 前缀。
  *
@@ -517,6 +527,12 @@ const GALLERY_ORIGIN =
   typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
     ? "http://gallery.localhost"
     : "gallery://localhost";
+
+/** `wcache://`（壁纸本地缓存）在 Windows 上同样映射成 http 主机。 */
+const WCACHE_ORIGIN =
+  typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
+    ? "http://wcache.localhost"
+    : "wcache://localhost";
 
 /** 散图自定义协议（loose://）在 Windows 上同样映射成 http 主机。 */
 const LOOSE_ORIGIN =

@@ -9579,3 +9579,17 @@ body.is-splitting {
    （workspace-tabs，含标签与自绘窗控）隐藏，主内容区因外层 flex column 布局
    自动撑满；退出沉浸即恢复。纯显隐、无过渡，避免拖慢交互。 */
 body.reader-immersive .workspace-tabs { display: none !important; }
+
+/* ---- 工作台标签条：拖拽换位（管理员 2026-11-27「拖拽标签也还没做好」） ----
+   实现方式与标签中心一致：拖动中的芯片降透明度（is-dragging），
+   落点芯片高亮描边（is-drag-over）。
+   注意芯片关键样式是行内的（background / borderTop），覆盖需 !important。 */
+.workspace-tab.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+.workspace-tab.is-drag-over {
+  background: rgba(124, 147, 255, 0.14) !important;
+  border-top-color: var(--accent, #7c93ff) !important;
+  box-shadow: 0 0 0 2px rgba(124, 147, 255, 0.3);
+}

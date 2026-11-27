@@ -1029,6 +1029,9 @@ pub async fn net_dl_start_task(app: AppHandle, task_id: String, url: String) -> 
         // 绑定当前线程的任务身份：之后所有 set_status / cookie_for / fetch_file
         // 都自动认领这一项，不用改几百处调用签名。
         CURRENT_TASK.with(|cell| *cell.borrow_mut() = Some(task_for_thread.clone()));
+        // 真实下载用时：从任务线程启动算到打包入库完成（管理员 2026-11-27：
+        // 以前显示的「用时 0.1s」其实是后面的入库耗时，不是下载用时）。
+        let started = std::time::Instant::now();
         let result = run_download(&handle, &url);
         match result {
             Ok(path) => set_status(|s| {
@@ -1039,7 +1042,11 @@ pub async fn net_dl_start_task(app: AppHandle, task_id: String, url: String) -> 
                 s.stage = if canceled {
                     "已取消".to_string()
                 } else {
-                    format!("完成：共 {} 张", s.done)
+                    format!(
+                        "完成：共 {} 张，用时 {:.0}s",
+                        s.done,
+                        started.elapsed().as_secs_f64()
+                    )
                 };
             }),
             Err(error) => set_status(|s| {

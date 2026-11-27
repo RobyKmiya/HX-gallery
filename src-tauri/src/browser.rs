@@ -65,6 +65,10 @@ pub struct BrowserSettings {
     pub show_titles: bool,
     /// 标签栏最大宽度占比（0.2–0.7）。
     pub tabs_width: f64,
+    /// 「打开原图并另存」时弹系统保存对话框选目的地（可直接选散图收藏夹文件夹）。
+    pub save_ask_dir: bool,
+    /// 另存的默认文件夹；空 = 图片\画匣下载。
+    pub save_dir: String,
 }
 
 impl Default for BrowserSettings {
@@ -77,6 +81,8 @@ impl Default for BrowserSettings {
             shortcuts: true,
             show_titles: true,
             tabs_width: 0.44,
+            save_ask_dir: false,
+            save_dir: String::new(),
         }
     }
 }
@@ -1000,7 +1006,8 @@ fn open_hosted(
                 first_tab_id.clone(),
                 WebviewUrl::External(url),
             )
-            .auto_resize();
+            .auto_resize()
+            .background_color(tauri::window::Color(0x14, 0x15, 0x1a, 0xff));
             tab_builder = attach_tab_hooks(tab_builder, &app_for_window, &label, &first_tab_id);
             if let Some(store) = userscript_store.as_ref() {
                 tab_builder = attach_userscripts(tab_builder, store, &label);
@@ -1180,6 +1187,19 @@ pub fn history_action(label: &str, action: &str) -> Result<(), String> {
 /// 新建标签（弹窗接管与工具栏「+」共用）。返回标签 id。
 pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Result<String, String> {
     let parsed = Url::parse(url).map_err(|e| format!("网址格式不正确: {e}"))?;
+
+    // 内嵌模式（工作台里的网页标签）：引擎内部再加 webview 只会叠在**同一个
+    // 占位矩形**上——外壳标签条根本看不见它，表现就是「在新标签打开」变成
+    // 源标签直接跳转、后退失效（管理员 2026-11-27）。改成通知主窗前端开一个
+    // 真正的网页标签（huaxia://open-url-tab → WorkspaceTabs.openUrlTab），
+    // 每个网页标签有自己独立的引擎与历史栈，后退/前进天然可用。
+    let embedded = with_state(label, |state| state.embedded).unwrap_or(false);
+    if embedded {
+        use tauri::Emitter;
+        let _ = app.emit("huaxia://open-url-tab", url.to_string());
+        return Ok(String::new());
+    }
+
     let tab_id = format!("{label}-tab-{}", uuid::Uuid::new_v4().simple());
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
     let app_for_tab = app.clone();
@@ -1218,7 +1238,9 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 tab_id_for_thread.clone(),
                 WebviewUrl::External(url_for_thread.clone()),
             )
-            .auto_resize();
+            .auto_resize()
+            // 深色底：页面没画完的第一帧不再白闪（管理员 2026-11-27「开新网址白屏」）。
+            .background_color(tauri::window::Color(0x14, 0x15, 0x1a, 0xff));
             tab_builder = attach_tab_hooks(tab_builder, &app_for_tab, &label_for_tab, &tab_id_for_thread);
             if let Some(store) = store.as_ref() {
                 tab_builder = attach_userscripts(tab_builder, store, &label_for_tab);
@@ -2123,6 +2145,45 @@ const AUTOFILL_SCRIPT: &str = r###"
     return true;
   };
 
+  // 选择式填充（管理员 2026-11-27：不要自动填，提示供选择，选了才填）。
+  window.__xkCredentialChip = function (user, pass) {
+    try {
+      var old = document.getElementById("__xkCredChip");
+      if (old) old.remove();
+      var chip = document.createElement("div");
+      chip.id = "__xkCredChip";
+      chip.setAttribute("style",
+        "position:fixed;right:18px;bottom:18px;z-index:2147483647;background:rgba(24,26,32,.96);" +
+        "color:#dfe3ea;border:1px solid #3a3f4a;border-radius:10px;padding:10px 12px;" +
+        "font:12.5px 'Segoe UI','Microsoft YaHei UI',sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+        "display:flex;gap:8px;align-items:center;");
+      var label = document.createElement("span");
+      label.textContent = "🔒 使用保存的账密（" + user + "）？";
+      var yes = document.createElement("button");
+      yes.textContent = "填入";
+      yes.setAttribute("style",
+        "background:#e8a35c;color:#141519;border:none;border-radius:7px;padding:5px 14px;" +
+        "cursor:pointer;font:12.5px inherit;");
+      var no = document.createElement("button");
+      no.textContent = "忽略";
+      no.setAttribute("style",
+        "background:transparent;color:#9aa0ad;border:1px solid #3a3f4a;border-radius:7px;" +
+        "padding:5px 12px;cursor:pointer;font:12.5px inherit;");
+      function close() { chip.remove(); }
+      yes.addEventListener("click", function () {
+        window.__xkAutofill(user, pass);
+        close();
+      });
+      no.addEventListener("click", close);
+      chip.appendChild(label);
+      chip.appendChild(yes);
+      chip.appendChild(no);
+      document.body.appendChild(chip);
+      // 30 秒没人理就收掉，别一直挂在页面上。
+      setTimeout(function () { if (chip.isConnected) chip.remove(); }, 30000);
+    } catch (e) {}
+  };
+
   function probe() {
     if (window.__xkAutofillAsked) return;
     var pass = document.querySelector('input[type="password"]');
@@ -2228,44 +2289,88 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
 
 /// 内容页 18comic 登录桥脚本（引擎级，所有内容标签注入；非 jm 域名不生效）。
 ///
-/// 管理员 2026-11-27 二次反馈：网页会员登录弹窗的「登錄」按下去没反应——
-/// 站点提交前要拿 reCAPTCHA token，而 WebView2 里 gstatic 被墙加载不出来，
-/// 站点自己的 JS 拿不到 token 就直接 return，按钮永远没响应。
-/// 治法：捕获阶段拦下登录按钮点击，账密推进 `__xkLoginQ`，由引擎轮询器
-/// 走 jm API（官方 app 协议，无验证码）登录、注入 AVS cookie 后刷新页面。
+/// 2026-11-27 三轮：curl 过不了 Cloudflare——cf_clearance 绑定客户端 TLS
+/// 指纹，curl 的指纹必被重新挑战（管理员：浏览器里明明过了盾还是被拦）。
+/// 所以登录**整个在页面里完成**：同源 fetch('/login') 带着浏览器自己的
+/// TLS 指纹、cf_clearance、session cookie，CF 自动放行；AVS 由响应的
+/// Set-Cookie 直接落进浏览器 cookie jar，刷新页面即登录态。宿主完全
+/// 不参与网络，也就没有「注入 cookie」这一步。站点服务端不校验验证码
+/// （官方 python 库同款表单），验证码只存在于浏览器交互流程里。
 const JM_LOGIN_HOOK: &str = r###"
 (function () {
   if (window.__xkJmLoginHook) return;
   window.__xkJmLoginHook = true;
   var h = location.hostname || '';
-  if (h.indexOf('18comic') === -1 && h.indexOf('jmcomic') === -1 && h.indexOf('jm') !== 0) return;
-  document.addEventListener('click', function (e) {
+  if (h.indexOf('18comic') === -1 && h.indexOf('jmcomic') === -1) return;
+
+  function toast(text, bad) {
+    try {
+      var t = document.createElement("div");
+      t.textContent = text;
+      t.setAttribute("style",
+        "position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;" +
+        "background:" + (bad ? "#c0392b" : "#1f8a4c") + ";color:#fff;padding:9px 20px;" +
+        "border-radius:8px;font:13px 'Segoe UI','Microsoft YaHei UI',sans-serif;" +
+        "box-shadow:0 6px 18px rgba(0,0,0,.4);");
+      document.body.appendChild(t);
+      setTimeout(function () { t.remove(); }, 6000);
+    } catch (e) {}
+  }
+
+  document.addEventListener("click", function (e) {
     var el = e.target;
     while (el && el !== document) {
-      if (el.tagName === 'BUTTON' || el.tagName === 'A' ||
-          (el.tagName === 'INPUT' && (el.type === 'submit' || el.type === 'button'))) break;
+      if (el.tagName === "BUTTON" || el.tagName === "A" ||
+          (el.tagName === "INPUT" && (el.type === "submit" || el.type === "button"))) break;
       el = el.parentNode;
     }
     if (!el || el === document) return;
-    var text = (el.textContent || el.value || '').trim();
+    var text = (el.textContent || el.value || "").trim();
     if (!/^(登錄|登录|login|sign\s*in)$/i.test(text)) return;
     // 从按钮往上找 3 层，容出弹窗的容器结构；没有账密就不拦（站点自己报错）。
-    var box = el;
+    var box = el, user = null, pass = null;
     for (var i = 0; i < 3 && box; i++) {
-      var user = box.querySelector &&
+      user = box.querySelector &&
         box.querySelector('input[name*="user" i], input[type="text"], input[type="email"]');
-      var pass = box.querySelector && box.querySelector('input[type="password"]');
+      pass = box.querySelector && box.querySelector('input[type="password"]');
       if (user && pass) break;
       box = box.parentNode;
     }
     if (!box || !user || !pass || !user.value || !pass.value) return;
     e.preventDefault();
     e.stopPropagation();
-    window.__xkLoginQ = window.__xkLoginQ || [];
-    window.__xkLoginQ.push({ user: user.value, pass: pass.value });
-    el.__xkOrig = text;
-    el.textContent = '登入中…';
+    var orig = text;
+    el.textContent = "登入中…";
     el.disabled = true;
+    var form = new URLSearchParams();
+    form.set("username", user.value);
+    form.set("password", pass.value);
+    form.set("id_remember", "on");
+    form.set("login_remember", "on");
+    form.set("submit_login", "");
+    fetch("/login", {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/x-www-form-urlencoded",
+                 "x-requested-with": "XMLHttpRequest" },
+      body: form.toString(),
+    }).then(function (resp) {
+      return resp.json().catch(function () { throw new Error("HTTP " + resp.status); });
+    }).then(function (data) {
+      if (data && (data.status === 1 || data.status === "1")) {
+        toast("18comic 登录成功，正在刷新…", false);
+        setTimeout(function () { location.reload(); }, 800);
+      } else {
+        var msg = (data && data.errors && data.errors[0]) || (data && data.msg) || "账号或密码不对";
+        toast("18comic 登录失败：" + msg, true);
+        el.textContent = orig;
+        el.disabled = false;
+      }
+    }).catch(function (err) {
+      toast("18comic 登录失败：" + (err && err.message ? err.message : "网络错误"), true);
+      el.textContent = orig;
+      el.disabled = false;
+    });
   }, true);
 })();
 "###;
@@ -2648,11 +2753,13 @@ fn handle_toolbar_action(
                 let webview = active_webview(label)?;
                 let user = serde_json::to_string(&username).unwrap_or_else(|_| "\"\"".to_string());
                 let pass = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
+                // 选择式：弹「使用保存的账密？」chip，用户点填入才写表单
+                // （管理员 2026-11-27：不要自动填，要供选择）。
                 webview
                     .eval(&format!(
-                        "window.__xkAutofill && window.__xkAutofill({user}, {pass});"
+                        "window.__xkCredentialChip && window.__xkCredentialChip({user}, {pass});"
                     ))
-                    .map_err(|error| format!("自动填充失败: {error}"))?;
+                    .map_err(|error| format!("填充提示失败: {error}"))?;
             }
             Ok(())
         }
@@ -2923,7 +3030,6 @@ fn start_gm_poller(label: &str, app: AppHandle) {
             let active_label = active.as_ref().map(|view| view.label().to_string());
             if let Some(view) = active.as_ref() {
                 poll_tab_req(&label, view);
-                poll_jm_login(&label, view);
                 poll_gm_xhr_queue(view);
             }
             if webviews.len() > 1 {
@@ -2931,7 +3037,6 @@ fn start_gm_poller(label: &str, app: AppHandle) {
                 let view = &webviews[cursor];
                 if active_label.as_deref() != Some(view.label()) {
                     poll_tab_req(&label, view);
-                    poll_jm_login(&label, view);
                     poll_gm_xhr_queue(view);
                 }
             }
@@ -3033,12 +3138,44 @@ fn save_image_via_host(app: &AppHandle, label: &str, url: &str) {
     let app_for_save = app.clone();
     let url_for_save = url.to_string();
     let label_for_save = label.to_string();
+    let ask_dir = with_state(label, |state| state.settings.save_ask_dir).unwrap_or(false);
+    let configured_dir = with_state(label, |state| state.settings.save_dir.clone())
+        .unwrap_or_default();
     std::thread::spawn(move || {
         let app = &app_for_save;
         let url = &url_for_save;
-        let dir = default_download_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let dest = dir.join(download_file_name(&parsed));
+        // 目的地优先级：设置开「询问」→ 系统保存对话框（可直接选散图收藏夹
+        // 之类的任意文件夹）；否则用设置的默认文件夹；再否则 图片\画匣下载。
+        let dest =         if ask_dir {
+            use tauri_plugin_dialog::DialogExt;
+            let file_name = download_file_name(&parsed);
+            let picked = app_for_save
+                .dialog()
+                .file()
+                .set_file_name(&file_name)
+                .blocking_save_file();
+            match picked {
+                Some(path) => match path.into_path() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        toast_toolbar(&label_for_save, &format!("另存失败：路径无效 {error}"), "bad");
+                        return;
+                    }
+                },
+                None => {
+                    toast_toolbar(&label_for_save, "已取消另存", "ok");
+                    return;
+                }
+            }
+        } else {
+            let dir = if configured_dir.trim().is_empty() {
+                default_download_dir()
+            } else {
+                std::path::PathBuf::from(configured_dir.trim())
+            };
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(download_file_name(&parsed))
+        };
         let mut command = crate::netdl::curl_base();
         let cookie = crate::netdl::cookie_for(app, url);
         if !cookie.is_empty() {
@@ -3067,76 +3204,6 @@ fn save_image_via_host(app: &AppHandle, label: &str, url: &str) {
             toast_toolbar(&label_for_save, "另存失败：原图拉不下来", "bad");
         }
     });
-}
-
-/// 18comic 登录桥消费端：认领页面侧 `__xkLoginQ`，走 jm API 登录
-/// （官方 app 协议，无 reCAPTCHA），成功注入 AVS cookie 并刷新页面。
-/// 登录要走网络（几秒），放独立线程，别堵住 250ms 的轮询主线程。
-const JM_LOGIN_CLAIM_JS: &str = "JSON.stringify((function(){\
-var q = window.__xkLoginQ || [], take = q; window.__xkLoginQ = [];\
-return take; })())";
-
-fn poll_jm_login(label: &str, webview: &Webview) {
-    let raw = match eval_json(webview, JM_LOGIN_CLAIM_JS, Duration::from_millis(800)) {
-        Ok(raw) if raw.trim() != "[]" && !raw.trim().is_empty() => raw,
-        _ => return,
-    };
-    let reqs: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-    let Some(app) = app_of(label) else {
-        return;
-    };
-    for req in reqs {
-        let user = req
-            .get("user")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let pass = req
-            .get("pass")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if user.is_empty() || pass.is_empty() {
-            continue;
-        }
-        let webview = webview.clone();
-        let app = app.clone();
-        std::thread::spawn(move || {
-            let restore = |message: &str| {
-                // 把按钮文本还原，让用户能再点一次。
-                let _ = webview.eval(&format!(
-                    "(function(){{var b=document.querySelectorAll('button,a,input');\
-                     for(var i=0;i<b.length;i++){{var el=b[i];\
-                     if(el.__xkOrig){{el.textContent=el.__xkOrig;el.disabled=false;\
-                     delete el.__xkOrig;}}}}\
-                     var t=document.createElement('div');t.textContent={};\
-                     t.style.cssText='position:fixed;top:14px;left:50%;transform:translateX(-50%);\
-                     z-index:99999;background:#c0392b;color:#fff;padding:8px 18px;border-radius:8px;\
-                     font-size:13px';document.body.appendChild(t);\
-                     setTimeout(function(){{t.remove();}},6000);}})()",
-                    serde_json::to_string(message).unwrap_or_else(|_| "\"登录失败\"".to_string())
-                ));
-            };
-            match crate::jm_api::api_login(&app, &user, &pass) {
-                Ok(avs) => {
-                    match crate::site_login::import_cookie_text(&app, "18comic.vip", &format!("AVS={avs}"))
-                    {
-                        Ok(_) => {
-                            let _ = webview.eval("location.reload();");
-                        }
-                        Err(error) => restore(&format!("登录成功但注入 cookie 失败：{error}")),
-                    }
-                }
-                Err(error) => restore(&format!("18comic 登录失败：{}", {
-                    let brief = error.lines().next().unwrap_or("");
-                    brief
-                })),
-            }
-        });
-    }
 }
 
 /// 油猴跨域 XHR：轮询页面侧 `window.__xkGmXhr` 队列，把 pending 的请求用
@@ -4251,6 +4318,8 @@ mod tests {
             shortcuts: false,
             show_titles: false,
             tabs_width: 3.0,
+            save_ask_dir: true,
+            save_dir: "  ".to_string(),
         }
         .sanitized();
         assert_eq!(broken.home, BrowserSettings::default().home, "空主页回退默认");

@@ -34,6 +34,8 @@
     $("tabsWidthVal").textContent = $("tabsWidth").value + "%";
     $("shortcuts").checked = s.shortcuts !== false;
     $("showTitles").checked = s.showTitles !== false;
+    $("saveAskDir").checked = s.saveAskDir === true;
+    $("saveDir").value = s.saveDir || "";
   }
 
   function defaultSettings() {
@@ -44,7 +46,9 @@
       zoomStep: 0.1,
       shortcuts: true,
       showTitles: true,
-      tabsWidth: 0.44
+      tabsWidth: 0.44,
+      saveAskDir: false,
+      saveDir: ""
     };
   }
 
@@ -119,7 +123,9 @@
         zoomStep: Number($("zoomStep").value) / 100,
         shortcuts: $("shortcuts").checked,
         showTitles: $("showTitles").checked,
-        tabsWidth: Number($("tabsWidth").value) / 100
+        tabsWidth: Number($("tabsWidth").value) / 100,
+        saveAskDir: $("saveAskDir").checked,
+        saveDir: $("saveDir").value.trim()
       }
     });
     // 引擎没回话就别永远转：4 秒后放开按钮。

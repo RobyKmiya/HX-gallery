@@ -6,8 +6,25 @@
  * - loose   → loose://（散图收藏夹里的图）
  * - archive → gallery://（画廊封面或指定页）
  */
-import { api, assetUrl, readerPageUrl } from "./api";
+import { api, assetUrl, readerPageUrl, wallpaperCacheFileUrl } from "./api";
 import type { WallpaperSource } from "./types";
+
+/**
+ * 壁纸展示地址：优先本地缓存（外接硬盘睡不睡都不影响开屏），没缓存退回
+ * 原地址。结果顺序与入参对齐，不合法的项是空串。
+ */
+export async function wallpaperDisplayUrls(walls: WallpaperSource[]): Promise<string[]> {
+  try {
+    const names = await api.wallpaperCacheUrls(walls);
+    return walls.map((wall, index) => {
+      const name = names[index];
+      if (name) return wallpaperCacheFileUrl(name);
+      return wallpaperUrl(wall) ?? "";
+    });
+  } catch {
+    return walls.map((wall) => wallpaperUrl(wall) ?? "");
+  }
+}
 
 /** 把一条来源转成可用的图片 URL；不合法返回 null。 */
 export function wallpaperUrl(source: WallpaperSource): string | null {

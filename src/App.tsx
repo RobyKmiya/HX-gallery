@@ -54,6 +54,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // 浏览器引擎（嵌入网页标签）要求开新标签：转发给 WorkspaceTabs 已有的
+    // open-url-tab 桥，开成一个真正独立的工作台网页标签（有自己的历史栈）。
+    let unlisten: (() => void) | null = null;
+    let dead = false;
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<string>("huaxia://open-url-tab", (event) => {
+        const url = event.payload;
+        if (typeof url === "string" && /^https?:\/\//.test(url)) {
+          window.dispatchEvent(new CustomEvent("huaxia:open-url-tab", { detail: url }));
+        }
+      }),
+    ).then((un) => {
+      if (dead) un();
+      else unlisten = un;
+    });
+    return () => {
+      dead = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     // 首帧就绪：亮主窗、关掉原生启动屏。不等数据——锁屏/加载屏自己会接管反馈；
     // 这一步晚一拍，用户就要多看一会儿启动屏（管理员 2026-11-27）。
     void api.splashFinish();

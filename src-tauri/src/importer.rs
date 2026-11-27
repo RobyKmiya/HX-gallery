@@ -487,7 +487,7 @@ where
 
     let elapsed = started.elapsed().as_millis();
     let message = format!(
-        "导入完成：成功 {imported}，跳过重复 {skipped}，失败 {failed}，用时 {:.1}s",
+        "入库完成：成功 {imported}，跳过重复 {skipped}，失败 {failed}（入库耗时 {:.1}s）",
         elapsed as f64 / 1000.0
     );
 

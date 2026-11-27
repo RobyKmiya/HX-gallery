@@ -406,6 +406,24 @@ export default function WorkspaceTabs({
     });
   };
 
+  /** 标签条拖拽排序：记录拖动中的标签与落点（同 TagCenter 的实现方式）。 */
+  const [dragTabId, setDragTabId] = useState<string | null>(null);
+  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+
+  /** 落点排序：把 from 标签移动到 to 标签的位置（不是硬交换，同标签中心）。 */
+  const reorderTabs = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setTabs((prev) => {
+      const from = prev.findIndex((tab) => tab.id === fromId);
+      const to = prev.findIndex((tab) => tab.id === toId);
+      if (from < 0 || to < 0 || from === to) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  };
+
   /** 面板里的「跳到该标签」走这里；home 关不掉，直接切过去。 */
   const activateTab = (kind: string) => {
     if (!isTabKind(kind)) return;
@@ -429,11 +447,39 @@ export default function WorkspaceTabs({
       >
         {tabs.map((tab) => {
           const active = tab.id === activeId;
+          const dragging = dragTabId === tab.id;
+          const dragOver = dragOverTabId === tab.id && !dragging;
           return (
             <div
               key={tab.id}
               onClick={() => setActiveId(tab.id)}
-              className={`workspace-tab${active ? " is-active" : ""}`}
+              className={`workspace-tab${active ? " is-active" : ""}${
+                dragging ? " is-dragging" : ""
+              }${dragOver ? " is-drag-over" : ""}`}
+              draggable
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", tab.id);
+                setDragTabId(tab.id);
+              }}
+              onDragEnd={() => {
+                setDragTabId(null);
+                setDragOverTabId(null);
+              }}
+              onDragOver={(event) => {
+                if (!dragTabId || dragTabId === tab.id) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDragOverTabId((prev) => (prev === tab.id ? prev : tab.id));
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (dragTabId && dragTabId !== tab.id) {
+                  reorderTabs(dragTabId, tab.id);
+                }
+                setDragTabId(null);
+                setDragOverTabId(null);
+              }}
               style={{
                 display: "flex",
                 alignItems: "center",

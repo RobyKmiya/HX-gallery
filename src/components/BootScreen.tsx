@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WallpaperSource } from "../types";
-import { wallpaperUrl } from "../wallpapers";
+import { wallpaperDisplayUrls } from "../wallpapers";
 
 const STAGES = [
   "正在打开画匣…",
@@ -19,9 +19,17 @@ const STAGES = [
  * - 文案：分阶段提示，特别说明「外接硬盘休眠中」的等待是正常的。
  */
 export default function BootScreen({ walls }: { walls: WallpaperSource[] }) {
-  const urls = walls
-    .map((wall) => wallpaperUrl(wall))
-    .filter((url): url is string => Boolean(url));
+  const [urls, setUrls] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void wallpaperDisplayUrls(walls).then((list) => {
+      if (!alive) return;
+      setUrls(list.filter((url): url is string => Boolean(url)));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [walls]);
   const [index, setIndex] = useState(0);
   const [stage, setStage] = useState(0);
   const startRef = useRef(Date.now());

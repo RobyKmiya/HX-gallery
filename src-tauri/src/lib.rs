@@ -28,7 +28,7 @@ pub mod translate;
 pub mod userscripts;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -296,6 +296,169 @@ pause\r\n";
 }
 
 #[tauri::command]
+/// 壁纸本地缓存目录（AppData/wallpaper-cache）。壁纸锁源文件多半在外接
+/// 硬盘上，唤醒时锁屏/启动屏跟着卡（管理员 2026-11-27 验收①）：保存配置时
+/// 把图复制一份到本地，启动优先读缓存——外接硬盘睡不睡都不影响开屏。
+fn wallpaper_cache_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("wallpaper-cache"))
+}
+
+/// 缓存文件名：kind + 引用串的 md5 前缀 + 原扩展名（取不到/可疑就 .jpg）。
+fn wallpaper_cache_name(kind: &str, reference: &str) -> String {
+    let digest = {
+        use md5::{Digest, Md5};
+        let mut hasher = Md5::new();
+        hasher.update(format!("{kind}:{reference}").as_bytes());
+        hasher.finalize()
+    };
+    let ext = Path::new(reference)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "jpg".to_string());
+    format!(
+        "wp-{kind}-{}.{ext}",
+        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
+}
+
+/// 把一张壁纸的源文件复制进本地缓存（已有就跳过）。后台线程调用，错误忽略：
+/// 缓存只是加速，失败时前端仍走原地址。
+fn ensure_wallpaper_cached(app: &AppHandle, wall: &WallpaperSource) {
+    let Some(dir) = wallpaper_cache_dir(app) else {
+        return;
+    };
+    let name = wallpaper_cache_name(&wall.kind, &wall.reference);
+    let dest = dir.join(&name);
+    if dest.exists() {
+        return;
+    }
+    let source_path: Option<PathBuf> = match wall.kind.as_str() {
+        "file" => Some(PathBuf::from(&wall.reference)),
+        "loose" => {
+            // 散图：查库拿真实路径（库没开/记录缺失就放弃，下次保存时再试）。
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let Some((root, db_path)) = library_root_and_db(&state) else {
+                return;
+            };
+            let Ok(id) = wall.reference.parse::<i64>() else {
+                return;
+            };
+            crate::loose_images::fetch_record(&db_path, id).and_then(|record| {
+                match record.kind.as_str() {
+                    "file" => record.path.map(PathBuf::from),
+                    _ => record
+                        .rel_path
+                        .map(|rel| root.join(rel))
+                        .filter(|p| p.exists()),
+                }
+            })
+        }
+        // archive 来源走画廊协议（有页缓存），不复制。
+        _ => return,
+    };
+    let Some(src) = source_path else {
+        return;
+    };
+    if !src.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::copy(&src, &dest);
+}
+
+/// 后台把整组壁纸缓存到本地（不阻塞保存/读取）。
+fn ensure_walls_cached(app: &AppHandle, walls: &[WallpaperSource]) {
+    let app = app.clone();
+    let walls = walls.to_vec();
+    std::thread::spawn(move || {
+        for wall in &walls {
+            ensure_wallpaper_cached(&app, wall);
+        }
+    });
+}
+
+/// 逐张返回本地缓存文件名（null = 没缓存，前端退回原地址）。
+#[tauri::command]
+fn wallpaper_cache_urls(
+    app: AppHandle,
+    walls: Vec<WallpaperSource>,
+) -> Vec<Option<String>> {
+    // 顺手补缓存（第一次启动时缓存可能还没来得及生成）。
+    ensure_walls_cached(&app, &walls);
+    walls
+        .iter()
+        .map(|wall| {
+            let dir = wallpaper_cache_dir(&app)?;
+            let path = dir.join(wallpaper_cache_name(&wall.kind, &wall.reference));
+            if path.exists() {
+                path.file_name().map(|n| n.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// `wcache://` 协议服务：只从壁纸缓存目录读文件（文件名白名单校验，防穿越）。
+fn serve_wallpaper_cache(
+    app: &AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::StatusCode;
+    let not_found = |code: StatusCode, message: &str| {
+        tauri::http::Response::builder()
+            .status(code)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(message.as_bytes().to_vec())
+            .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+    };
+    let name = request.uri().path().trim_start_matches('/').to_string();
+    // 白名单：wp- 前缀 + 字母数字/点/横线/下划线，不允许斜杠。
+    let valid = name.len() < 128
+        && name.starts_with("wp-")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_');
+    if !valid {
+        return not_found(StatusCode::BAD_REQUEST, "缓存文件名无效");
+    }
+    let Some(dir) = wallpaper_cache_dir(app) else {
+        return not_found(StatusCode::NOT_FOUND, "缓存目录不可用");
+    };
+    let path = dir.join(&name);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return not_found(StatusCode::NOT_FOUND, "缓存缺失"),
+    };
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpg")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        _ => "image/jpeg",
+    };
+    tauri::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", mime)
+        .body(bytes)
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
+#[tauri::command]
 fn get_wallpaper_lock(app: AppHandle) -> WallpaperLock {
     let settings = read_settings(&app);
     let mut lock = settings.wallpaper_lock.unwrap_or_default();
@@ -334,6 +497,8 @@ fn save_wallpaper_lock(app: AppHandle, config: WallpaperLock) -> Result<Wallpape
     }
     settings.wallpaper_lock = Some(next.clone());
     write_settings(&app, &settings);
+    // 保存即缓存：把壁纸复制到本地，启动屏/锁屏不再依赖外接硬盘唤醒。
+    ensure_walls_cached(&app, &next.walls);
     let mut out = next;
     out.password_hash.clear();
     out.salt.clear();
@@ -2545,6 +2710,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .register_uri_scheme_protocol("loose", move |context, request| {
             crate::loose_images::serve(context.app_handle(), request)
         })
+        .register_uri_scheme_protocol("wcache", |context, request| {
+            serve_wallpaper_cache(context.app_handle(), request)
+        })
         .setup(move |app| {
             // 兜底定时器必须先于一切可能阻塞的活儿启动：外接硬盘在休眠时，
             // 下面 AppState::new → db::open_library 会把 setup 整个卡住几十秒。
@@ -2705,6 +2873,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             set_desktop_wallpaper,
             get_wallpaper_lock,
             save_wallpaper_lock,
+            wallpaper_cache_urls,
             set_wallpaper_password,
             verify_wallpaper_password,
             browser_history_list,

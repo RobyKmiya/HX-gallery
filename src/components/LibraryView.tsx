@@ -801,6 +801,8 @@ export default function LibraryView({
   const loadingMoreRef = useRef(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const initialScanStartedRef = useRef(false);
+  /** 扫描去重：初始扫描 / 下载完成回调 / 手动点撞在一起时只放一个进去。 */
+  const scanInFlightRef = useRef(false);
 
   const notify = useCallback((message: string, kind: ToastKind = "info") => {
     setToast({ id: Date.now(), message, kind });
@@ -1271,6 +1273,11 @@ export default function LibraryView({
 
   const runScan = useCallback(
     async (silent: boolean) => {
+      // 去重：启动时初始扫描 + 完成回调 + 手动点可能撞在一起；后端互斥返回
+      // 「已有导入或扫描正在进行」——这不是失败，静默等下一轮就好（管理员
+      // 2026-11-27 截图：启动就弹「扫描失败」红条）。
+      if (scanInFlightRef.current) return;
+      scanInFlightRef.current = true;
       setScanning(true);
       try {
         const report = await api.scanLibrary();
@@ -1292,8 +1299,13 @@ export default function LibraryView({
           );
         }
       } catch (error) {
-        notify(`扫描失败：${String(error)}`, "error");
+        const message = String(error);
+        if (message.includes("已有导入或扫描正在进行")) {
+          return;
+        }
+        notify(`扫描失败：${message}`, "error");
       } finally {
+        scanInFlightRef.current = false;
         setScanning(false);
       }
     },

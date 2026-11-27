@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { WallpaperLockConfig } from "../types";
-import { wallpaperUrl } from "../wallpapers";
+import { wallpaperDisplayUrls } from "../wallpapers";
 
 /**
  * 启动壁纸锁：整屏壁纸 + 居中密码框。
@@ -23,11 +23,24 @@ export default function WallpaperLock({
   config: WallpaperLockConfig;
   onUnlock: () => void;
 }) {
-  const slides = config.walls
-    .map((wall) => ({ url: wallpaperUrl(wall), crop: wall.crop ?? null }))
-    .filter((slide): slide is { url: string; crop: { x: number; y: number } | null } =>
-      Boolean(slide.url),
-    );
+  const [slides, setSlides] = useState<
+    { url: string; crop: { x: number; y: number } | null }[]
+  >([]);
+  useEffect(() => {
+    let alive = true;
+    // 优先本地缓存：外接硬盘休眠时锁屏不跟卡（管理员 2026-11-27 验收①）。
+    void wallpaperDisplayUrls(config.walls).then((urls) => {
+      if (!alive) return;
+      setSlides(
+        config.walls
+          .map((wall, i) => ({ url: urls[i], crop: wall.crop ?? null }))
+          .filter((slide) => Boolean(slide.url)),
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, [config.walls]);
   const [index, setIndex] = useState(0);
   const [password, setPassword] = useState("");
   const [error, setError] = useState(false);
