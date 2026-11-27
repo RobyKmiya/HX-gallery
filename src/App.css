@@ -7332,6 +7332,22 @@ body.is-splitting {
   gap: 0;
 }
 
+/* 紧凑模式收藏夹行：与其他导航行同高同宽、图标统一放大到 20px 视觉对齐
+  （管理员 2026-11-28：收窄前后图标要基本不变、只是省去文字，不许错位）。 */
+.sidebar.is-compact .nav-collection-list {
+  gap: 0;
+}
+
+.sidebar.is-compact .nav-collection-list .nav-item {
+  padding: 9px 0;
+}
+
+.sidebar.is-compact .nav-collection-list .nav-item svg,
+.sidebar.is-compact .nav-collection-list .nav-mini svg {
+  width: 20px;
+  height: 20px;
+}
+
 .sidebar.is-compact .nav-row {
   display: block;
 }
