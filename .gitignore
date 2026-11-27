@@ -42,3 +42,4 @@ backups/
 
 # 本机库路径（私有，不进仓库）
 /scripts/.local-library
+library.db
