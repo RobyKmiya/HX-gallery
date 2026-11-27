@@ -62,6 +62,11 @@ struct AppInner {
     library: Option<db::LibraryContext>,
     last_library_path: Option<String>,
     startup_error: Option<String>,
+    /// 库正在后台线程打开（外接硬盘唤醒/大库 SQLite 恢复）：
+    /// 期间 get_library_state 报 loading=true，前端停在加载屏轮询。
+    /// 2026-11-27 起 setup **不再同步开库**——主线程被硬盘唤醒卡住时，
+    /// 连启动屏的 WebView 都初始化不了（管理员截图：黑屏无加载动效）。
+    library_opening: bool,
 }
 
 /// 应用状态。
@@ -97,28 +102,11 @@ impl AppState {
             library: None,
             last_library_path: settings.library_path.clone(),
             startup_error: None,
+            // 有上次的库路径就标记「后台打开中」；真正的验证与 SQLite 打开
+            // 在 setup 拉起的后台线程里做，绝不碰主线程（外接硬盘唤醒
+            // 会把整个启动流程连启动屏一起卡死，管理员 2026-11-27 二次反馈）。
+            library_opening: settings.library_path.is_some(),
         };
-
-        if let Some(path) = settings.library_path {
-            let library_path = PathBuf::from(&path);
-            let initialized = library_path.is_dir()
-                && library_path.join(".gallery").join("library.db").exists();
-
-            if initialized {
-                match db::open_library(&library_path) {
-                    Ok(library) => {
-                        eprintln!("opened library at {}", library.root.to_string_lossy());
-                        inner.library = Some(library);
-                    }
-                    Err(error) => {
-                        eprintln!("failed to open library: {error}");
-                        inner.startup_error = Some(format!("上次的库无法打开：{error}"));
-                    }
-                }
-            } else {
-                inner.startup_error = Some("上次的库目录不存在或尚未初始化".to_string());
-            }
-        }
 
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -403,6 +391,7 @@ fn build_library_state(state: &AppState) -> Result<LibraryState, String> {
             total_size,
             last_library_path: inner.last_library_path.clone(),
             error: None,
+            loading: false,
         })
     } else {
         Ok(LibraryState {
@@ -413,6 +402,7 @@ fn build_library_state(state: &AppState) -> Result<LibraryState, String> {
             total_size: 0,
             last_library_path: inner.last_library_path.clone(),
             error: inner.startup_error.clone(),
+            loading: inner.library_opening,
         })
     }
 }
@@ -2650,6 +2640,58 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             app.manage(state);
             // 守卫交给 Tauri 托管，活到进程结束；提前 drop 会立刻放开互斥体。
             app.manage(guard);
+            // 后台开库：验证目录 + SQLite 打开放到独立线程。外接硬盘在休眠时，
+            // 唤醒动辄十几秒——以前同步做，主线程被卡住，连启动屏的 WebView
+            // 都初始化不了（管理员看到的「黑屏无加载动效」）。现在启动屏、
+            // 锁屏、主窗全部先跑起来，数据源在后台慢慢醒，前端轮询 getLibraryState。
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let Some(state) = handle.try_state::<AppState>() else {
+                        return;
+                    };
+                    let last_path = state
+                        .lock()
+                        .ok()
+                        .and_then(|inner| inner.last_library_path.clone());
+                    let result = match last_path {
+                        None => Ok(None),
+                        Some(path) => {
+                            let library_path = PathBuf::from(&path);
+                            let initialized = library_path.is_dir()
+                                && library_path.join(".gallery").join("library.db").exists();
+                            if !initialized {
+                                Err("上次的库目录不存在或尚未初始化".to_string())
+                            } else {
+                                match db::open_library(&library_path) {
+                                    Ok(library) => {
+                                        eprintln!(
+                                            "opened library at {}（后台）",
+                                            library.root.to_string_lossy()
+                                        );
+                                        Ok(Some(library))
+                                    }
+                                    Err(error) => {
+                                        eprintln!("failed to open library: {error}");
+                                        Err(format!("上次的库无法打开：{error}"))
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    if let Ok(mut inner) = state.lock() {
+                        inner.library_opening = false;
+                        match result {
+                            Ok(Some(library)) => {
+                                inner.library = Some(library);
+                                inner.startup_error = None;
+                            }
+                            Ok(None) => {}
+                            Err(error) => inner.startup_error = Some(error),
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![            get_library_state,

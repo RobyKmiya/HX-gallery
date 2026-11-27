@@ -23,14 +23,29 @@ export default function App() {
   const bootLibrary = useCallback(async () => {
     setPhase("booting");
     try {
-      const state = await api.getLibraryState();
-      setLastLibraryPath(state.lastLibraryPath);
-      setError(state.error);
-      if (state.libraryPath) {
-        setLibrary(state);
-        setPhase("library");
-      } else {
-        setPhase("welcome");
+      // 后台开库模式：Rust 侧在独立线程打开库（外接硬盘唤醒可能要十几秒），
+      // 第一次请求多半返回 loading=true——停在加载屏轮询，开好自动进库。
+      const deadline = Date.now() + 120_000;
+      for (;;) {
+        const state = await api.getLibraryState();
+        if (state.libraryPath) {
+          setLastLibraryPath(state.lastLibraryPath);
+          setError(state.error);
+          setLibrary(state);
+          setPhase("library");
+          return;
+        }
+        if (!state.loading || Date.now() > deadline) {
+          // 开库结束但没有库（首次使用 / 上次的库失效）：进欢迎页带错误提示。
+          setLastLibraryPath(state.lastLibraryPath);
+          setError(
+            state.error ??
+              (state.loading ? "库打开超时：外接硬盘可能没就绪，重启应用再试" : null),
+          );
+          setPhase("welcome");
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 400));
       }
     } catch (bootError) {
       setError(`启动失败：${String(bootError)}`);

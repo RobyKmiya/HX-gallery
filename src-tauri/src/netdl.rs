@@ -1285,7 +1285,7 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
         s.stage = "准备下载…".to_string();
     });
 
-    download_and_package(app, urls, &title, &tag_map, url, None, None)
+    download_and_package(app, urls, &title, &tag_map, url, None, None, None)
 }
 
 fn nhentai_gallery_id(url: &str) -> Option<String> {
@@ -1324,7 +1324,7 @@ fn run_nhentai_from_html(app: &AppHandle, page_url: &str) -> Result<String, Stri
         s.tags = flat;
         s.total = urls.len();
     });
-    download_and_package(app, urls, &title, &tag_map, page_url, None, None)
+    download_and_package(app, urls, &title, &tag_map, page_url, None, None, None)
 }
 
 fn nhentai_title_from_html(html: &str) -> Option<String> {
@@ -1454,7 +1454,7 @@ fn run_18comic_download(app: &AppHandle, url: &str) -> Result<String, String> {
     } else {
         None
     };
-    download_and_package(app, urls, &title, &tags, url, jm.as_ref(), None)
+    download_and_package(app, urls, &title, &tags, url, jm.as_ref(), None, None)
 }
 
 /// 从 /photo/{id} 或 /album/{id} 取章节/作品 id。
@@ -1665,6 +1665,10 @@ pub(crate) struct JmDecode {
 /// `progress` 为 Some((base, grand)) 时表示「整本里的第 N 章」：
 /// done 上报为 base+本章数、total 上报为 grand（整本总张数），
 /// 进度条才能跨章单调前进——否则每章重置，前端看到的是「不跟进度、瞬间完成」。
+/// `source_url` 写进备注「源：」（详情页可点回原页）。None 时退回 referer：
+/// 多数流程 referer 就是作品页；18comic API 路径的 referer 是接口域名
+/// （cdnhjk.net 之类），不能当源链接展示（管理员 2026-11-27 截图），
+/// 必须显式传专辑页 URL。
 pub(crate) fn download_and_package(
     app: &AppHandle,
     urls: Vec<String>,
@@ -1673,6 +1677,7 @@ pub(crate) fn download_and_package(
     referer: &str,
     jm: Option<&JmDecode>,
     progress: Option<(usize, usize)>,
+    source_url: Option<&str>,
 ) -> Result<String, String> {
     let count = urls.len();
     if count == 0 {
@@ -1827,7 +1832,13 @@ pub(crate) fn download_and_package(
     }))?;
     let _ = std::fs::remove_dir_all(&temp);
     set_status(|s| s.stage = "导入画匣…".to_string());
-    crate::d2::import_downloaded_meta(app, target.clone(), title, tag_map, Some(referer))?;
+    crate::d2::import_downloaded_meta(
+        app,
+        target.clone(),
+        title,
+        tag_map,
+        Some(source_url.unwrap_or(referer)),
+    )?;
     Ok(target.to_string_lossy().to_string())
 }
 

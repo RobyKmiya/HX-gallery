@@ -9578,4 +9578,4 @@ body.is-splitting {
 /* 沉浸阅读（管理员 2026-11-27「不需要顶部栏框」）：进入沉浸时整个顶部标签栏
    （workspace-tabs，含标签与自绘窗控）隐藏，主内容区因外层 flex column 布局
    自动撑满；退出沉浸即恢复。纯显隐、无过渡，避免拖慢交互。 */
-body.reader-immersive .workspace-tabs { display: none; }
+body.reader-immersive .workspace-tabs { display: none !important; }

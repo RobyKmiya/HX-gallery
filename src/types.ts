@@ -6,6 +6,8 @@ export interface LibraryState {
   totalSize: number;
   lastLibraryPath: string | null;
   error: string | null;
+  /** 库正在后台打开（外接硬盘唤醒中）：停在加载屏轮询。 */
+  loading?: boolean;
 }
 
 export interface ArchiveCardData {

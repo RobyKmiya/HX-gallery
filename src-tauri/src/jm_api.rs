@@ -111,12 +111,144 @@ fn form_encode(text: &str) -> String {
     out
 }
 
+/// 登录：先走**网页表单 POST**（官方 JMComic 的 JmHtmlClient.login 同款），
+/// 不通再退回移动端 API。返回 AVS cookie 值。
+///
+/// 为什么主路径换成网页 POST：2026-11-27 管理员实测「登录接口 HTTP 401」，
+/// 本机复测四个接口域名的 /login 全部 404——接口域名根本没挂登录路由。
+/// 而网页 POST `https://18comic.vip/login` 不经过验证码（验证码只拦浏览器
+/// 里的交互流程，拦不住直接表单提交），status==1 时 AVS 就在响应的
+/// Set-Cookie 里；curl 带上浏览器的 cf_clearance（cookie_for）能过盾。
+pub fn api_login(app: &tauri::AppHandle, username: &str, password: &str) -> Result<String, String> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Err("账号和密码都要填".to_string());
+    }
+    match api_login_web(app, username, password) {
+        Ok(avs) => return Ok(avs),
+        Err(web_error) => {
+            if let Ok(avs) = api_login_mobile(app, username, password) {
+                return Ok(avs);
+            }
+            Err(web_error)
+        }
+    }
+}
+
+/// 网页表单登录：POST https://18comic.vip/login，AVS 从响应 Set-Cookie 里取。
+fn api_login_web(app: &tauri::AppHandle, username: &str, password: &str) -> Result<String, String> {
+    const WEB_LOGIN_URL: &str = "https://18comic.vip/login";
+    let form = format!(
+        "username={}&password={}&id_remember=on&login_remember=on&submit_login=",
+        form_encode(username),
+        form_encode(password)
+    );
+    let mut command = std::process::Command::new("curl");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .arg("-sS")
+        // 不 -L：官方 allow_redirects=False，30x 只会是异常信号。
+        .arg("--max-time")
+        .arg("30")
+        .arg("--connect-timeout")
+        .arg("8")
+        .arg("-A")
+        .arg(crate::browser::webview_user_agent())
+        .arg("-H")
+        .arg("content-type: application/x-www-form-urlencoded")
+        .arg("-H")
+        .arg("referer: https://18comic.vip/")
+        .arg("-H")
+        .arg("x-requested-with: XMLHttpRequest")
+        .arg("-H")
+        .arg(format!("cookie: {}", netdl::cookie_for(app, WEB_LOGIN_URL)))
+        .arg("-X")
+        .arg("POST")
+        .arg("--data")
+        .arg(&form)
+        // 响应头打到 stdout：AVS 就在 Set-Cookie 里。
+        .arg("-D")
+        .arg("-")
+        .arg("-w")
+        .arg("\n%{http_code}")
+        .arg(WEB_LOGIN_URL);
+    if let Some(proxy) = netdl::proxy_arg() {
+        command.arg("--proxy").arg(proxy);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("调用 curl 失败：{e}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // 尾行 = HTTP 状态码（-w）；其上是「头 + 体」。
+    let Some((head_and_body, code_line)) = text.rsplit_once('\n') else {
+        return Err("登录接口没有响应".to_string());
+    };
+    let code: u16 = code_line.trim().parse().unwrap_or(0);
+    if code == 403 {
+        return Err(
+            "被 Cloudflare 盾拦下：请先在浏览器标签里打开一次 18comic.vip 过盾，再回来登录"
+                .to_string(),
+        );
+    }
+    if !(200..300).contains(&code) {
+        return Err(format!("登录接口 HTTP {code}"));
+    }
+    // 头在体前面，第一个空行分界。
+    let (headers, body) = head_and_body
+        .split_once("\r\n\r\n")
+        .unwrap_or((head_and_body, ""));
+    if let Some(avs) = extract_avs_from_headers(headers) {
+        return Ok(avs);
+    }
+    // 没有 AVS cookie：看 JSON（status!=1 时把站点错误透出来）。
+    let value: serde_json::Value = serde_json::from_str(body.trim()).unwrap_or(serde_json::Value::Null);
+    let status_ok = value.get("status").and_then(|v| v.as_i64()) == Some(1);
+    if status_ok {
+        // 重复登录的官方已知 bug：status=1 但 Set-Cookie 里没有 AVS。
+        return Err(
+            "站点说登录成功但没下发 AVS cookie：请到 设置 → 浏览器数据 → 登录态 里手动导入一次"
+                .to_string(),
+        );
+    }
+    let msg = value
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .and_then(|list| list.first())
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("msg").and_then(|v| v.as_str()))
+        .unwrap_or("账号或密码不对（站点也没给出具体原因）");
+    Err(format!("登录失败：{msg}"))
+}
+
+/// 从响应头里抠出 AVS cookie 值（Set-Cookie 大小写不敏感匹配，值取到 ';' 为止）。
+fn extract_avs_from_headers(headers: &str) -> Option<String> {
+    for line in headers.lines() {
+        let lower = line.to_ascii_lowercase();
+        if !lower.starts_with("set-cookie:") {
+            continue;
+        }
+        if let Some(pos) = lower.find("avs=") {
+            let value: String = line[pos + 4..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 /// 移动端 API 登录（对齐 jmcomic `req_api('/login', False, data={username,password})`）：
 /// 成功后解密数据的 `s` 字段就是网页登录态 cookie **AVS** 的值。
 /// 用它绕开网页登录：内嵌 WebView2 里 18comic 登录依赖 Google reCAPTCHA，
 /// gstatic 加载失败时点「登錄」毫无反应（管理员 2026-11-27 反馈登录不了）。
 /// 返回 AVS token；失败 Err 带原因（账号密码错误/接口不通）。
-pub fn api_login(app: &tauri::AppHandle, username: &str, password: &str) -> Result<String, String> {
+fn api_login_mobile(app: &tauri::AppHandle, username: &str, password: &str) -> Result<String, String> {
     let ts = now_ts().to_string();
     let token = md5hex(&format!("{ts}{TOKEN_SECRET}"));
     let form = format!(
@@ -426,6 +558,9 @@ pub fn run_album_via_api(app: &tauri::AppHandle, aid: u64) -> Result<String, Str
             scramble_id: 220980,
             aid: chapter.photo_id,
         };
+        // 备注「源」必须是管理员看到的作品页（18comic.vip/album/…），
+        // 接口域名（cdnhjk.net）没意义（管理员 2026-11-27 截图）。
+        let source = format!("https://18comic.vip/album/{aid}/");
         let path = netdl::download_and_package(
             app,
             urls,
@@ -434,6 +569,7 @@ pub fn run_album_via_api(app: &tauri::AppHandle, aid: u64) -> Result<String, Str
             &referer,
             Some(&jm),
             Some((done_before_chapter, total)),
+            Some(&source),
         )?;
         if imported.is_empty() {
             imported = path;

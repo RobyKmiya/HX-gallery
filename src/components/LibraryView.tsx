@@ -4346,7 +4346,7 @@ export default function LibraryView({
           <NetGalleryDialog
             embedded
             onClose={() => onActivateTab?.("home")}
-            onDone={() => void onLibraryChanged?.()}
+            onDone={() => void runScan(true)}
           />
         </div>
       </div>

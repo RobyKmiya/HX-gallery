@@ -31,7 +31,8 @@
         "center": true,
         "decorations": false,
         "resizable": false,
-        "visible": true
+        "visible": true,
+        "backgroundColor": "#14151a"
       }
     ],
     "security": {

@@ -12,6 +12,9 @@ pub struct LibraryState {
     pub total_size: i64,
     pub last_library_path: Option<String>,
     pub error: Option<String>,
+    /// 库正在后台打开（外接硬盘唤醒中）：前端停在加载屏轮询，不要进欢迎页。
+    #[serde(default)]
+    pub loading: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

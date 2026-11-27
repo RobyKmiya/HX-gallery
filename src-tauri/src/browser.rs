@@ -2273,48 +2273,87 @@ const JM_LOGIN_HOOK: &str = r###"
 /// 内容页右键菜单脚本（引擎级，所有内容标签注入）。
 ///
 /// WebView2 的规则：页面在 `contextmenu` 事件里 `preventDefault()`，原生默认
-/// 菜单就不弹——所以纯页内实现即可。菜单本体也是 Shadow DOM（不沾站点样式）。
-/// 本地动作（复制/全选）页面内完成；其余动作（开新标签/另存原图/历史导航）
-/// 推进 `window.__xkReqQ` 队列，由引擎轮询器消化（与工具栏同一套契约，数组
-/// 队列保证连点两次不会互相覆盖）。
+/// 菜单就不弹——所以纯页内实现即可。
+///
+/// 2026-11-27 二轮重造（管理员两次反馈「各项点了没用」）：旧版用 Shadow DOM +
+/// document 捕获阶段的 closeMenu，点菜单项时先在捕获期把宿主从 DOM 摘掉，
+/// 各家 WebView2/Chromium 对「派发中节点被移除后剩余监听是否继续走」的实现
+/// 差异正好踩在这里——headless 测试全通、真机全哑。新版改成：
+///   ① 菜单挂普通 DOM（内联样式），点项用 **mousedown** 直接执行（先于一切
+///      click/捕获清理逻辑，不存在「元素先被摘掉」的问题）；
+///   ② 后退/前进/刷新/全选/复制全部**页面内立即执行**（这些根本不需要宿主，
+///      不该进队列绕一圈）；需要宿主的动作（开新标签/另存）才推 __xkReqQ；
+///   ③ 推队列的动作给出页内可见回执（「已发送…」），宿主侧若没消费，
+///      管理员能看到「发送了但没发生」，不再是静默失败。
 const CONTEXT_MENU_SCRIPT: &str = r###"
 (function () {
   if (window.__xkCtxMenu) return;
   window.__xkCtxMenu = true;
-  var host = null;
+  var menuEl = null;
 
   function closeMenu() {
-    if (host) { host.remove(); host = null; }
-    document.removeEventListener("click", closeMenu, true);
-    document.removeEventListener("keydown", onKey, true);
-    window.removeEventListener("blur", closeMenu, true);
+    if (menuEl) { menuEl.remove(); menuEl = null; }
   }
-  function onKey(e) { if (e.key === "Escape") closeMenu(); }
 
-  function item(label, fn, disabled) {
-    var it = document.createElement("div");
-    it.className = "xm-item";
-    it.textContent = label;
-    if (disabled) it.className += " xm-disabled";
-    else it.addEventListener("click", function (e) { e.stopPropagation(); closeMenu(); fn(); });
-    return it;
+  function ack(text) {
+    try {
+      var t = document.createElement("div");
+      t.textContent = "✓ " + text;
+      t.setAttribute("style",
+        "position:fixed;left:50%;bottom:36px;transform:translateX(-50%);" +
+        "z-index:2147483647;background:rgba(24,26,32,.94);color:#dfe3ea;" +
+        "padding:7px 16px;border-radius:8px;font:12.5px 'Segoe UI','Microsoft YaHei UI',sans-serif;" +
+        "box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;");
+      document.body.appendChild(t);
+      setTimeout(function () { t.remove(); }, 1800);
+    } catch (e) {}
   }
-  function sep() { var s = document.createElement("div"); s.className = "xm-sep"; return s; }
 
   function copyText(text) {
-    if (!text) return;
+    if (!text) return false;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).catch(function () { legacyCopy(text); });
-    } else legacyCopy(text);
+      return true;
+    }
+    legacyCopy(text);
+    return true;
   }
   function legacyCopy(text) {
     var ta = document.createElement("textarea");
     ta.value = text;
-    ta.style.position = "fixed"; ta.style.opacity = "0";
+    ta.setAttribute("style", "position:fixed;opacity:0;");
     document.body.appendChild(ta);
     ta.select();
     try { document.execCommand("copy"); } catch (e) {}
     ta.remove();
+  }
+
+  function enqueue(action, url, ackText) {
+    window.__xkReqQ = window.__xkReqQ || [];
+    window.__xkReqQ.push({ action: action, url: url });
+    if (ackText) ack(ackText);
+  }
+
+  function item(label, fn) {
+    var it = document.createElement("div");
+    it.textContent = label;
+    it.setAttribute("style",
+      "padding:7px 14px;border-radius:6px;cursor:pointer;color:#e8eaf0;white-space:nowrap;");
+    it.addEventListener("mouseenter", function () { it.style.background = "#2c313c"; });
+    it.addEventListener("mouseleave", function () { it.style.background = "transparent"; });
+    // mousedown 直接执行：不参与 click 派发，天然免疫「菜单先被关掉/摘掉」。
+    it.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu();
+      fn();
+    });
+    return it;
+  }
+  function sep() {
+    var s = document.createElement("div");
+    s.setAttribute("style", "height:1px;margin:4px 8px;background:#3a3f4a;");
+    return s;
   }
 
   function openMenu(x, y, target) {
@@ -2322,77 +2361,71 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
     var link = target.closest ? target.closest("a") : null;
     var img = target.tagName === "IMG" ? target : (target.closest ? target.closest("img") : null);
     var selection = String(window.getSelection ? window.getSelection() : "");
-    var items = [];
 
-    if (link) {
-      items.push(item("在新标签打开链接", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "new", url: link.href }); }));
-      items.push(item("复制链接地址", function () { copyText(link.href); }));
-    }
-    if (img && (img.currentSrc || img.src)) {
-      items.push(item("在新标签打开图片", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "new", url: img.currentSrc || img.src }); }));
-      items.push(item("复制图片地址", function () { copyText(img.currentSrc || img.src); }));
-      // 不能用 <a download>.click()：跨源链接的 download 属性会被 Chromium
-      // 无视，点了变成普通导航（当前标签直接跳到原图，永远也存不了盘）。
-      // 改走队列，宿主用 curl（带 cookie / UA / referer）抓原图存进 图片\画匣下载。
-      items.push(item("打开原图并另存", function () {
-        var url = img.currentSrc || img.src;
-        if (url) (window.__xkReqQ = window.__xkReqQ || []).push({ action: "save", url: url });
+    var menu = document.createElement("div");
+    menu.setAttribute("style",
+      "position:fixed;min-width:180px;padding:5px;border-radius:10px;" +
+      "background:rgba(20,22,27,.98);border:1px solid #333842;" +
+      "box-shadow:0 8px 24px rgba(0,0,0,.45);z-index:2147483647;" +
+      "font:12px 'Segoe UI','Microsoft YaHei UI',sans-serif;");
+
+    if (link && link.href) {
+      menu.appendChild(item("在新标签打开链接", function () {
+        enqueue("new", link.href, "已发送：新标签打开");
+      }));
+      menu.appendChild(item("复制链接地址", function () {
+        copyText(link.href); ack("已复制链接地址");
       }));
     }
-    if (selection) items.push(item("复制选中文本", function () { copyText(selection); }));
-    items.push(sep());
-    // 后退/前进/刷新走队列：宿主的 history_action 带原生 reload、空白页兜底和
-    // 「没有可后退的页面」提示；页面裸调 history.back() 在第一条记录上就是
-    // 静默无效，管理员看到的就是「点了没反应」。
-    items.push(item("后退", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "back" }); }));
-    items.push(item("前进", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "forward" }); }));
-    items.push(item("刷新", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "reload" }); }));
-    items.push(sep());
-    items.push(item("全选", function () {
+    if (img && (img.currentSrc || img.src)) {
+      var src = img.currentSrc || img.src;
+      menu.appendChild(item("在新标签打开图片", function () {
+        enqueue("new", src, "已发送：新标签打开图片");
+      }));
+      menu.appendChild(item("复制图片地址", function () {
+        copyText(src); ack("已复制图片地址");
+      }));
+      menu.appendChild(item("打开原图并另存", function () {
+        enqueue("save", src, "已发送：另存原图");
+      }));
+    }
+    if (selection) {
+      menu.appendChild(item("复制选中文本", function () {
+        copyText(selection); ack("已复制选中文本");
+      }));
+    }
+    menu.appendChild(sep());
+    // 历史导航页面内直接执行——本来就不需要宿主，绕队列只会多一层失灵面。
+    menu.appendChild(item("后退", function () {
+      if (history.length > 1) history.back(); else ack("没有可后退的页面");
+    }));
+    menu.appendChild(item("前进", function () { history.forward(); }));
+    menu.appendChild(item("刷新", function () { location.reload(); }));
+    menu.appendChild(sep());
+    menu.appendChild(item("全选", function () {
       var range = document.createRange();
       range.selectNodeContents(document.body);
       var sel = window.getSelection();
       if (sel) { sel.removeAllRanges(); sel.addRange(range); }
     }));
 
-    host = document.createElement("div");
-    host.setAttribute("style", "position:fixed;inset:0;z-index:2147483646;");
-    var root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
-    var style = document.createElement("style");
-    style.textContent = [
-      ".xm{position:fixed;min-width:180px;padding:5px;border-radius:10px;",
-      "background:rgba(20,22,27,.98);border:1px solid #333842;",
-      "box-shadow:0 8px 24px rgba(0,0,0,.45);color:#e8eaf0;",
-      "font:12px 'Segoe UI','Microsoft YaHei UI',sans-serif;}",
-      ".xm-item{padding:7px 12px;border-radius:6px;cursor:pointer;}",
-      ".xm-item:hover{background:#2c313c;}",
-      ".xm-disabled{color:#5a6070;cursor:default;}",
-      ".xm-disabled:hover{background:transparent;}",
-      ".xm-sep{height:1px;margin:4px 8px;background:#333842;}",
-    ].join("");
-    root.appendChild(style);
-    var menu = document.createElement("div");
-    menu.className = "xm";
-    for (var i = 0; i < items.length; i++) menu.appendChild(items[i]);
-    root.appendChild(menu);
-    document.documentElement.appendChild(host);
-
+    document.body.appendChild(menu);
     // 视口内收放
     var rect = menu.getBoundingClientRect();
     var maxX = window.innerWidth - rect.width - 4;
     var maxY = window.innerHeight - rect.height - 4;
-    menu.style.left = Math.min(x, Math.max(0, maxX)) + "px";
-    menu.style.top = Math.min(y, Math.max(0, maxY)) + "px";
+    menu.style.left = Math.max(0, Math.min(x, maxX)) + "px";
+    menu.style.top = Math.max(0, Math.min(y, maxY)) + "px";
+    menuEl = menu;
 
-    setTimeout(function () {
-      document.addEventListener("click", closeMenu, true);
-      document.addEventListener("keydown", onKey, true);
-      window.addEventListener("blur", closeMenu, true);
-      // 右键另一处：换菜单不关壳
-      document.addEventListener("contextmenu", function (e) {
-        if (host) { e.preventDefault(); }
-      }, true);
-    }, 0);
+    // 点菜单外面 / Esc / 滚动 → 关。mousedown 捕获：菜单项自己的 mousedown
+    // 已经 stopPropagation，不会误关自己。
+    document.addEventListener("mousedown", function (e) {
+      if (menuEl && !menuEl.contains(e.target)) closeMenu();
+    }, true);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeMenu();
+    }, true);
   }
 
   document.addEventListener("contextmenu", function (e) {
@@ -2716,55 +2749,7 @@ fn handle_toolbar_action(
             if url.trim().is_empty() {
                 return Ok(());
             }
-            let parsed = Url::parse(&url).map_err(|_| "图片地址无效".to_string())?;
-            // 当前页地址做 referer：图床的防盗链按来源放行，没有会 403。
-            let referer = with_state(label, |state| {
-                state
-                    .tabs
-                    .iter()
-                    .find(|tab| tab.id == state.active)
-                    .map(|tab| tab.url.clone())
-            })
-            .flatten()
-            .unwrap_or_default();
-            let app_for_save = app.clone();
-            let label_for_save = label.to_string();
-            std::thread::spawn(move || {
-                let dir = default_download_dir();
-                let _ = std::fs::create_dir_all(&dir);
-                let dest = dir.join(download_file_name(&parsed));
-                let mut command = crate::netdl::curl_base();
-                let cookie = crate::netdl::cookie_for(&app_for_save, &url);
-                if !cookie.is_empty() {
-                    command.arg("-H").arg(format!("Cookie: {cookie}"));
-                }
-                if !referer.trim().is_empty() {
-                    command.arg("-e").arg(&referer);
-                }
-                if let Some(proxy) = crate::netdl::proxy_arg() {
-                    command.arg("--proxy").arg(proxy);
-                }
-                command.arg("--fail").arg("--max-time").arg("120");
-                let outcome = command
-                    .arg("-o")
-                    .arg(&dest)
-                    .arg(&url)
-                    .output();
-                // 空/失败的残留文件清掉，别让用户在下载目录里捡到 0 字节的假图。
-                let ok = match &outcome {
-                    Ok(output) if output.status.success() => {
-                        std::fs::metadata(&dest).map(|meta| meta.len() > 0).unwrap_or(false)
-                    }
-                    _ => false,
-                };
-                if ok {
-                    toast_toolbar(&label_for_save, "已另存到 图片\\画匣下载", "ok");
-                } else {
-                    let _ = std::fs::remove_file(&dest);
-                    log_for(&label_for_save, &format!("另存原图失败：{url}"));
-                    toast_toolbar(&label_for_save, "另存失败：原图拉不下来", "bad");
-                }
-            });
+            save_image_via_host(app, label, &url);
             Ok(())
         }
         // ⚙ 设置面板保存：写运行态 + 落盘，立即生效（主页/步进/快捷键不用重开）。
@@ -2985,10 +2970,12 @@ fn poll_tab_req(label: &str, webview: &Webview) {
     if pending <= 0 {
         return;
     }
+    // 认领 new + save（右键菜单/快捷键的宿主侧动作），其余留给工具栏轮询器。
+    // 认领与保留在同一次 eval 里原子完成，两个轮询器按动作分家、互不吞占。
     const CLAIM_NEW_JS: &str = "JSON.stringify((function(){\
 var q = window.__xkReqQ || [], take = [], rest = [];\
 for (var i = 0; i < q.length; i++) { var it = q[i];\
-if (it && it.action === 'new' && it.url) { take.push(it); } else { rest.push(it); } }\
+if (it && (it.action === 'new' || it.action === 'save') && it.url) { take.push(it); } else { rest.push(it); } }\
 window.__xkReqQ = rest; return take; })())";
     let raw = match eval_json(webview, CLAIM_NEW_JS, Duration::from_millis(1200)) {
         Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
@@ -2998,23 +2985,88 @@ window.__xkReqQ = rest; return take; })())";
         Ok(value) => value,
         Err(_) => return,
     };
+    let Some(app) = app_of(label) else {
+        return;
+    };
     for req in reqs {
-        if req.get("action").and_then(|value| value.as_str()) != Some("new") {
-            continue;
-        }
+        let action = req
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
         let Some(url) = req.get("url").and_then(|value| value.as_str()) else {
             continue;
         };
         if url.is_empty() {
             continue;
         }
-        let Some(app) = app_of(label) else {
-            return;
-        };
-        if let Err(error) = new_tab(&app, label, url, true) {
-            log_for(label, &format!("右键新标签失败：{error}"));
+        match action.as_str() {
+            "new" => {
+                if let Err(error) = new_tab(&app, label, url, true) {
+                    log_for(label, &format!("右键新标签失败：{error}"));
+                }
+            }
+            "save" => save_image_via_host(&app, label, url),
+            _ => {}
         }
     }
+}
+
+/// 右键「打开原图并另存」的执行体：curl 抓原图（浏览器真实 UA / cookie /
+/// 当前页 referer / 系统代理），存进 图片\画匣下载，结果用工具栏提示汇报。
+/// 菜单侧（poll_tab_req）和工具栏动作分发侧共用。
+fn save_image_via_host(app: &AppHandle, label: &str, url: &str) {
+    let Ok(parsed) = Url::parse(url) else {
+        toast_toolbar(label, "另存失败：图片地址无效", "bad");
+        return;
+    };
+    // 当前页地址做 referer：图床的防盗链按来源放行，没有会 403。
+    let referer = with_state(label, |state| {
+        state
+            .tabs
+            .iter()
+            .find(|tab| tab.id == state.active)
+            .map(|tab| tab.url.clone())
+    })
+    .flatten()
+    .unwrap_or_default();
+    let app_for_save = app.clone();
+    let url_for_save = url.to_string();
+    let label_for_save = label.to_string();
+    std::thread::spawn(move || {
+        let app = &app_for_save;
+        let url = &url_for_save;
+        let dir = default_download_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join(download_file_name(&parsed));
+        let mut command = crate::netdl::curl_base();
+        let cookie = crate::netdl::cookie_for(app, url);
+        if !cookie.is_empty() {
+            command.arg("-H").arg(format!("Cookie: {cookie}"));
+        }
+        if !referer.trim().is_empty() {
+            command.arg("-e").arg(&referer);
+        }
+        if let Some(proxy) = crate::netdl::proxy_arg() {
+            command.arg("--proxy").arg(proxy);
+        }
+        command.arg("--fail").arg("--max-time").arg("120");
+        let outcome = command.arg("-o").arg(&dest).arg(url).output();
+        // 空/失败的残留文件清掉，别让用户在下载目录里捡到 0 字节的假图。
+        let ok = match &outcome {
+            Ok(output) if output.status.success() => {
+                std::fs::metadata(&dest).map(|meta| meta.len() > 0).unwrap_or(false)
+            }
+            _ => false,
+        };
+        if ok {
+            toast_toolbar(&label_for_save, "已另存到 图片\\画匣下载", "ok");
+        } else {
+            let _ = std::fs::remove_file(&dest);
+            log_for(&label_for_save, &format!("另存原图失败：{url}"));
+            toast_toolbar(&label_for_save, "另存失败：原图拉不下来", "bad");
+        }
+    });
 }
 
 /// 18comic 登录桥消费端：认领页面侧 `__xkLoginQ`，走 jm API 登录
