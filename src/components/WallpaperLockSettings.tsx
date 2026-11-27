@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type {
@@ -15,6 +15,116 @@ const KIND_LABEL: Record<WallpaperSource["kind"], string> = {
   archive: "画廊",
   loose: "散图",
 };
+
+/**
+ * 显示区域裁剪框（管理员 2026-11-27：锁屏壁纸不要能拖动，
+ * 显示区域改在设置里自行拖动裁剪）。
+ *
+ * 框内按锁屏比例（cover）显示这张图，拖动 = 移动取景位置；
+ * 松手保存为 object-position 百分比（0-100），锁屏按它裁切、不再响应拖拽。
+ */
+function CropEditor({
+  url,
+  crop,
+  onCommit,
+}: {
+  url: string;
+  crop: { x: number; y: number } | null;
+  onCommit: (next: { x: number; y: number } | null) => void;
+}) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const dragRef = useRef<{
+    px: number;
+    py: number;
+    cx: number;
+    cy: number;
+    moved: boolean;
+  } | null>(null);
+  const [draft, setDraft] = useState(crop ?? { x: 50, y: 50 });
+
+  // 选中项变化时重置草稿。
+  useEffect(() => {
+    setDraft(crop ?? { x: 50, y: 50 });
+  }, [url, crop]);
+
+  const clamp = (value: number) => Math.max(0, Math.min(100, value));
+
+  /** cover 缩放下图片超出框的像素量（某一轴没溢出就固定居中）。 */
+  function overflow(): { ox: number; oy: number } {
+    const frame = frameRef.current;
+    const img = imgRef.current;
+    if (!frame || !img || !img.naturalWidth || !img.naturalHeight) {
+      return { ox: 0, oy: 0 };
+    }
+    const scale = Math.max(
+      frame.clientWidth / img.naturalWidth,
+      frame.clientHeight / img.naturalHeight,
+    );
+    return {
+      ox: img.naturalWidth * scale - frame.clientWidth,
+      oy: img.naturalHeight * scale - frame.clientHeight,
+    };
+  }
+
+  return (
+    <div className="wallpaper-crop">
+      <p className="settings-hint">
+        显示区域：在框内拖动这张图（比例即锁屏），松手即保存；锁屏上的壁纸不再响应拖动。
+      </p>
+      <div
+        className="wallpaper-crop-frame"
+        ref={frameRef}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragRef.current = {
+            px: event.clientX,
+            py: event.clientY,
+            cx: draft.x,
+            cy: draft.y,
+            moved: false,
+          };
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current;
+          if (!drag) return;
+          const dx = event.clientX - drag.px;
+          const dy = event.clientY - drag.py;
+          if (Math.abs(dx) + Math.abs(dy) < 2) return;
+          drag.moved = true;
+          const { ox, oy } = overflow();
+          setDraft({
+            x: ox > 1 ? clamp(drag.cx - (dx / ox) * 100) : 50,
+            y: oy > 1 ? clamp(drag.cy - (dy / oy) * 100) : 50,
+          });
+        }}
+        onPointerUp={() => {
+          const drag = dragRef.current;
+          dragRef.current = null;
+          if (drag && drag.moved) onCommit(draft);
+        }}
+      >
+        <img
+          ref={imgRef}
+          src={url}
+          alt=""
+          draggable={false}
+          style={{ objectPosition: `${draft.x}% ${draft.y}%` }}
+        />
+      </div>
+      <div className="d2-cookie-actions" style={{ marginTop: 8 }}>
+        <button
+          type="button"
+          className="btn btn-quiet btn-compact"
+          onClick={() => onCommit(null)}
+          title="恢复居中显示"
+        >
+          重置居中
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * 设置 → 壁纸锁。
@@ -300,7 +410,22 @@ export default function WallpaperLockSettings() {
           {previewBusy ? (
             <span className="settings-hint">加载预览…</span>
           ) : previewUrl ? (
-            <img src={previewUrl} alt="" />
+            <>
+              <img src={previewUrl} alt="" />
+              <CropEditor
+                url={previewUrl}
+                crop={config.walls[selected].crop ?? null}
+                onCommit={(next) => {
+                  const walls = config.walls.map((wall, i) =>
+                    i === selected ? { ...wall, crop: next } : wall,
+                  );
+                  void persist(
+                    { ...config, walls },
+                    next ? "显示区域已保存" : "显示区域已重置居中",
+                  );
+                }}
+              />
+            </>
           ) : (
             <span className="settings-hint">预览失败（文件可能已被移动/删除）</span>
           )}

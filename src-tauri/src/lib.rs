@@ -235,6 +235,20 @@ pub struct WallpaperSource {
     /// loose: 图片 id；archive: "archiveId:pageIndex"；file: 绝对路径
     #[serde(default)]
     pub reference: String,
+    /// 显示区域（object-position 百分比，0-100）。锁屏壁纸**不再支持拖动平移**
+    /// （管理员 2026-11-27：不好），显示区域改在设置页里拖这张图来定。
+    #[serde(default)]
+    pub crop: Option<WallpaperCrop>,
+}
+
+/// 壁纸显示区域：x/y 都是 0-100 的百分比（50/50 = 居中）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperCrop {
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -252,6 +266,9 @@ pub struct WallpaperLock {
     /// 轮换间隔秒；0 或只有一张时不轮换。
     #[serde(default)]
     pub interval_secs: u64,
+    /// 是否已设密码（只给前端做界面分支用，哈希与盐不下发）。
+    #[serde(default)]
+    pub has_password: bool,
 }
 
 /// FNV-1a 64：够「防君子」，不引第三方依赖。
@@ -300,7 +317,8 @@ fn get_wallpaper_lock(app: AppHandle) -> WallpaperLock {
     {
         lock.enabled = false;
     }
-    // 哈希与盐不下发前端。
+    // 哈希与盐不下发前端；只告诉它「有没有密码」（先算再清，顺序不能反）。
+    lock.has_password = !lock.password_hash.is_empty();
     lock.password_hash.clear();
     lock.salt.clear();
     lock
@@ -313,6 +331,7 @@ fn save_wallpaper_lock(app: AppHandle, config: WallpaperLock) -> Result<Wallpape
     let next = WallpaperLock {
         enabled: config.enabled,
         // 密码只走 set_wallpaper_password，这里原样保留。
+        has_password: !existing.password_hash.is_empty(),
         password_hash: existing.password_hash,
         salt: existing.salt,
         walls: config.walls,
@@ -351,6 +370,7 @@ fn set_wallpaper_password(app: AppHandle, password: String) -> Result<WallpaperL
         lock.password_hash = hash_password(&password, &salt);
         lock.salt = salt;
     }
+    lock.has_password = !lock.password_hash.is_empty();
     settings.wallpaper_lock = Some(lock.clone());
     write_settings(&app, &settings);
     let mut out = lock;

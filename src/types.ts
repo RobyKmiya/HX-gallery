@@ -380,6 +380,11 @@ export interface WallpaperSource {
   kind: "loose" | "archive" | "file";
   /** loose: 图片 id；archive: "archiveId:pageIndex"；file: 绝对路径。 */
   reference: string;
+  /**
+   * 显示区域（object-position 百分比，0-100，缺省 50/50 居中）。
+   * 锁屏壁纸不支持拖动平移；显示区域在设置 → 壁纸锁 里拖这张图来定。
+   */
+  crop?: { x: number; y: number } | null;
 }
 
 export interface WallpaperLockConfig {
@@ -387,6 +392,8 @@ export interface WallpaperLockConfig {
   walls: WallpaperSource[];
   /** 轮换间隔秒；0 或只有一张不轮换。 */
   intervalSecs: number;
+  /** 是否已设密码（哈希不下发，前端只用来切「直接进入」界面）。 */
+  hasPassword?: boolean;
 }
 
 export interface ArchiveQuery {

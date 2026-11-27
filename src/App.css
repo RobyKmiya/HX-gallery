@@ -9357,3 +9357,220 @@ body.is-splitting {
   .reader-float-detail:hover,
   .reader-float-detail:active { transition: none; transform: none; }
 }
+
+/* ============================================================
+   启动加载屏 v2（1.1.89，管理员 2026-11-27：桌面快捷方式进来
+   要厚实一点、富有动效的高质量加载条；壁纸锁的壁纸塞进启动屏，
+   解锁 → 加载 → 进库的过渡里壁纸不断片）
+   ============================================================ */
+.boot-screen-rich {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg, #14151a);
+  gap: 0;
+}
+/* 背景壁纸层：慢速 Ken Burns，多张时交叉淡化（is-under 垫底）。 */
+.boot-wall {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  animation: boot-wall-in 1.1s ease-out both;
+}
+.boot-wall.is-under { animation: boot-wall-out 1.1s ease-out both; }
+.boot-wall img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+  animation: boot-kenburns 16s ease-out both;
+}
+@keyframes boot-wall-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes boot-wall-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes boot-kenburns {
+  from { transform: scale(1.02); }
+  to { transform: scale(1.1); }
+}
+/* 压暗层：保证文字与加载条在任何壁纸上都可读。 */
+.boot-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(10, 11, 14, 0.55) 0%,
+    rgba(10, 11, 14, 0.32) 42%,
+    rgba(10, 11, 14, 0.72) 100%
+  );
+}
+.boot-core {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  animation: boot-core-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes boot-core-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+.boot-mark {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(232, 163, 92, 0.9), rgba(232, 120, 92, 0.85));
+  box-shadow: 0 10px 30px -8px rgba(232, 163, 92, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  animation: boot-mark-float 3.2s ease-in-out infinite;
+}
+@keyframes boot-mark-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+.boot-brand {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+  color: #f2f3f7;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.65);
+}
+/* 厚加载条：底轨 + 呼吸段 + 扫光 + 高光，四层叠出质感。 */
+.boot-bar {
+  position: relative;
+  width: min(420px, 72vw);
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45),
+    0 6px 22px -8px rgba(0, 0, 0, 0.6);
+}
+.boot-bar-breath {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(232, 163, 92, 0.25),
+    rgba(232, 163, 92, 0.6) 45%,
+    rgba(232, 163, 92, 0.25)
+  );
+  background-size: 200% 100%;
+  animation: boot-breath 2.6s ease-in-out infinite;
+}
+@keyframes boot-breath {
+  0%, 100% { background-position: 0% 0; opacity: 0.75; }
+  50% { background-position: 100% 0; opacity: 1; }
+}
+.boot-bar-sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 214, 156, 0.95) 45%,
+    rgba(255, 236, 200, 0.98) 55%,
+    transparent
+  );
+  filter: blur(0.4px);
+  animation: boot-sweep 1.6s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+@keyframes boot-sweep {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(320%); }
+}
+.boot-bar-gloss {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 45%;
+  border-radius: 999px 999px 40% 40%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent);
+  pointer-events: none;
+}
+.boot-stage {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: rgba(240, 241, 246, 0.92);
+  letter-spacing: 0.05em;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+  animation: boot-stage-in 0.35s ease-out both;
+}
+@keyframes boot-stage-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.boot-elapsed {
+  margin: 0;
+  font-size: 11px;
+  color: rgba(240, 241, 246, 0.55);
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 5px rgba(0, 0, 0, 0.6);
+}
+
+/* ============================================================
+   壁纸锁 1.1.89 调整：壁纸不再拖动；显示区域在设置里裁剪
+   ============================================================ */
+/* 无密码态：一颗大按钮直接进（按下立即给「正在进入…」反馈）。 */
+.wallpaper-lock-nopass {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.72);
+}
+.wallpaper-lock-enter {
+  min-width: 180px;
+  padding: 10px 22px;
+  font-size: 14.5px;
+  letter-spacing: 0.18em;
+  text-indent: 0.18em;
+}
+/* 设置页：显示区域裁剪框（比例即锁屏，拖动取景，松手保存）。 */
+.wallpaper-crop { margin-top: 10px; }
+.wallpaper-crop-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background: #0f1116;
+}
+.wallpaper-crop-frame:active { cursor: grabbing; }
+.wallpaper-crop-frame img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-wall,
+  .boot-wall img,
+  .boot-core,
+  .boot-stage,
+  .boot-bar-breath,
+  .boot-bar-sweep,
+  .boot-mark,
+  .boot-mark-float { animation: none; }
+  .boot-wall.is-under { display: none; }
+}

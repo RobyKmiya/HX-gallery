@@ -617,10 +617,17 @@ pub fn loader_source(scripts: &[(ScriptMeta, String)]) -> String {
           if (!current) {{ clearInterval(timer); return; }}
           if (current.state !== "done") {{
             // 传统脚本常用 timeout 选项；超时就回 ontimeout，别让它永远等。
-            if (details.timeout && Date.now() - startedAt > details.timeout) {{
-              clearInterval(timer);
-              try {{ delete q.items[id]; }} catch (e) {{}}
-              try {{ if (details.ontimeout) details.ontimeout({{ readyState: 4, status: 0 }}); }} catch (e) {{}}
+            // 修复（管理员 2026-11-27：织机 61 张图全 Error: timeout）：
+            // 宿主同时只放 6 个请求在飞，超出的还在 pending 排队——排队
+            // 时间不能算进 timeout。从宿主认领（running）那一刻起计。
+            if (current.state === "running") {{
+              if (!current.runStart) {{
+                current.runStart = Date.now();
+              }} else if (details.timeout && Date.now() - current.runStart > details.timeout) {{
+                clearInterval(timer);
+                try {{ delete q.items[id]; }} catch (e) {{}}
+                try {{ if (details.ontimeout) details.ontimeout({{ readyState: 4, status: 0 }}); }} catch (e) {{}}
+              }}
             }}
             return;
           }}

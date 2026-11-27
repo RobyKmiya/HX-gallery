@@ -5,6 +5,7 @@ import type { LibraryState, WallpaperLockConfig } from "./types";
 import Welcome from "./components/Welcome";
 import WorkspaceTabs from "./components/WorkspaceTabs";
 import WallpaperLock from "./components/WallpaperLock";
+import BootScreen from "./components/BootScreen";
 import "./App.css";
 
 type BootPhase = "booting" | "welcome" | "library";
@@ -63,8 +64,9 @@ export default function App() {
   }, [bootLibrary]);
 
   const unlock = useCallback(() => {
+    // 只解锁，不清 lockConfig：启动加载屏继续用这组壁纸做背景，
+    // 解锁 → 加载 → 进库的过渡里壁纸不断片（管理员 2026-11-27）。
     setLocked(false);
-    setLockConfig(null);
     void bootLibrary();
   }, [bootLibrary]);
 
@@ -114,12 +116,9 @@ export default function App() {
   }
 
   if (phase === "booting") {
-    return (
-      <div className="boot-screen">
-        <span className="spinner spinner-large" />
-        <p>正在打开画匣…</p>
-      </div>
-    );
+    // 启动加载屏：壁纸锁的壁纸当背景（没配壁纸就是纯色），粗加载条 + 阶段文案；
+    // 外接硬盘休眠唤醒慢时给持续反馈（以前一根小转圈看着像卡死）。
+    return <BootScreen walls={lockConfig?.walls ?? []} />;
   }
 
   if (phase === "library" && library?.libraryPath) {

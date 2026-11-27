@@ -508,6 +508,9 @@ const ADBLOCK_DOMAINS: &[&str] = &[
     "ourdreamland.com",
     "ourdreamland.net",
     "dreamlandai.com",
+    // 2026-11-27 管理员实测：nhentai 点正文弹 live.onlidex.com（带
+    // ?q=nhentai.net&i=…&ci=…&t=…&h=… 点击跟踪参数），新标签整页卡死。
+    "onlidex.com",
 ];
 
 /// 整页级的广告/联盟跳转判断：出现在 URL 里就说明这是一次推广跳转。
@@ -1593,6 +1596,7 @@ fn attach_tab_hooks(
 ) -> tauri::WebviewBuilder<tauri::Wry> {
     let builder = attach_adblock(builder);
     let label_for_new = label.to_string();
+    let tab_id_for_new = tab_id.to_string();
     let label_for_dl = label.to_string();
     let label_for_nav = label.to_string();
     let tab_id_for_nav = tab_id.to_string();
@@ -1611,16 +1615,34 @@ fn attach_tab_hooks(
                 _ => tauri::webview::PermissionResponse::Default,
             }
         })
-        // 弹窗接管 v2：新窗一律开成新标签（后台建，建好即激活）。
+        // 弹窗接管 v3（管理员 2026-11-27：nhentai 弹窗 live.onlidex.com 开成
+        // 新标签整页卡死，问「新窗新签的开页广告有什么好方法」）：
+        // - 名单内广告弹窗：直接 Deny（沿用）；
+        // - **跨源**弹窗（域名和当前页不同 = 广告/联盟的典型形态）：转后台
+        //   标签，不再抢屏幕焦点，工具栏提示一句，用户看见不顺眼随手关；
+        // - 同源弹窗（站内正常开新页）：维持原样开在前面。
         .on_new_window(move |new_url, _features| {
             let target = new_url.to_string();
-            // 广告/联盟弹窗不开标签：以前一律开，nhentai 点一下正文就多出个
-            // ourdreamland 广告标签（管理员 2026-11-26 截图）。
             if is_ad_navigation(&target) {
                 crumb(format!("拦下广告弹窗 {target}"));
+                toast_toolbar(&label_for_new, "已拦截广告弹窗", "bad");
                 return NewWindowResponse::Deny;
             }
-            queue_pending_tab(&label_for_new, &target, true);
+            let cross_origin = match (tab_url_of(&label_for_new, &tab_id_for_new), host_of(&target))
+            {
+                (Some(current), Some(popup_host)) => {
+                    host_of(&current).map(|host| host != popup_host).unwrap_or(false)
+                }
+                _ => false,
+            };
+            if cross_origin {
+                crumb(format!("跨源弹窗转后台 {target}"));
+                queue_pending_tab(&label_for_new, &target, false);
+                let host = host_of(&target).unwrap_or_else(|| "外部站点".to_string());
+                toast_toolbar(&label_for_new, &format!("弹窗已转后台标签：{host}"), "ok");
+            } else {
+                queue_pending_tab(&label_for_new, &target, true);
+            }
             NewWindowResponse::Deny
         })
         // 顶层导航拦截：资源级拦截管不到主文档，广告页会整页接管当前标签。
@@ -2330,13 +2352,12 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
 "###;
 
 /// 待建标签的进程级队列（弹窗/工具栏入口都往里塞，消化线程统一建）。
-static PENDING_TABS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// 第三项 activate：跨源弹窗转后台（false），同源/工具栏入口开在前面（true）。
+static PENDING_TABS: Mutex<Vec<(String, String, bool)>> = Mutex::new(Vec::new());
 
 fn queue_pending_tab(label: &str, url: &str, activate: bool) {
     if let Ok(mut queue) = PENDING_TABS.lock() {
-        // activate 目前恒为 true：弹窗总是切过去看；静默标签走 new_tab 显式调用。
-        let _ = activate;
-        queue.push((label.to_string(), url.to_string()));
+        queue.push((label.to_string(), url.to_string(), activate));
     }
 }
 
@@ -2356,11 +2377,13 @@ fn start_pending_tab_worker(app: &AppHandle, label: &str, stop: Arc<AtomicBool>)
                 .lock()
                 .ok()
                 .and_then(|mut queue| {
-                    let index = queue.iter().position(|(queued_label, _)| queued_label == &label)?;
+                    let index = queue
+                        .iter()
+                        .position(|(queued_label, _, _)| queued_label == &label)?;
                     Some(queue.remove(index))
                 });
-            if let Some((_, url)) = next {
-                if let Err(error) = new_tab(&app, &label, &url, true) {
+            if let Some((_, url, activate)) = next {
+                if let Err(error) = new_tab(&app, &label, &url, activate) {
                     log_for(&label, &format!("弹窗开标签失败：{error}"));
                 }
             } else {
@@ -3188,6 +3211,10 @@ fn curl_xhr(
         .arg("10")
         .arg("--max-time")
         .arg(if binary { "180" } else { "60" })
+        // 连接建立限时：直连已死（需要走代理）的站点别傻等系统默认超时，
+        // 15 秒内连不上就报错给脚本，让它走自己的重试/onerror。
+        .arg("--connect-timeout")
+        .arg("15")
         // 头与体分两个文件：二进制体里随时会出现 "\r\n\r\n"，把它们混在
         // 一个输出流里没法可靠切分（旧实现用 `-i`，再被 from_utf8_lossy
         // 过一遍，字节早就废了）。
@@ -3203,6 +3230,13 @@ fn curl_xhr(
         .any(|(key, _)| key.eq_ignore_ascii_case("user-agent"))
     {
         command.arg("-A").arg(DEFAULT_UA);
+    }
+    // 关键修复（2026-11-27 管理员反馈「漫画织机对 18comic 全部 timeout」）：
+    // 这条 curl 一直没接代理——WebView2 走系统代理能开 18comic，织机的图片
+    // 请求却用 curl 裸连直连出口，直连不通就整页 Error: timeout。jm_api /
+    // netdl 的 curl 早就接了 proxy_arg()（11-26 修过同类事故），这里补齐。
+    if let Some(proxy) = crate::netdl::proxy_arg() {
+        command.arg("--proxy").arg(proxy);
     }
     for (key, value) in headers {
         command.arg("-H").arg(format!("{key}: {value}"));
@@ -3394,6 +3428,25 @@ fn log_for(label: &str, message: &str) {
     }
 }
 
+/// 读某个标签当前 URL（弹窗判「跨源」用；不拿锁外句柄，只查状态表）。
+fn tab_url_of(label: &str, tab_id: &str) -> Option<String> {
+    with_state(label, |state| {
+        state
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.url.clone())
+    })
+    .flatten()
+}
+
+/// 取 URL 的主机名（小写、去 www.）；解析失败返回 None。
+fn host_of(url: &str) -> Option<String> {
+    tauri::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_lowercase()))
+}
+
 fn note_tab_url(label: &str, tab_id: &str, url: &str) {
     with_state(label, |state| {
         if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
@@ -3402,7 +3455,6 @@ fn note_tab_url(label: &str, tab_id: &str, url: &str) {
     });
     push_state(label);
 }
-
 /// 页面标题变化（之前完全没接这个事件，标签芯片只能显示 URL）。
 fn note_tab_title(label: &str, tab_id: &str, title: &str) {
     with_state(label, |state| {

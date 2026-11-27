@@ -382,7 +382,8 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
             <div className="release-row-text">
               <strong>浏览器</strong>
               <p className="queue-hint">
-                多标签浏览器：地址栏直接改网址回车即走；站点弹窗自动开成新标签；无域名限制，窗口和主程序共用登录态。
+                多标签浏览器：地址栏直接改网址回车即走；站点弹窗按「名单拦截 /
+                跨源转后台 / 同源开新签」处理；无域名限制，窗口和主程序共用登录态。
               </p>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <input
