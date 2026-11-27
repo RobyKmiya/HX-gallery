@@ -55,7 +55,9 @@ import {
   PauseIcon,
   PlayIcon,
   StarIcon,
-  TagIcon,
+  StarHalfIcon,
+  HeartHalfIcon,
+  InfoIcon,
   TrashIcon,
 } from "./Icons";
 
@@ -295,16 +297,30 @@ export default function Reader({
   });
   const [secondData, setSecondData] = useState<ReaderPage | null>(null);
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
-  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  /**
+   * 阅读器内的浮层/侧栏面板：**同一时刻只开一个**。
+   * 管理员 2026-11-27：图片管理、缩略图、书签、散图选择、阅读设置各开各的会叠在一起，
+   * 既看不清也点不准——点哪个按钮就只留那一个。
+   */
+  const [panel, setPanel] = useState<
+    "pageops" | "thumbs" | "bookmarks" | "loose" | "prefs" | null
+  >(null);
+  const togglePanel = useCallback(
+    (next: "pageops" | "thumbs" | "bookmarks" | "loose" | "prefs") => {
+      setPanel((current) => (current === next ? null : next));
+    },
+    [],
+  );
+  const bookmarksOpen = panel === "bookmarks";
   /** 阅读设置面板（顶栏齿轮）：手势 + 快捷键速查，就地改就地生效。 */
-  const [prefsOpen, setPrefsOpen] = useState(false);
+  const prefsOpen = panel === "prefs";
   /** 沉浸（无框）阅读：顶栏 / 底栏 / 进度条一律不占位、不自动冒头，只留角落一颗淡点还原。 */
   const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
   // 阅读 HUD（沉浸态的页码 + 2px 进度线）：追求极简沉浸的人可以关掉（设置 → 阅读）。
   const [showPageHud] = usePersistentFlag("huaxia.reader.showPageHud", true);
   // A16 翻页过渡（可选替换，默认关）：翻页时新页按方向轻滑入。
   const [pageTransition] = usePersistentFlag("huaxia.reader.pageTransition", false);
-  const [pageOpsOpen, setPageOpsOpen] = useState(false);
+  const pageOpsOpen = panel === "pageops";
 
   // 画廊双击卡片进入时由 LibraryView 指定本次模式；不影响下次的默认记忆。
   useEffect(() => {
@@ -333,7 +349,7 @@ export default function Reader({
     };
   }, [immersive]);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
-  const [thumbsOpen, setThumbsOpen] = useState(false);
+  const thumbsOpen = panel === "thumbs";
   /** 缩略图栏宽度：分界线可拖，缩略图随空余位置自适应（11-23）。 */
   const [thumbsWidth, setThumbsWidth] = usePersistentSize(
     "huaxia.reader.thumbs",
@@ -426,7 +442,7 @@ export default function Reader({
   /** 当前本每页的动画元数据（帧数/总时长），按页号缓存。播放模式用它决定动图页停留多久。 */
   const [animMetas, setAnimMetas] = useState<Record<number, AnimMeta>>({});
   /** 收藏到散图夹的弹层与目标区（null = 关闭）。 */
-  const [looseOpen, setLooseOpen] = useState(false);
+  const looseOpen = panel === "loose";
   const [looseCollections, setLooseCollections] = useState<
     { id: number; name: string; folder: string; count: number }[]
   >([]);
@@ -570,8 +586,7 @@ const archiveEpochRef = useRef(0);
     setNaturals({});
     setSecondData(null);
     setBookmarks([]);
-    setBookmarksOpen(false);
-    setThumbsOpen(false);
+    setPanel(null);
     setAnimMetas({});
     // 换本（含播放模式跨本连播）保留当前播放状态；模式开着且没被暂停就继续播。
     setPlaying(playingRef.current);
@@ -1014,21 +1029,45 @@ const archiveEpochRef = useRef(0);
   }, []);
 
   const currentPage = page + 1;
+  /** 双页模式下右页页码（单页模式等于当前页）。 */
+  const rightPage = spread
+    ? Math.min(page + 2, info?.pageCount ?? page + 2)
+    : currentPage;
   const currentBookmark = bookmarks.find(
     (bookmark) => bookmark.page === currentPage,
   );
+  const rightBookmark = bookmarks.find((bookmark) => bookmark.page === rightPage);
 
   /** 打开「收藏到散图」弹层：拉散图区列表，默认选最新创建的。 */
+  /** 选定散图区：顺手记住，之后按 P / [ / ] 直接收藏不再问。 */
+  const pickLooseTarget = useCallback((id: number | "") => {
+    setLooseTarget(id);
+    try {
+      if (id === "") {
+        window.localStorage.removeItem("huaxia.reader.looseTarget");
+      } else {
+        window.localStorage.setItem("huaxia.reader.looseTarget", String(id));
+      }
+    } catch {
+      // 存不了就只在本次会话生效
+    }
+  }, []);
+
   const openLoosePicker = useCallback(async () => {
-    setLooseOpen((value) => !value);
+    togglePanel("loose");
     try {
       const list = await api.looseListCollections();
       setLooseCollections(list);
-      setLooseTarget(list[0]?.id ?? "");
+      // 优先用上次选定的那个（还在就用），否则退回第一个。
+      const remembered = Number(
+        window.localStorage.getItem("huaxia.reader.looseTarget") ?? "",
+      );
+      const kept = list.find((collection) => collection.id === remembered);
+      setLooseTarget(kept?.id ?? list[0]?.id ?? "");
     } catch (error) {
       onNotify(`读取散图区失败：${String(error)}`, "error");
     }
-  }, [onNotify]);
+  }, [onNotify, togglePanel]);
 
   /** 把当前页收进散图夹：mode = pointer（指向源页，零空间）| extract（提取另存）。 */
   const collectToLoose = useCallback(
@@ -1049,7 +1088,7 @@ const archiveEpochRef = useRef(0);
             : `已提取到「${target?.name ?? "散图区"}」文件夹`,
           "success",
         );
-        setLooseOpen(false);
+        setPanel(null);
       } catch (error) {
         onNotify(`收藏失败：${String(error)}`, "error");
       } finally {
@@ -1087,22 +1126,28 @@ const archiveEpochRef = useRef(0);
   }, [info, bookmarkBusy, currentBookmark, card.id, currentPage, onNotify]);
 
   /**
-   * ; / ' 快捷加书签：给指定页加书签（幂等，已有就不重复）。
-   * 双页模式 left=当前页、right=下一页；单页模式两者都作用于当前页。
+   * 左/右页书签（顶栏两枚半实心星 + `;` `'` + 右键菜单）：
+   * 该页没有书签就加，已经有就**移除**（以前只加不删，反复按会一直提示「已有书签」）。
+   * 双页模式 left=左页、right=右页；单页模式两者都作用于当前页。
    */
-  const addBookmarkAt = useCallback(
+  const toggleBookmarkAt = useCallback(
     async (kind: "left" | "right") => {
       if (!info || bookmarkBusy) return;
       const targetPage =
         kind === "right" && spread
           ? Math.min(page + 2, info.pageCount)
           : currentPage;
-      if (bookmarks.some((bookmark) => bookmark.page === targetPage)) {
-        onNotify(`第 ${targetPage} 页已有书签`, "info");
-        return;
-      }
+      const existing = bookmarks.find((bookmark) => bookmark.page === targetPage);
       setBookmarkBusy(true);
       try {
+        if (existing) {
+          await api.removeReaderBookmark(card.id, existing.id);
+          setBookmarks((previous) =>
+            previous.filter((bookmark) => bookmark.id !== existing.id),
+          );
+          onNotify(`已移除第 ${targetPage} 页书签`, "info");
+          return;
+        }
         const created = await api.addReaderBookmark(card.id, targetPage);
         setBookmarks((previous) =>
           [
@@ -1112,7 +1157,7 @@ const archiveEpochRef = useRef(0);
         );
         onNotify(`已添加第 ${targetPage} 页书签`, "success");
       } catch (bookmarkError) {
-        onNotify(`添加书签失败：${String(bookmarkError)}`, "error");
+        onNotify(`书签操作失败：${String(bookmarkError)}`, "error");
       } finally {
         setBookmarkBusy(false);
       }
@@ -1244,13 +1289,13 @@ const archiveEpochRef = useRef(0);
           void toggleBookmark();
           break;
         case "openBookmarks":
-          setBookmarksOpen(true);
+          setPanel("bookmarks");
           break;
         case "bookmarkLeft":
-          void addBookmarkAt("left");
+          void toggleBookmarkAt("left");
           break;
         case "bookmarkRight":
-          void addBookmarkAt("right");
+          void toggleBookmarkAt("right");
           break;
         case "openDetail":
           onOpenDetail?.();
@@ -1262,7 +1307,7 @@ const archiveEpochRef = useRef(0);
           revealArchive();
           break;
         case "toggleThumbs":
-          setThumbsOpen((value) => !value);
+          togglePanel("thumbs");
           break;
         case "prevArchive":
           pausePlayback();
@@ -1295,7 +1340,7 @@ const archiveEpochRef = useRef(0);
       immersive,
       togglePlayback,
       toggleBookmark,
-      addBookmarkAt,
+      toggleBookmarkAt,
       onOpenDetail,
       copyCurrentPage,
       revealArchive,
@@ -1450,8 +1495,7 @@ const archiveEpochRef = useRef(0);
     copyCurrentPage,
     revealArchive,
     slideshow,
-    setBookmarksOpen,
-    setThumbsOpen,
+    setPanel,
   ]);
 
   useEffect(() => {
@@ -1809,7 +1853,7 @@ const archiveEpochRef = useRef(0);
       onClick: () => setImmersive(!immersive),
     },
     { label: currentBookmark ? "移除书签" : "添加书签", hint: "B", onClick: () => void toggleBookmark() },
-    { label: "书签列表", hint: "L", onClick: () => setBookmarksOpen(true) },
+    { label: "书签列表", hint: "L", onClick: () => setPanel("bookmarks") },
     spread
       ? {
           label: "收藏左页到散图夹",
@@ -1836,19 +1880,19 @@ const archiveEpochRef = useRef(0);
       label: spread ? "添加左页书签" : "添加当前页书签",
       hint: ";",
       dividerBefore: true,
-      onClick: () => void addBookmarkAt("left"),
+      onClick: () => void toggleBookmarkAt("left"),
     },
     ...(spread
       ? [
           {
             label: "添加右页书签",
             hint: "'",
-            onClick: () => void addBookmarkAt("right"),
+            onClick: () => void toggleBookmarkAt("right"),
           } as ReaderMenuEntry,
         ]
       : []),
     { label: "画廊详情", hint: "I", dividerBefore: true, onClick: () => onOpenDetail?.() },
-    { label: "阅读设置（手势 / 快捷键）", onClick: () => setPrefsOpen((value) => !value) },
+    { label: "阅读设置（手势 / 快捷键）", onClick: () => togglePanel("prefs") },
     { label: "复制当前页到剪贴板", hint: "Ctrl+C", onClick: copyCurrentPage },
     { label: "在资源管理器中显示", hint: "Ctrl+Enter", onClick: revealArchive },
     { label: "设为桌面壁纸", onClick: wallpaperCurrentPage },
@@ -1931,7 +1975,7 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className={`icon-button${pageOpsOpen ? " is-active" : ""}`}
-              onClick={() => setPageOpsOpen((value) => !value)}
+              onClick={() => togglePanel("pageops")}
               disabled={pageCount === 0}
               aria-label="图片管理"
               title="图片管理：增删本画集的单页（zip/cbz）"
@@ -1955,47 +1999,81 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className={`icon-button${thumbsOpen ? " is-active" : ""}`}
-              onClick={() => setThumbsOpen((value) => !value)}
+              onClick={() => togglePanel("thumbs")}
               disabled={pageCount === 0}
               aria-label="页面缩略图"
               title="页面缩略图 (T)"
             >
               <GridIcon width={16} height={16} />
             </button>
-            <button
-              type="button"
-              className={`icon-button${currentBookmark ? " is-active" : ""}`}
-              onClick={() => void toggleBookmark()}
-              disabled={bookmarkBusy || pageCount === 0}
-              aria-label={currentBookmark ? "移除当前页书签" : "收藏当前页"}
-              title={currentBookmark ? "移除当前页书签 (B)" : "收藏当前页 (B)"}
-            >
-              <StarIcon width={16} height={16} />
-            </button>
-            {/* 收藏键跟随单双页：单页一个；双页左/右各一个（11-23 需求）。 */}
+            {/* 书签：双页模式左/右各一枚（星形半实心，实心半边即方向）；已有书签整枚填实。 */}
             {spread ? (
               <>
                 <button
                   type="button"
-                  className="icon-button is-fav-split"
+                  className={`icon-button${currentBookmark ? " is-active" : ""}`}
+                  onClick={() => void toggleBookmarkAt("left")}
+                  disabled={bookmarkBusy || pageCount === 0}
+                  aria-label={currentBookmark ? "移除左页书签" : "添加左页书签"}
+                  title={`左页书签（第 ${currentPage} 页）· 已有则移除 (;)`}
+                >
+                  <StarHalfIcon
+                    side="left"
+                    filled={Boolean(currentBookmark)}
+                    width={16}
+                    height={16}
+                  />
+                </button>
+                <button
+                  type="button"
+                  className={`icon-button${rightBookmark ? " is-active" : ""}`}
+                  onClick={() => void toggleBookmarkAt("right")}
+                  disabled={bookmarkBusy || pageCount === 0}
+                  aria-label={rightBookmark ? "移除右页书签" : "添加右页书签"}
+                  title={`右页书签（第 ${rightPage} 页）· 已有则移除 (')`}
+                >
+                  <StarHalfIcon
+                    side="right"
+                    filled={Boolean(rightBookmark)}
+                    width={16}
+                    height={16}
+                  />
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className={`icon-button${currentBookmark ? " is-active" : ""}`}
+                onClick={() => void toggleBookmark()}
+                disabled={bookmarkBusy || pageCount === 0}
+                aria-label={currentBookmark ? "移除当前页书签" : "收藏当前页"}
+                title={currentBookmark ? "移除当前页书签 (B)" : "收藏当前页 (B)"}
+              >
+                <StarIcon width={16} height={16} />
+              </button>
+            )}
+            {/* 收藏键跟随单双页：双页左/右各一枚半实心心（实心半边即方向，不再挂「左/右」小字）。 */}
+            {spread ? (
+              <>
+                <button
+                  type="button"
+                  className="icon-button"
                   onClick={() => void quickFavorite("left")}
                   disabled={pageCount === 0 || looseBusy}
                   aria-label="收藏左页到散图夹"
                   title="收藏左页到散图夹 ( [ )"
                 >
-                  <HeartIcon width={16} height={16} />
-                  <span className="fav-side">左</span>
+                  <HeartHalfIcon side="left" width={16} height={16} />
                 </button>
                 <button
                   type="button"
-                  className="icon-button is-fav-split"
+                  className="icon-button"
                   onClick={() => void quickFavorite("right")}
                   disabled={pageCount === 0 || looseBusy}
                   aria-label="收藏右页到散图夹"
                   title="收藏右页到散图夹 ( ] )"
                 >
-                  <HeartIcon width={16} height={16} />
-                  <span className="fav-side">右</span>
+                  <HeartHalfIcon side="right" width={16} height={16} />
                 </button>
               </>
             ) : (
@@ -2023,69 +2101,73 @@ const archiveEpochRef = useRef(0);
               </button>
               {looseOpen && (
                 <div className="loose-picker">
-                  <div className="loose-picker-title">收藏当前页到散图夹</div>
-                  <select
-                    value={looseTarget}
-                    aria-label="选择散图区"
-                    onChange={(event) => {
-                      const next = event.target.value
-                        ? Number(event.target.value)
-                        : "";
-                      setLooseTarget(next);
-                      // 记住选择：之后按 P / [ / ] 直接收藏，不再弹面板。
-                      try {
-                        if (next === "") {
-                          window.localStorage.removeItem("huaxia.reader.looseTarget");
-                        } else {
-                          window.localStorage.setItem(
-                            "huaxia.reader.looseTarget",
-                            String(next),
-                          );
-                        }
-                      } catch {
-                        // 存不了就只在本次会话生效
-                      }
-                    }}
-                  >
-                    <option value="">选择散图区…</option>
-                    {looseCollections.map((collection) => (
-                      <option key={collection.id} value={collection.id}>
-                        {collection.name}（{collection.count}）
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="loose-picker-action"
-                    disabled={looseTarget === "" || looseBusy}
-                    onClick={() => void collectToLoose("pointer")}
-                    title="指向源页：零空间；源画集删除后失效"
-                  >
-                    收藏（指向源页）
-                  </button>
-                  <button
-                    type="button"
-                    className="loose-picker-action"
-                    disabled={looseTarget === "" || looseBusy}
-                    onClick={() => void collectToLoose("extract")}
-                    title="把这一页提取成独立文件，存进区的文件夹"
-                  >
-                    提取到文件夹
-                  </button>
-                  <button
-                    type="button"
-                    className="loose-picker-action is-quiet"
-                    onClick={() => setLooseOpen(false)}
-                  >
-                    取消
-                  </button>
+                  <div className="loose-picker-head">
+                    <strong>收藏到散图夹</strong>
+                    <button
+                      type="button"
+                      className="loose-picker-x"
+                      onClick={() => setPanel(null)}
+                      aria-label="关闭"
+                      title="关闭"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <p className="loose-picker-tip">
+                    选一个散图区（记住选择，之后 P / [ / ] 直接用它）
+                  </p>
+                  <div className="loose-picker-list">
+                    {looseCollections.length === 0 && (
+                      <p className="loose-picker-empty">还没有散图区，先到主页建一个</p>
+                    )}
+                    {looseCollections.map((collection) => {
+                      const active = looseTarget === collection.id;
+                      return (
+                        <button
+                          key={collection.id}
+                          type="button"
+                          className={`loose-picker-item${active ? " is-active" : ""}`}
+                          onClick={() => pickLooseTarget(collection.id)}
+                          title={collection.folder}
+                        >
+                          <span className="loose-picker-item-name">
+                            {collection.name}
+                          </span>
+                          <span className="loose-picker-item-count">
+                            {collection.count}
+                          </span>
+                          {active && <span className="loose-picker-item-check">✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="loose-picker-actions">
+                    <button
+                      type="button"
+                      className="loose-picker-primary"
+                      disabled={looseTarget === "" || looseBusy}
+                      onClick={() => void collectToLoose("pointer")}
+                      title="指向源页：不占空间；源画集删除后失效"
+                    >
+                      收藏这一页
+                    </button>
+                    <button
+                      type="button"
+                      className="loose-picker-secondary"
+                      disabled={looseTarget === "" || looseBusy}
+                      onClick={() => void collectToLoose("extract")}
+                      title="把这一页提取成独立文件，存进区的文件夹"
+                    >
+                      提取成文件
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
             <button
               type="button"
               className={`icon-button${bookmarksOpen ? " is-active" : ""}`}
-              onClick={() => setBookmarksOpen((value) => !value)}
+              onClick={() => togglePanel("bookmarks")}
               aria-label="书签列表"
               title="书签列表 (L)"
             >
@@ -2097,13 +2179,12 @@ const archiveEpochRef = useRef(0);
             {onOpenDetail && (
               <button
                 type="button"
-                className={`icon-button reader-detail-btn${detailOpen ? " is-active" : ""}`}
+                className={`icon-button${detailOpen ? " is-active" : ""}`}
                 onClick={onOpenDetail}
                 aria-label="详情与编辑"
                 title="详情与编辑 (I)"
               >
-                <TagIcon width={15} height={15} />
-                <span>详情</span>
+                <InfoIcon width={16} height={16} />
               </button>
             )}
             {/* 齿轮常驻：设置面板在阅读器内就地弹出，不依赖工作台标签切换
@@ -2111,7 +2192,7 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className={`icon-button${prefsOpen ? " is-active" : ""}`}
-              onClick={() => setPrefsOpen((value) => !value)}
+              onClick={() => togglePanel("prefs")}
               aria-label="阅读设置"
               title="阅读设置：鼠标手势 / 快捷键（也可在右键菜单进入）"
             >
@@ -2136,7 +2217,7 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className="icon-button"
-              onClick={() => setBookmarksOpen(false)}
+              onClick={() => setPanel(null)}
               aria-label="关闭书签列表"
             >
               <CloseIcon width={14} height={14} />
@@ -2217,7 +2298,7 @@ const archiveEpochRef = useRef(0);
               <button
                 type="button"
                 className="icon-button"
-                onClick={() => setThumbsOpen(false)}
+                onClick={() => setPanel(null)}
                 aria-label="关闭缩略图侧栏"
                 title="关闭缩略图侧栏 (T)"
               >
@@ -2602,7 +2683,7 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className="icon-button"
-              onClick={() => setPrefsOpen(false)}
+              onClick={() => setPanel(null)}
               aria-label="关闭阅读设置"
             >
               <CloseIcon width={14} height={14} />
@@ -2664,7 +2745,7 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className="btn btn-compact"
-              onClick={() => setPrefsOpen(false)}
+              onClick={() => setPanel(null)}
             >
               完成
             </button>
@@ -2679,7 +2760,7 @@ const archiveEpochRef = useRef(0);
             <button
               type="button"
               className="icon-button"
-              onClick={() => setPageOpsOpen(false)}
+              onClick={() => setPanel(null)}
               aria-label="关闭图片管理"
             >
               <CloseIcon width={14} height={14} />

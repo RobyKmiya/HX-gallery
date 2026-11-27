@@ -6377,33 +6377,95 @@ body.is-splitting {
 
 /* 阅读器「收藏到散图」弹层 */
 .loose-picker {
-  position: absolute; top: calc(100% + 6px); left: 0;
-  min-width: 230px; padding: 10px;
-  border-radius: 10px; border: 1px solid var(--line, #2c313c);
-  background: rgba(20, 22, 27, 0.98);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  display: flex; flex-direction: column; gap: 8px;
-  z-index: 70;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 268px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(18, 20, 26, 0.98);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 22px 54px -22px rgba(0, 0, 0, 0.9);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  z-index: 72;
 }
-.loose-picker-title {
-  font-size: 11px; color: var(--faint, #8b93a7);
-  padding-bottom: 4px; border-bottom: 1px solid var(--line, #2c313c);
+.loose-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
-.loose-picker select {
-  height: 28px; padding: 0 8px;
-  border: 1px solid var(--line, #2c313c); border-radius: 6px;
-  background: #0f1116; color: var(--text, #e8eaf0); font: 12px inherit;
+.loose-picker-head strong { font-size: 13px; }
+.loose-picker-x {
+  width: 22px; height: 22px;
+  border: none; border-radius: 6px;
+  background: transparent; color: var(--muted);
+  font-size: 16px; line-height: 1; cursor: pointer;
 }
-.loose-picker-action {
-  height: 30px; padding: 0 10px;
-  border: 1px solid var(--line, #2c313c); border-radius: 7px;
-  background: #262a33; color: var(--text, #e8eaf0);
-  font: 12px "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  cursor: pointer; text-align: left;
+.loose-picker-x:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.loose-picker-tip {
+  margin: 0; font-size: 11px; line-height: 1.5; color: var(--faint);
 }
-.loose-picker-action:hover { background: #313642; }
-.loose-picker-action:disabled { opacity: 0.5; cursor: default; }
-.loose-picker-action.is-quiet { background: transparent; color: var(--muted, #8b93a7); }
+.loose-picker-list {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 208px; overflow-y: auto;
+}
+.loose-picker-empty { margin: 0; font-size: 12px; color: var(--faint); }
+.loose-picker-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.loose-picker-item:hover { background: rgba(255, 255, 255, 0.08); }
+.loose-picker-item.is-active {
+  border-color: rgba(232, 163, 92, 0.55);
+  background: rgba(232, 163, 92, 0.14);
+  color: var(--accent-strong);
+}
+.loose-picker-item-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.loose-picker-item-count {
+  flex: 0 0 auto; font-size: 11px; color: var(--faint);
+}
+.loose-picker-item.is-active .loose-picker-item-count { color: inherit; opacity: 0.75; }
+.loose-picker-item-check { flex: 0 0 auto; font-size: 12px; }
+.loose-picker-actions {
+  display: flex; gap: 6px;
+  padding-top: 2px;
+}
+.loose-picker-primary,
+.loose-picker-secondary {
+  flex: 1 1 0;
+  height: 30px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.loose-picker-primary {
+  border: 1px solid rgba(232, 163, 92, 0.6);
+  background: rgba(232, 163, 92, 0.2);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+.loose-picker-primary:hover:not(:disabled) { background: rgba(232, 163, 92, 0.3); }
+.loose-picker-secondary {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+.loose-picker-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.1); }
+.loose-picker-primary:disabled,
+.loose-picker-secondary:disabled { opacity: 0.45; cursor: default; }
 
 /* ---------- 合集（连载盒子） ---------- */
 
@@ -7487,22 +7549,7 @@ body.is-splitting {
   background: rgba(232, 163, 92, 0.55);
 }
 
-/* 双页收藏：两个键各自带「左 / 右」角标 */
-.icon-button.is-fav-split {
-  position: relative;
-}
-
-.fav-side {
-  position: absolute;
-  bottom: -1px;
-  right: -2px;
-  font-size: 8px;
-  line-height: 1;
-  color: var(--accent-strong);
-  background: rgba(14, 16, 20, 0.9);
-  border-radius: 3px;
-  padding: 1px 2px;
-}
+/* 双页收藏/书签改成半实心图标表达方向（左/右小字已撤，管理员 2026-11-27） */
 
 .keys-select {
   min-width: 150px;
@@ -7749,7 +7796,12 @@ body.is-splitting {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 没有壁纸时也不能是一片死黑（管理员 2026-11-27：看着像没启动起来）：
+     给一层深靛 → 近黑的径向渐变，和启动屏/主界面同一套暗色语言。 */
   background-color: #0b0d12;
+  background-image:
+    radial-gradient(120% 90% at 50% 0%, rgba(58, 66, 120, 0.5), transparent 62%),
+    radial-gradient(90% 70% at 50% 108%, rgba(232, 163, 92, 0.12), transparent 60%);
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
@@ -8078,13 +8130,29 @@ body.is-splitting {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  background-color: #0d0f14;
+  overflow: hidden;
+  /* 把重绘圈在这一层里：壁纸 + 卡片不会连带整页重排 */
+  contain: layout paint;
+}
+
+/* 壁纸层：固定不动，滚动只发生在内容层（.new-tab-scroll）里 */
+.new-tab-bg {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  will-change: background-image;
+}
+
+.new-tab-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: #0d0f14;
-  background-size: cover;
-  background-position: center;
-  overflow-y: auto;
 }
 
 /* 背景图整张铺满（cover），只压一层暗化保证文字可读；不要模糊，模糊看着很脏。 */
@@ -8124,11 +8192,10 @@ body.is-splitting {
   padding: 11px 14px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(12, 14, 18, 0.72);
+  background: rgba(12, 14, 18, 0.86);
   color: #fff;
   font-size: 13.5px;
   outline: none;
-  backdrop-filter: blur(8px);
 }
 
 .new-tab-address input:focus {
@@ -8162,11 +8229,10 @@ body.is-splitting {
   padding: 14px 6px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(16, 18, 24, 0.66);
+  background: rgba(16, 18, 24, 0.82);
   color: #e8e8ee;
   font-size: 12px;
   cursor: pointer;
-  backdrop-filter: blur(8px);
   transition: border-color 0.15s, background 0.15s;
 }
 
@@ -9325,14 +9391,6 @@ body.is-splitting {
    浮动详情按钮已按管理员要求撤掉：详情只留顶栏一处 + I 键，
    齿轮改成阅读器内就地弹出设置面板（gallery 标签里也能用）。
    ============================================================ */
-.reader-detail-btn {
-  width: auto;
-  gap: 5px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .reader-prefs {
   position: absolute;
   top: 56px;

@@ -291,10 +291,81 @@ export function DownloadIcon(props: IconProps) {
 
 /** 设置：齿轮。 */
 export function GearIcon(props: IconProps) {
+  // 真正的齿轮：外圈 12 齿 + 中心孔。以前的「圆 + 十二角星」看着像太阳，
+  // 管理员 2026-11-27 直接说「画错了，画标志一点」。
   return (
-    <svg viewBox="0 0 16 16" width={props.width ?? 16} height={props.height ?? 16} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="8" cy="8" r="2.4" />
-      <path d="M8 1.6l1 1.9 2.1-.4 1.2 1.8-1.3 1.7 1.3 1.7-1.2 1.8-2.1-.4-1 1.9-1-1.9-2.1.4-1.2-1.8 1.3-1.7-1.3-1.7 1.2-1.8 2.1.4z" />
+    <svg {...base} {...props}>
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
+}
+
+/** 详情/信息：圆圈 + i，比标签图标更能一眼认出是「详情」。 */
+export function InfoIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5.2" />
+      <circle cx="12" cy="7.9" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+const HEART_PATH =
+  "M12 20s-7.5-4.6-7.5-10A4.5 4.5 0 0 1 12 6.5 4.5 4.5 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z";
+const STAR_PATH = "m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z";
+
+/**
+ * 半实心图标：实心那半边代表「方向/位置」——左页填左半、右页填右半。
+ * 管理员 2026-11-27：双页模式下面两个一模一样的心加个「左/右」字太丑，
+ * 改成图标自身表达方向。`filled` 表示整枚已生效（该页已有书签/已收藏）。
+ */
+function HalfIcon({
+  side,
+  path,
+  filled,
+  props,
+}: {
+  side: "left" | "right";
+  path: string;
+  filled?: boolean;
+  props: IconProps;
+}) {
+  const clipId = `hx-half-${side}`;
+  return (
+    <svg {...base} {...props}>
+      <defs>
+        <clipPath id={clipId}>
+          <rect x={side === "left" ? 0 : 12} y="0" width="12" height="24" />
+        </clipPath>
+      </defs>
+      {filled ? (
+        <path d={path} fill="currentColor" />
+      ) : (
+        <>
+          <path d={path} />
+          <path d={path} fill="currentColor" stroke="none" clipPath={`url(#${clipId})`} />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/** 左/右半实心心：散图收藏用（实心半边指向这一页在双页里的位置）。 */
+export function HeartHalfIcon({
+  side,
+  filled,
+  ...props
+}: IconProps & { side: "left" | "right"; filled?: boolean }) {
+  return <HalfIcon side={side} path={HEART_PATH} filled={filled} props={props} />;
+}
+
+/** 左/右半实心星：书签用（同上，方向靠实心半边表达）。 */
+export function StarHalfIcon({
+  side,
+  filled,
+  ...props
+}: IconProps & { side: "left" | "right"; filled?: boolean }) {
+  return <HalfIcon side={side} path={STAR_PATH} filled={filled} props={props} />;
 }

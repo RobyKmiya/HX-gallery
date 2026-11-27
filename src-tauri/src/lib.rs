@@ -406,9 +406,31 @@ fn wallpaper_cache_urls(
         .collect()
 }
 
+/// 按文件头判断图片类型（返回 MIME）。认不出就返回 None——扩展名不可信。
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some("image/avif");
+    }
+    None
+}
+
 /// `wcache://` 协议服务：只从壁纸缓存目录读文件（文件名白名单校验，防穿越）。
-fn serve_wallpaper_cache(
-    app: &AppHandle,
+fn serve_wallpaper_cache(app: &AppHandle,
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
     use tauri::http::StatusCode;
@@ -437,19 +459,12 @@ fn serve_wallpaper_cache(
         Ok(bytes) => bytes,
         Err(_) => return not_found(StatusCode::NOT_FOUND, "缓存缺失"),
     };
-    let mime = match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("jpg")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "avif" => "image/avif",
-        _ => "image/jpeg",
+    // 按**文件头**判类型，不看扩展名：缓存名是从「来源引用」算的（散图 id 没有
+    // 扩展名 → 一律 .jpg），可散图实际多半是 webp。扩展名对不上时 Content-Type
+    // 也会错，Chromium 有个别情况下就不解码了 → 锁屏/启动屏一片黑。
+    let mime = match sniff_image_mime(&bytes) {
+        Some(mime) => mime,
+        None => return not_found(StatusCode::UNSUPPORTED_MEDIA_TYPE, "缓存不是图片"),
     };
     tauri::http::Response::builder()
         .status(StatusCode::OK)

@@ -135,11 +135,16 @@ export default function NewTab({ libraryName, onNavigate, onOpenTab, onBrowse }:
   return (
     <div className="new-tab-wrap">
       <NewTabToolbar onBrowse={onBrowse} />
-      <div
-        className="new-tab"
-        style={current ? { backgroundImage: `url("${current}")` } : undefined}
-      >
+      <div className="new-tab">
+        {/* 壁纸单独一层、不跟着滚动：以前 background-image 挂在这个 overflow 容器上，
+            滚动时每帧都要重绘整张放大图，新页滑动明显掉帧（管理员 2026-11-27）。 */}
+        <div
+          className="new-tab-bg"
+          aria-hidden="true"
+          style={current ? { backgroundImage: `url("${current}")` } : undefined}
+        />
         <div className="new-tab-shade" aria-hidden="true" />
+        <div className="new-tab-scroll">
         <div className="new-tab-body">
           <p className="new-tab-brand">{libraryName ? `画匣 · ${libraryName}` : "画匣"}</p>
 
@@ -245,6 +250,7 @@ export default function NewTab({ libraryName, onNavigate, onOpenTab, onBrowse }:
               </button>
             )}
           </div>
+        </div>
         </div>
       </div>
     </div>

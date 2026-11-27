@@ -588,6 +588,9 @@ export default function WorkspaceTabs({
             position: "absolute",
             inset: 0,
             visibility: libraryVisible ? "visible" : "hidden",
+            // 不可见时连渲染一起停掉：主页有大量卡片 + 封面 + 动效，只 visibility
+            // hidden 时它仍在后台布局/绘制，切到「新页」会明显卡（管理员 2026-11-27）。
+            contentVisibility: libraryVisible ? "visible" : "hidden",
           }}
         >
           <LibraryView
@@ -613,6 +616,8 @@ export default function WorkspaceTabs({
               style={{
                 position: "absolute",
                 inset: 0,
+                // 这一层里有原生子 webview 的占位矩形（靠真实布局量 rect），
+                // 不能 content-visibility:hidden，否则切回来算不出尺寸。
                 visibility: activeId === tab.id ? "visible" : "hidden",
               }}
             >
@@ -647,6 +652,7 @@ export default function WorkspaceTabs({
                 position: "absolute",
                 inset: 0,
                 visibility: activeId === tab.id ? "visible" : "hidden",
+                contentVisibility: activeId === tab.id ? "visible" : "hidden",
               }}
             >
               <GalleryTab archiveId={tab.archiveId ?? 0} onClose={() => closeTab(tab.id)} />
