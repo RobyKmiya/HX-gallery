@@ -70,6 +70,12 @@ pub struct BrowserSettings {
     pub save_ask_dir: bool,
     /// 另存的默认文件夹；空 = 图片\画匣下载。
     pub save_dir: String,
+    /// 显示元素选择圆点（网页右下角 ⊘）。**只管圆点显隐**：Alt+E / Ctrl+Shift+E
+    /// 快捷键走 __hxPickerApi，永远可用（管理员 2026-11-28：圆点开关不该挡快捷键）。
+    pub picker: bool,
+    /// 广告拦截总开关（内置名单 + 自定义 adblock.txt）。settings.json 是唯一真源，
+    /// D2 面板/主设置里的同名开关都写这里（1.1.96 整合）。
+    pub adblock: bool,
 }
 
 impl Default for BrowserSettings {
@@ -84,13 +90,15 @@ impl Default for BrowserSettings {
             tabs_width: 0.44,
             save_ask_dir: true,
             save_dir: String::new(),
+            picker: true,
+            adblock: true,
         }
     }
 }
 
 impl BrowserSettings {
     /// 收敛非法值：缩放在 25%–400%，步进不低于 5%，避免面板写坏后按钮失灵。
-    fn sanitized(mut self) -> Self {
+    pub(crate) fn sanitized(mut self) -> Self {
         if self.home.trim().is_empty() {
             self.home = BrowserSettings::default().home;
         }
@@ -447,6 +455,60 @@ pub fn set_adblock_enabled(enabled: bool) {
 pub fn adblock_enabled() -> bool {
     ADBLOCK_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// 圆点显隐实时推给运行中的浏览器全部内容标签（__hxSetPicker 由画匣盾注册）。
+pub fn apply_picker_to_tabs(picker: bool) {
+    let labels: Vec<String> = match BROWSERS.lock() {
+        Ok(map) => map.keys().cloned().collect(),
+        Err(_) => return,
+    };
+    for label in labels {
+        if let Some(views) = tab_webviews(&label) {
+            for view in views {
+                let _ = view.eval(&format!(
+                    "window.__hxSetPicker && window.__hxSetPicker({picker});"
+                ));
+            }
+        }
+    }
+}
+
+/// 关掉 WebView2 自带的「浏览器加速键」（ICoreWebView2Settings9::
+/// AreBrowserAcceleratorKeysEnabled，wry/tauri 均未暴露，走 COM 直接设）。
+///
+/// 为什么必须关：WebView2 默认**先于页面**吃掉 Ctrl+T / Ctrl+W / Ctrl+Tab /
+/// Ctrl+Shift+Tab / Ctrl+, 这类组合键——Ctrl+T、Ctrl+Tab 表现为「按了没反应」，
+/// Ctrl+W 被当成「关闭标签」在引擎里直接处理，内容区当场黑掉（管理员
+/// 2026-11-28 反馈的快捷键问题根源）。关掉后这些键原样到达页面 keydown，
+/// 由 CONTENT_SHORTCUTS_SCRIPT 接管（和 Alt+E 同一条已验证通路）。
+/// 副作用：Ctrl+F/Ctrl+P/F11 这类 WebView2 内置功能键一并失效——本来就没有
+/// 或不需要；剪切/复制/粘贴等编辑键不受影响。
+///
+/// **只对引擎自建的 webview 调用**（内容标签/工具栏/设置浮层）；主窗壳的
+/// webview 不动，全局行为不受影响。必须等 webview 创建完成后调用
+///（with_webview 的闭包在主线程异步执行，时序天然满足）。
+#[cfg(windows)]
+fn disable_browser_accelerator_keys(webview: &Webview) {
+    use windows_core::Interface;
+    let view = webview.clone();
+    let _ = view.with_webview(move |platform| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2Controller, ICoreWebView2Settings9,
+        };
+        let controller: ICoreWebView2Controller = platform.controller();
+        let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+            return;
+        };
+        let Ok(settings) = (unsafe { core.Settings() }) else {
+            return;
+        };
+        let Ok(settings9) = settings.cast::<ICoreWebView2Settings9>() else {
+            return;
+        };
+        let _ = unsafe { settings9.SetAreBrowserAcceleratorKeysEnabled(false) };
+    });
+}
+
 
 /// 内置拦截名单：主流广告/弹窗/统计网络 + 漫画站常用广告源。
 /// 想扩展：往 `%LOCALAPPDATA%\com.archivegallery.desktop\browser\adblock.txt`
@@ -938,8 +1000,10 @@ fn open_hosted(
     let app_for_window = app.clone();
     let host_for_thread = host;
     let userscript_store = opts.userscript_store.clone();
-    // 广告拦截开关跟随本次打开（设置里改完重开浏览窗口生效）。
-    set_adblock_enabled(opts.adblock);
+    // 广告拦截开关：settings.json 是真源（主设置/⚙面板/D2 面板都写它），
+    // 本次打开的 opts.adblock 只是「要不要允许拦截」的宿主意见，两边都同意才开。
+    let settings_loaded = load_settings_with_fallback(Some(opts.home.as_str()));
+    set_adblock_enabled(settings_loaded.adblock && opts.adblock);
     let label_for_thread = label.clone();
     let first_tab_id = format!("{label}-tab-0");
     // 建窗整体放到独立线程（add_child 在同步命令/事件回调里调用会死锁，
@@ -1001,6 +1065,9 @@ fn open_hosted(
                 )
                 .map_err(|error| format!("创建工具栏失败：{error}"))?;
             crumb("工具栏就绪");
+            // 关掉 WebView2 浏览器加速键（Ctrl+T/W/Tab 被它吞掉，见函数注释）。
+            #[cfg(windows)]
+            disable_browser_accelerator_keys(&toolbar);
 
             let tab_url = url.to_string();
             let mut tab_builder = WebviewBuilder::new(
@@ -1017,9 +1084,11 @@ fn open_hosted(
                 tab_builder = tab_builder.initialization_script(script.clone());
             }
             // 元素选择器悬浮圆点开关：脚本读这个全局标志决定要不要画圆点。
+            // settings.json 是真源（⚙面板/主设置都能改）；圆点开关**只管圆点显隐**，
+            // Alt+E 快捷键不依赖它（__hxPickerApi 恒注册）。
             tab_builder = tab_builder.initialization_script(format!(
                 "window.__hxPicker = {};",
-                if opts.picker { "true" } else { "false" }
+                if settings_loaded.picker { "true" } else { "false" }
             ));
 
             crumb(format!("建内容 webview {tab_url}"));
@@ -1031,6 +1100,9 @@ fn open_hosted(
                 )
                 .map_err(|error| format!("创建内容标签失败：{error}"))?;
             crumb("内容 webview 就绪");
+            // 同上：内容页的 Ctrl+T/W/Tab/,, 必须到达页面 keydown 才有人接。
+            #[cfg(windows)]
+            disable_browser_accelerator_keys(&webview);
             // 问一次真实 UA 存起来：curl 下载要用同一套身份过 Cloudflare。
             // 放后台线程：建标签的主流程不能被这一次 IPC 拖住（右键开新标签会「卡一下」）。
             spawn_user_agent_refresh(webview.clone());
@@ -1049,7 +1121,7 @@ fn open_hosted(
                 active: first_tab_id,
                 // 设置以落盘文件为准：面板改过的主页/步进/快捷键，重开窗口即生效。
                 // 没有文件时沿用宿主传进来的主页（D2 面板设置的那一个）。
-                settings: load_settings_with_fallback(Some(opts.home.as_str())),
+                settings: settings_loaded,
                 settings_view: None,
                 embedded,
                 // 有初始矩形就直接记为已同步：register_browser 里的 reposition
@@ -1258,6 +1330,9 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
                 )
                 .map_err(|error| format!("创建标签失败：{error}"))?;
             crumb("新标签 webview 就绪");
+            // 同上：新标签也要关 WebView2 浏览器加速键。
+            #[cfg(windows)]
+            disable_browser_accelerator_keys(&webview);
             spawn_user_agent_refresh(webview.clone());
 
             let tab_url = url_for_thread.to_string();
@@ -1369,7 +1444,10 @@ pub fn open_settings_window(app: &AppHandle, label: &str) -> Result<(), String> 
                 )
                 .map_err(|error| format!("打开设置面板失败：{error}"))?;
             let _ = view.set_focus();
-            with_state(&label_for_view, |state| state.settings_view = Some(view));
+            with_state(&label_for_view, |state| state.settings_view = Some(view.clone()));
+            // 设置浮层同样是引擎 webview：Ctrl+,（关浮层）等键要自己处理。
+            #[cfg(windows)]
+            disable_browser_accelerator_keys(&view);
             start_settings_poller(&label_for_view, &app_for_view);
             Ok(())
         };
@@ -2290,14 +2368,15 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
     var k = (e.key || "").toLowerCase();
 
     // 元素屏蔽：Alt+E（单按，最顺手）或 Ctrl+Shift+E。
+    // __hxPickerApi 恒注册（圆点开关只管圆点显隐），这里没有「没启用」一说了。
     if (e.altKey && !ctrl && !e.shiftKey && k === "e") {
       e.preventDefault();
-      if (!togglePicker()) tip("元素选择器没启用：设置 → 广告拦截 里打开「显示元素选择圆点」");
+      if (!togglePicker()) tip("这个页面没有元素屏蔽（脚本未注入，内页可能被站点拦了）");
       return;
     }
     if (ctrl && e.shiftKey && !e.altKey && k === "e") {
       e.preventDefault();
-      if (!togglePicker()) tip("元素选择器没启用：设置 → 广告拦截 里打开「显示元素选择圆点」");
+      if (!togglePicker()) tip("这个页面没有元素屏蔽（脚本未注入，内页可能被站点拦了）");
       return;
     }
 
@@ -2309,6 +2388,8 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
       if (k === "=" || k === "+") { e.preventDefault(); push("zoomIn"); return; }
       if (k === "-") { e.preventDefault(); push("zoomOut"); return; }
       if (k === "0") { e.preventDefault(); push("zoomReset"); return; }
+      // Ctrl+,：打开浏览器设置浮层（⚙ 被网页盖住时的快捷路）。
+      if (k === ",") { e.preventDefault(); push("openSettings"); return; }
     }
     if (e.altKey && !ctrl && e.key === "ArrowLeft") {
       e.preventDefault(); push("back"); return;
@@ -2924,7 +3005,7 @@ fn handle_toolbar_action(
                 "try{(function(){var a=window.__hxPickerApi;\
 if(a&&a.toggle){var on=a.toggle();\
 if(window.__xkTip)window.__xkTip(on?'元素选择已开启：点要屏蔽的元素（Esc / Alt+E 退出）':'已退出元素选择');}\
-else if(window.__xkTip)window.__xkTip('元素选择器没启用：设置 → 广告拦截 里打开「显示元素选择圆点」');\
+else if(window.__xkTip)window.__xkTip('这个页面没有元素屏蔽（脚本未注入，内页可能被站点拦了）');\
 })()}catch(e){}",
             );
             Ok(())
@@ -2959,16 +3040,21 @@ else if(window.__xkTip)window.__xkTip('元素选择器没启用：设置 → 广
             let settings = parsed.sanitized();
             save_settings(&settings)?;
             let shortcuts = settings.shortcuts;
+            let picker = settings.picker;
+            let adblock = settings.adblock;
+            set_adblock_enabled(adblock && with_state(label, |state| state.opts.adblock).unwrap_or(true));
             with_state(label, |state| {
                 state.settings = settings.clone();
                 state.opts.home = Url::parse(&settings.home)
                     .unwrap_or_else(|_| state.opts.home.clone());
                 state.last_pushed.clear();
             });
-            // 快捷键开关要立刻作用到已经打开的标签（它们早就注入完脚本了）。
+            // 快捷键 / 圆点开关要立刻作用到已经打开的标签（它们早就注入完脚本了）。
             if let Some(views) = tab_webviews(label) {
                 for view in views {
-                    let _ = view.eval(&format!("window.__xkShortcuts = {shortcuts};"));
+                    let _ = view.eval(&format!(
+                        "window.__xkShortcuts = {shortcuts}; window.__hxSetPicker && window.__hxSetPicker({picker});"
+                    ));
                 }
             }
             Ok(())
@@ -3985,6 +4071,7 @@ pub fn embed_close(label: &str) -> Result<(), String> {
     let parts = with_state(label, |state| {
         (
             state.toolbar.clone(),
+            state.window.clone(),
             state
                 .tabs
                 .iter()
@@ -3994,7 +4081,7 @@ pub fn embed_close(label: &str) -> Result<(), String> {
         )
     })
     .ok_or_else(|| "浏览器不存在".to_string())?;
-    let (toolbar, tabs, settings_view) = parts;
+    let (toolbar, window, tabs, settings_view) = parts;
     let _ = toolbar.close();
     for webview in tabs {
         let _ = webview.close();
@@ -4004,6 +4091,13 @@ pub fn embed_close(label: &str) -> Result<(), String> {
     }
     if let Ok(mut map) = BROWSERS.lock() {
         map.remove(label);
+    }
+    // 通知外壳：内嵌浏览器整个拆掉了（最后一个内容标签被 Ctrl+W 关掉等）。
+    // 壳的 BrowserHost 收到后把对应的网页标签一并关掉——不然标签还在、
+    // 内容区只剩一块黑（管理员 2026-11-28「Ctrl+W 直接黑了」）。
+    {
+        use tauri::Emitter;
+        let _ = window.app_handle().emit("huaxia://browser-closed", label.to_string());
     }
     Ok(())
 }
@@ -4416,6 +4510,8 @@ mod tests {
             tabs_width: 3.0,
             save_ask_dir: true,
             save_dir: "  ".to_string(),
+            picker: false,
+            adblock: false,
         }
         .sanitized();
         assert_eq!(broken.home, BrowserSettings::default().home, "空主页回退默认");
@@ -4429,6 +4525,8 @@ mod tests {
         assert_eq!(broken.tabs_width, 0.7, "标签栏上限 70%");
         // 布尔开关原样保留（用户明确关掉的不能被“修正”回去）。
         assert!(!broken.shortcuts);
+        assert!(!broken.picker, "圆点开关原样保留");
+        assert!(!broken.adblock, "广告拦截开关原样保留");
         assert!(!broken.show_titles);
     }
 }

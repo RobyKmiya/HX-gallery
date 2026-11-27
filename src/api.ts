@@ -393,6 +393,14 @@ export const api = {
   /** 拆除（只关 webview，不碰主窗）。 */
   d2EmbedClose: (label: string) => invoke<void>("d2_embed_close", { label }),
 
+  /** 读浏览器设置（settings.json；主设置/⚙面板/D2 面板共用一份真源）。 */
+  browserSettingsGet: () =>
+    invoke<Record<string, unknown>>("browser_settings_get"),
+
+  /** 补丁式写浏览器设置：只改传上来的字段，其余保留。 */
+  browserSettingsSet: (patch: Record<string, unknown>) =>
+    invoke<void>("browser_settings_set", { patch }),
+
   /** 当前阅读页解码后写入系统剪贴板（动图取第一帧）。 */
   copyReaderPage: (archiveId: number, pageIndex: number) =>
     invoke<void>("copy_reader_page", { archiveId, pageIndex }),

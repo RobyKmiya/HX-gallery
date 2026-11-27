@@ -1415,6 +1415,39 @@ pub fn d2_embed_close(label: String) -> Result<(), String> {
     crate::browser::embed_close(&label)
 }
 
+/// 读浏览器设置（settings.json）。主设置对话框 / D2 面板用它展示同一份配置
+///（1.1.96 整合：浏览器设置的唯一真源，不再各自存 localStorage）。
+#[tauri::command]
+pub fn browser_settings_get() -> Result<serde_json::Value, String> {
+    serde_json::to_value(crate::browser::load_settings_with_fallback(None))
+        .map_err(|e| format!("序列化设置失败: {e}"))
+}
+
+/// 写浏览器设置（settings.json）。只改传上来的字段：先读现值再合并，
+/// 避免壳侧某个开关把主页/缩放等其它项冲掉。
+#[tauri::command]
+pub fn browser_settings_set(patch: serde_json::Value) -> Result<(), String> {
+    let mut current = crate::browser::load_settings_with_fallback(None);
+    let merged = merge_json(serde_json::to_value(&current).map_err(|e| e.to_string())?, patch);
+    current = serde_json::from_value(merged).map_err(|e| format!("设置格式不对: {e}"))?;
+    current = current.sanitized();
+    crate::browser::save_settings(&current)?;
+    // 立即作用到运行中的浏览器（开着的话）：广告拦截全局开关 + 圆点显隐。
+    crate::browser::set_adblock_enabled(current.adblock);
+    crate::browser::apply_picker_to_tabs(current.picker);
+    Ok(())
+}
+
+/// 浅合并：patch 里的键覆盖 base，其余保留（只处理一层对象，够用）。
+fn merge_json(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    if let (Some(b), Some(p)) = (base.as_object_mut(), patch.as_object()) {
+        for (key, value) in p {
+            b.insert(key.clone(), value.clone());
+        }
+    }
+    base
+}
+
 /// open_browser_window 的内置版：同一套 opts，宿主换成 main 窗。
 fn open_browser_window_embedded(
     app: &AppHandle,

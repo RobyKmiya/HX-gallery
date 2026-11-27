@@ -19,7 +19,9 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
-    background: rgba(6, 8, 12, .58);
+    /* 1.1.96：去掉暗化背景遮罩（管理员嫌丑）。body 只是透明的事件层，
+       点卡片外任意处仍会关闭（浏览器-settings.js 里有 body click 关闭逻辑）。 */
+    background: transparent;
     color: var(--text);
     font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif;
     display: flex; align-items: center; justify-content: center;
@@ -159,6 +161,20 @@
       <label class="check">
         <input type="checkbox" id="showTitles" />
         <b>标签显示网页标题<span>关掉后只显示域名，标签多时更整齐</span></b>
+      </label>
+    </div>
+
+    <div class="row">
+      <label class="check">
+        <input type="checkbox" id="adblock" />
+        <b>启用广告拦截<span>引擎网络层拦广告域名 + 联盟追踪参数；自定义名单在 主设置 → 广告拦截 维护</span></b>
+      </label>
+    </div>
+
+    <div class="row">
+      <label class="check">
+        <input type="checkbox" id="picker" />
+        <b>显示元素选择圆点<span>网页右下角 ⊘，点它再点元素永久屏蔽。**只管圆点**：Alt+E / Ctrl+Shift+E 随时可用，不受这里影响</span></b>
       </label>
     </div>
 

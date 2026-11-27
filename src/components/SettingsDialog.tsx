@@ -32,11 +32,13 @@ import WallpaperLockSettings from "./WallpaperLockSettings";
 import BrowserDataSettings from "./BrowserDataSettings";
 import UserscriptSettings from "./UserscriptSettings";
 import AdblockSettings from "./AdblockSettings";
+import BrowserPrefsSettings from "./BrowserPrefsSettings";
 
 type SettingsTab =
   | "general"
   | "reading"
   | "wallpaper"
+  | "web"
   | "browser"
   | "userscript"
   | "adblock"
@@ -79,6 +81,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: "general", label: "通用" },
   { key: "reading", label: "阅读" },
   { key: "wallpaper", label: "壁纸锁" },
+  { key: "web", label: "匣浏览器" },
   { key: "browser", label: "浏览器数据" },
   { key: "userscript", label: "用户脚本" },
   { key: "adblock", label: "广告拦截" },
@@ -420,6 +423,7 @@ export default function SettingsDialog({
             )}
 
             {tab === "wallpaper" && <WallpaperLockSettings />}
+            {tab === "web" && <BrowserPrefsSettings />}
 
             {tab === "browser" && <BrowserDataSettings />}
 

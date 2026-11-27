@@ -2929,6 +2929,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             d2::d2_embed_sync,
             d2::d2_embed_show,
             d2::d2_embed_close,
+            d2::browser_settings_get,
+            d2::browser_settings_set,
             d2::d2_back,
             d2::d2_forward,
             d2::d2_reload,

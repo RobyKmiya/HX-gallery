@@ -2,7 +2,7 @@
 // @name         画匣盾 · 弹窗/广告跳转过滤
 // @name:zh-CN   画匣盾 · 弹窗/广告跳转过滤
 // @namespace    huaxia://shield
-// @version      1.2.0
+// @version      1.3.0
 // @description  画匣内置：挡广告弹窗/广告弹层、静默 alert/confirm、清明显广告位；轻量无依赖
 // @author       画匣
 // @match        https://*/*
@@ -351,7 +351,8 @@
       }
       if (overlay) overlay.style.display = "none";
       try {
-        if (dot.parentNode !== document.documentElement) {
+        // 圆点只在开关开着时回挂到页面上；关着就别再出现了。
+        if (pickerEnabled && dot.parentNode !== document.documentElement) {
           document.documentElement.appendChild(dot);
         }
       } catch (e) {}
@@ -369,6 +370,9 @@
 
     function mount() {
       if (document.getElementById("__hxPicker")) return;
+      // 圆点开关只管圆点显隐：关掉时 API（__hxPickerApi）照常注册，
+      // Alt+E 快捷键照样能进元素屏蔽（管理员 2026-11-28：快捷键不该被开关挡）。
+      if (!pickerEnabled) return;
       // 挂 documentElement：站点给 body 加 transform/overflow 时，fixed 圆点是
       // 相对 body 定位的，会被裁掉或跟着滚走（管理员 2026-11-27：广告盖住按钮）。
       document.documentElement.appendChild(dot);
@@ -397,9 +401,22 @@
         return picking;
       },
     };
+
+    // 设置里的「显示元素选择圆点」实时开关（⚙面板保存 / 主设置修改都会调）：
+    // 只影响圆点显隐，不动正在进行的屏蔽模式。
+    window.__hxSetPicker = function (on) {
+      pickerEnabled = !!on;
+      if (!pickerEnabled && !picking) {
+        try { dot.remove(); } catch (e) {}
+        return;
+      }
+      if (pickerEnabled && !picking) mount();
+    };
   }
 
-  if (pickerEnabled) setupPicker();
+  // setupPicker **恒执行**：__hxPickerApi 必须一直存在，Alt+E 才永远可用；
+  // 圆点本身由 pickerEnabled / __hxSetPicker 控制显隐。
+  setupPicker();
 
   var sweepTimer = null;
   function sweep() {

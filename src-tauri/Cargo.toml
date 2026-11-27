@@ -61,6 +61,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# 关 WebView2 自带「浏览器加速键」用（Ctrl+T/W/Tab 被它吞掉，页面收不到——1.1.96）。
+# 版本必须与 tauri 内部的 webview2-com 完全一致（COM 接口类型跨 crate 不能混）。
+webview2-com = "0.39"
+# Interface::cast()（ICoreWebView2Settings → ICoreWebView2Settings9）。
+# 版本与 tauri 内部一致（0.62），否则 COM 接口 trait 不互通。
+windows-core = "0.62"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

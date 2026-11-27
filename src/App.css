@@ -8544,6 +8544,22 @@ body.is-splitting {
   border-color: var(--accent, #7c93ff);
 }
 
+/* ---------- 设置：匣浏览器文本输入（1.1.96，与 settings-textarea 同风格） ---------- */
+.settings-text-input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.settings-text-input:focus {
+  border-color: var(--accent, #7c93ff);
+}
+
 .settings-panel h4 {
   margin: 14px 0 6px;
   font-size: 13px;

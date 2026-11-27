@@ -95,6 +95,13 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
       return true;
     }
   });
+  // 广告拦截真源在 settings.json（1.1.96 整合）：面板挂载后同步一次实际值。
+  useEffect(() => {
+    void api
+      .browserSettingsGet()
+      .then((settings) => setAdblockOn(settings.adblock !== false))
+      .catch(() => {});
+  }, []);
   const [homeDraft, setHomeDraft] = useState(() => {
     try {
       return window.localStorage.getItem("huaxia.d2.home") || "https://e-hentai.org/";
@@ -568,18 +575,23 @@ export default function D2Panel({ onClose, onNotify, libraryPath }: D2PanelProps
                 </button>
               </div>
               <label className="settings-row" style={{ marginTop: 10 }}>
-                <span>广告拦截（内置名单 + 自定义文件，重开浏览窗口生效）</span>
+                <span>广告拦截（内置名单 + 自定义文件；与浏览器 ⚙ 面板/主设置共用一份设置）</span>
                 <input
                   type="checkbox"
                   checked={adblockOn}
                   onChange={(event) => {
                     const next = event.target.checked;
                     setAdblockOn(next);
-                    try {
-                      window.localStorage.setItem("huaxia.d2.adblock", next ? "1" : "0");
-                    } catch {
-                      // 存不了就只在本次生效
-                    }
+                    void api
+                      .browserSettingsSet({ adblock: next })
+                      .catch(() => {
+                        // 写不进 settings.json 就退回 localStorage（本次会话仍生效）
+                        try {
+                          window.localStorage.setItem("huaxia.d2.adblock", next ? "1" : "0");
+                        } catch {
+                          // 存不了就只在本次生效
+                        }
+                      });
                   }}
                 />
               </label>

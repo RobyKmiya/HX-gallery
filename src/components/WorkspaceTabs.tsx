@@ -133,20 +133,25 @@ function BrowserHost({
   visible,
   home,
   onHome,
+  onClosed,
 }: {
   url: string;
   visible: boolean;
   /** 工具栏 ⌂ 指向：huaxia:newtab（回画匣新页）或 bing 网址。 */
   home: string;
   onHome: () => void;
+  /** 引擎把内嵌浏览器整个拆掉时（Ctrl+W 关最后一个标签），壳把这个标签一并关。 */
+  onClosed: () => void;
 }) {
   const holderRef = useRef<HTMLDivElement>(null);
   const [label, setLabel] = useState<string | null>(null);
   const modalCount = useRef(0);
   const [modalTick, setModalTick] = useState(0);
-  /** onHome 每次渲染都是新函数，用 ref 挡住重复订阅。 */
+  /** onHome/onClosed 每次渲染都是新函数，用 ref 挡住重复订阅。 */
   const onHomeRef = useRef(onHome);
   onHomeRef.current = onHome;
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
 
   // 引擎生命周期：挂载/换址时开，卸载时拆（切标签不卸载，只切 visible）。
   useEffect(() => {
@@ -166,8 +171,6 @@ function BrowserHost({
           url,
           adblock: true,
           home,
-          // 设置→广告拦截 里的「显示元素选择圆点」开关（默认开）。
-          picker: window.localStorage.getItem("huaxia.d2.picker") !== "0",
           rect: rect
             ? { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
             : undefined,
@@ -195,6 +198,26 @@ function BrowserHost({
     let unlisten: (() => void) | null = null;
     void listen<string>("huaxia://newtab", (event) => {
       if (event.payload === label) onHomeRef.current();
+    }).then((un) => {
+      if (dead) un();
+      else unlisten = un;
+    });
+    return () => {
+      dead = true;
+      if (unlisten) unlisten();
+    };
+  }, [label]);
+
+  // 引擎把内嵌浏览器整个拆掉（Ctrl+W 关掉最后一个内容标签）→ 壳把这个
+  // 网页标签一并关掉，否则标签还挂着、内容区只剩一块黑（1.1.96）。
+  // 注意自己拆（onClose / ⌂）也会走到 embed_close：closeTab 对已移除的
+  // 标签是空操作，重复触发无害。
+  useEffect(() => {
+    if (!label) return;
+    let dead = false;
+    let unlisten: (() => void) | null = null;
+    void listen<string>("huaxia://browser-closed", (event) => {
+      if (event.payload === label) onClosedRef.current();
     }).then((un) => {
       if (dead) un();
       else unlisten = un;
@@ -631,6 +654,7 @@ export default function WorkspaceTabs({
                       : "huaxia:newtab"
                   }
                   onHome={() => setTabUrl(tab.id, null)}
+                  onClosed={() => closeTab(tab.id)}
                 />
               ) : (
                 <NewTab

@@ -9,16 +9,12 @@ import type { BlockedEntry } from "../types";
  * （域名名单 + 联盟追踪参数），比扩展更底层，XHR/图片/脚本/弹窗跳转都能拦。
  */
 export default function AdblockSettings() {
-  const [enabled, setEnabled] = useState(
-    () => window.localStorage.getItem("huaxia.d2.adblock") !== "0",
-  );
+  const [enabled, setEnabled] = useState(true);
   const [custom, setCustom] = useState("");
   const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<BlockedEntry[]>([]);
-  const [pickerOn, setPickerOn] = useState(
-    () => window.localStorage.getItem("huaxia.d2.picker") !== "0",
-  );
+  const [pickerOn, setPickerOn] = useState(true);
 
   const loadBlocked = async () => {
     try {
@@ -28,12 +24,21 @@ export default function AdblockSettings() {
     }
   };
 
+  // 广告拦截/圆点开关现在与浏览器 ⚙ 面板共用 settings.json 一份真源
+  //（1.1.96 整合），不再各自写 localStorage。
   useEffect(() => {
     void api
       .adblockReadCustom()
       .then(setCustom)
       .catch(() => {});
     void loadBlocked();
+    void api
+      .browserSettingsGet()
+      .then((settings) => {
+        setEnabled(settings.adblock !== false);
+        setPickerOn(settings.picker !== false);
+      })
+      .catch(() => {});
   }, []);
 
   const removeBlocked = async (item: BlockedEntry) => {
@@ -57,7 +62,9 @@ export default function AdblockSettings() {
 
   const toggle = (next: boolean) => {
     setEnabled(next);
-    window.localStorage.setItem("huaxia.d2.adblock", next ? "1" : "0");
+    void api
+      .browserSettingsSet({ adblock: next })
+      .catch(() => setHint("广告拦截开关保存失败"));
   };
 
   const save = async () => {
@@ -91,16 +98,15 @@ export default function AdblockSettings() {
       </label>
 
       <label className="settings-row">
-        <span>显示元素选择圆点（网页右下角 ⊘）</span>
+        <span>显示元素选择圆点（网页右下角 ⊘，只管圆点；Alt+E 快捷键不受影响）</span>
         <input
           type="checkbox"
           checked={pickerOn}
           onChange={(event) => {
             setPickerOn(event.target.checked);
-            window.localStorage.setItem(
-              "huaxia.d2.picker",
-              event.target.checked ? "1" : "0",
-            );
+            void api
+              .browserSettingsSet({ picker: event.target.checked })
+              .catch(() => setHint("圆点开关保存失败"));
           }}
         />
       </label>

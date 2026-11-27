@@ -34,6 +34,8 @@
     $("tabsWidthVal").textContent = $("tabsWidth").value + "%";
     $("shortcuts").checked = s.shortcuts !== false;
     $("showTitles").checked = s.showTitles !== false;
+    $("adblock").checked = s.adblock !== false;
+    $("picker").checked = s.picker !== false;
     $("saveAskDir").checked = s.saveAskDir === true;
     $("saveDir").value = s.saveDir || "";
   }
@@ -48,7 +50,9 @@
       showTitles: true,
       tabsWidth: 0.44,
       saveAskDir: true,
-      saveDir: ""
+      saveDir: "",
+      picker: true,
+      adblock: true
     };
   }
 
@@ -125,7 +129,9 @@
         showTitles: $("showTitles").checked,
         tabsWidth: Number($("tabsWidth").value) / 100,
         saveAskDir: $("saveAskDir").checked,
-        saveDir: $("saveDir").value.trim()
+        saveDir: $("saveDir").value.trim(),
+        picker: $("picker").checked,
+        adblock: $("adblock").checked
       }
     });
     // 引擎没回话就别永远转：4 秒后放开按钮。
