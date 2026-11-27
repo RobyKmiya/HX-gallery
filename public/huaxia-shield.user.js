@@ -282,12 +282,14 @@
 
     function onMouseDown(event) {
       if (!picking) return;
+      if (event.target === dot) return;
       event.preventDefault();
       event.stopPropagation();
     }
 
     function onClick(event) {
       if (!picking) return;
+      if (event.target === dot) return;
       event.preventDefault();
       event.stopPropagation();
       var el = pickAt(event.clientX, event.clientY) || current;
@@ -321,12 +323,18 @@
         shield = document.createElement("div");
         shield.id = "__hxPickerShield";
         shield.style.cssText =
-          "position:fixed;inset:0;z-index:2147483645;background:transparent;cursor:crosshair;";
+          "position:fixed;inset:0;z-index:2147483647;background:transparent;cursor:crosshair;";
         shield.addEventListener("mousemove", onMove, true);
         shield.addEventListener("mousedown", onMouseDown, true);
         shield.addEventListener("click", onClick, true);
         document.documentElement.appendChild(shield);
       }
+      // 圆点跟着升到遮罩里：遮罩盖住整页（含各种高 z-index 广告）时，
+      // 圆点仍是可点的退出入口，不用去找 Esc。
+      try {
+        if (dot.parentNode !== shield) shield.appendChild(dot);
+        dot.style.zIndex = "2147483647";
+      } catch (e) {}
       if (overlay) overlay.style.display = "none";
       document.addEventListener("keydown", onKey, true);
       dot.style.transform = "scale(1.15)";
@@ -342,8 +350,13 @@
         shield = null;
       }
       if (overlay) overlay.style.display = "none";
+      try {
+        if (dot.parentNode !== document.documentElement) {
+          document.documentElement.appendChild(dot);
+        }
+      } catch (e) {}
       dot.style.transform = "";
-      dot.title = "画匣元素选择器：点击后点网页元素永久屏蔽（Esc 退出）";
+      dot.title = "画匣元素选择器：点击后点网页元素永久屏蔽（Esc 退出 / Alt+E 切换）";
       document.removeEventListener("keydown", onKey, true);
     }
 
@@ -356,11 +369,34 @@
 
     function mount() {
       if (document.getElementById("__hxPicker")) return;
-      (document.body || document.documentElement).appendChild(dot);
+      // 挂 documentElement：站点给 body 加 transform/overflow 时，fixed 圆点是
+      // 相对 body 定位的，会被裁掉或跟着滚走（管理员 2026-11-27：广告盖住按钮）。
+      document.documentElement.appendChild(dot);
     }
 
-    if (document.body) mount();
-    else document.addEventListener("DOMContentLoaded", mount, { once: true });
+    mount();
+    // 站点脚本会整段重写 body、或反广告脚本把陌生节点删掉 → 圆点消失。
+    // 只在 documentElement 的直接子节点上守（便宜），掉了就补回来。
+    try {
+      new MutationObserver(function () {
+        if (!document.getElementById("__hxPicker")) mount();
+      }).observe(document.documentElement, { childList: true });
+    } catch (e) {}
+
+    // 引擎侧快捷键（Alt+E / Ctrl+Shift+E）走这里：不依赖圆点，页面上任何
+    // 遮挡物挡住按钮都能进/出屏蔽模式。
+    window.__hxPickerApi = {
+      toggle: function () {
+        if (picking) stopPicking();
+        else startPicking();
+        return picking;
+      },
+      start: startPicking,
+      stop: stopPicking,
+      isOn: function () {
+        return picking;
+      },
+    };
   }
 
   if (pickerEnabled) setupPicker();

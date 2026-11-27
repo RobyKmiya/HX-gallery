@@ -276,9 +276,23 @@
       if (k === "-") { e.preventDefault(); req("zoomOut"); return; }
       if (k === "0") { e.preventDefault(); req("zoomReset"); return; }
       if (k === ",") { e.preventDefault(); req("openSettings"); return; }
+      // Ctrl+Shift+Tab：上一个标签（Ctrl+Tab 由内容页/引擎处理）
+      if (e.shiftKey && k === "tab") { e.preventDefault(); req("prevTab"); return; }
     }
     if (e.altKey && !e.ctrlKey && e.key === "ArrowLeft") { e.preventDefault(); req("back"); return; }
     if (e.altKey && !e.ctrlKey && e.key === "ArrowRight") { e.preventDefault(); req("forward"); return; }
+    // Alt+E：元素屏蔽（工具栏这边转给页面执行，见引擎 pickElement）
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && (e.key || "").toLowerCase() === "e") {
+      e.preventDefault(); req("pickElement"); return;
+    }
+    // Alt+H：回主页
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && (e.key || "").toLowerCase() === "h") {
+      e.preventDefault(); req("home"); return;
+    }
+    // F12 / Ctrl+Shift+I：开发者工具
+    if (e.key === "F12" || (e.ctrlKey && e.shiftKey && (e.key || "").toLowerCase() === "i")) {
+      e.preventDefault(); req("devtools"); return;
+    }
     if (e.key === "F5") { e.preventDefault(); req("reload"); }
   });
 

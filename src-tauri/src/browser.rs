@@ -2252,11 +2252,56 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
     if (extra) for (var k in extra) item[k] = extra[k];
     (window.__xkReqQ = window.__xkReqQ || []).push(item);
   }
+  // 页面内提示：快捷键没有可汇报的东西时（例如元素选择器没开）就地给个反馈，
+  // 不去惊动宿主。position/z-index 拉满，广告也压不住。
+  function tip(text) {
+    try {
+      var t = document.createElement("div");
+      t.textContent = text;
+      t.setAttribute("style",
+        "position:fixed;left:50%;bottom:26px;transform:translateX(-50%);" +
+        "z-index:2147483647;background:rgba(20,22,27,.96);color:#e8e8ee;" +
+        "border:1px solid rgba(255,255,255,.16);padding:8px 16px;border-radius:9px;" +
+        "font:13px 'Segoe UI','Microsoft YaHei UI',sans-serif;" +
+        "box-shadow:0 10px 26px rgba(0,0,0,.5);pointer-events:none;");
+      (document.body || document.documentElement).appendChild(t);
+      setTimeout(function () { t.remove(); }, 2200);
+    } catch (e) {}
+  }
+
+  // 元素屏蔽（Alt+E / Ctrl+Shift+E）：**不点页面上的圆点**也能进/出选择模式。
+  // 广告把右下角圆点盖住、或者站点脚本把圆点删掉时，这是唯一入口。
+  function togglePicker() {
+    try {
+      if (window.__hxPickerApi && window.__hxPickerApi.toggle) {
+        var on = window.__hxPickerApi.toggle();
+        tip(on ? "元素选择已开启：点要屏蔽的元素（Esc / Alt+E 退出）" : "已退出元素选择");
+        return true;
+      }
+    } catch (err) {}
+    return false;
+  }
+
+  window.__xkTip = tip;
+
   document.addEventListener("keydown", function (e) {
     if (window.__xkShortcuts === false) return;
     var ctrl = e.ctrlKey || e.metaKey;
+    var k = (e.key || "").toLowerCase();
+
+    // 元素屏蔽：Alt+E（单按，最顺手）或 Ctrl+Shift+E。
+    if (e.altKey && !ctrl && !e.shiftKey && k === "e") {
+      e.preventDefault();
+      if (!togglePicker()) tip("元素选择器没启用：设置 → 广告拦截 里打开「显示元素选择圆点」");
+      return;
+    }
+    if (ctrl && e.shiftKey && !e.altKey && k === "e") {
+      e.preventDefault();
+      if (!togglePicker()) tip("元素选择器没启用：设置 → 广告拦截 里打开「显示元素选择圆点」");
+      return;
+    }
+
     if (ctrl && !e.altKey && !e.shiftKey) {
-      var k = (e.key || "").toLowerCase();
       if (k === "t") { e.preventDefault(); push("new"); return; }
       if (k === "w") { e.preventDefault(); push("close"); return; }
       if (k === "r") { e.preventDefault(); push("reload"); return; }
@@ -2265,17 +2310,35 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
       if (k === "-") { e.preventDefault(); push("zoomOut"); return; }
       if (k === "0") { e.preventDefault(); push("zoomReset"); return; }
     }
-    if (e.altKey && !e.ctrlKey && e.key === "ArrowLeft") {
+    if (e.altKey && !ctrl && e.key === "ArrowLeft") {
       e.preventDefault(); push("back"); return;
     }
-    if (e.altKey && !e.ctrlKey && e.key === "ArrowRight") {
+    if (e.altKey && !ctrl && e.key === "ArrowRight") {
       e.preventDefault(); push("forward"); return;
+    }
+    // Alt+H：回主页（工具栏被网页内容挤掉时也能用）。
+    if (e.altKey && !ctrl && !e.shiftKey && k === "h") {
+      e.preventDefault(); push("home"); return;
+    }
+    // Alt+C：复制当前页地址（拿到链接最快的路，不用去点地址栏）。
+    if (e.altKey && !ctrl && !e.shiftKey && k === "c") {
+      e.preventDefault();
+      try {
+        navigator.clipboard.writeText(location.href).then(function () {
+          tip("已复制当前页地址");
+        }, function () { tip(location.href); });
+      } catch (err) { tip(location.href); }
+      return;
+    }
+    // F12 / Ctrl+Shift+I：开发者工具（排查屏蔽规则时用）。
+    if (e.key === "F12" || (ctrl && e.shiftKey && !e.altKey && k === "i")) {
+      e.preventDefault(); push("devtools"); return;
     }
     if (e.key === "F5") { e.preventDefault(); push("reload"); return; }
     if (e.ctrlKey && e.key === "Tab") {
-      // Ctrl+Tab 在页面里没意义，留给引擎切下一个标签。
+      // Ctrl+Tab / Ctrl+Shift+Tab：下一个 / 上一个标签（页面里没别的含义）。
       e.preventDefault();
-      push("nextTab");
+      push(e.shiftKey ? "prevTab" : "nextTab");
     }
   }, true);
   // 鼠标侧键：XButton1(button 3)=后退，XButton2(button 4)=前进。
@@ -2500,6 +2563,17 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
         copyText(selection); ack("已复制选中文本");
       }));
     }
+    // 屏蔽元素：广告把右下角圆点盖住时，右键这里照样能进选择模式
+    // （管理员 2026-11-27：圆点被覆盖就没法操作了）。
+    menu.appendChild(item("屏蔽这个元素…（Alt+E）", function () {
+      try {
+        if (window.__hxPickerApi && window.__hxPickerApi.start) {
+          window.__hxPickerApi.start();
+          return;
+        }
+      } catch (err) {}
+      ack("元素选择器没启用：设置 → 广告拦截");
+    }));
     menu.appendChild(sep());
     // 历史导航页面内直接执行——本来就不需要宿主，绕队列只会多一层失灵面。
     menu.appendChild(item("后退", function () {
@@ -2843,6 +2917,23 @@ fn handle_toolbar_action(
         }
         // 工具栏 ⚙：打开设置浮层。
         "openSettings" => open_settings_window(app, label),
+        // 工具栏侧 Alt+E：焦点在地址栏时内容页收不到键，由这里转给页面。
+        "pickElement" => {
+            let webview = active_webview(label)?;
+            let _ = webview.eval(
+                "try{(function(){var a=window.__hxPickerApi;\
+if(a&&a.toggle){var on=a.toggle();\
+if(window.__xkTip)window.__xkTip(on?'元素选择已开启：点要屏蔽的元素（Esc / Alt+E 退出）':'已退出元素选择');}\
+else if(window.__xkTip)window.__xkTip('元素选择器没启用：设置 → 广告拦截 里打开「显示元素选择圆点」');\
+})()}catch(e){}",
+            );
+            Ok(())
+        }
+        // F12 / Ctrl+Shift+I：开发者工具（调屏蔽规则、看站点结构时用）。
+        "devtools" => {
+            active_webview(label)?.open_devtools();
+            Ok(())
+        }
         // 右键菜单「打开原图并另存」：跨源 <a download> 的 download 属性会被
         // Chromium 无视（点了变成普通导航，on_download 管线根本触发不了），
         // 所以菜单改成推 {action:"save", url}，由这里用 curl 直接抓原图
