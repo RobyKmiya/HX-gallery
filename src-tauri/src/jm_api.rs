@@ -97,6 +97,63 @@ fn api_get(app: &tauri::AppHandle, path_query: &str) -> Result<Value, String> {
     })
 }
 
+/// form 表单值转义（curl -d 原样发送，这里只做最小 percent-encoding）。
+fn form_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// 移动端 API 登录（对齐 jmcomic `req_api('/login', False, data={username,password})`）：
+/// 成功后解密数据的 `s` 字段就是网页登录态 cookie **AVS** 的值。
+/// 用它绕开网页登录：内嵌 WebView2 里 18comic 登录依赖 Google reCAPTCHA，
+/// gstatic 加载失败时点「登錄」毫无反应（管理员 2026-11-27 反馈登录不了）。
+/// 返回 AVS token；失败 Err 带原因（账号密码错误/接口不通）。
+pub fn api_login(app: &tauri::AppHandle, username: &str, password: &str) -> Result<String, String> {
+    let ts = now_ts().to_string();
+    let token = md5hex(&format!("{ts}{TOKEN_SECRET}"));
+    let form = format!(
+        "username={}&password={}",
+        form_encode(username),
+        form_encode(password)
+    );
+    let mut last = String::new();
+    for domain in API_DOMAINS {
+        let url = format!("https://{domain}/login/");
+        match curl_post(app, &url, &ts, &token, &form) {
+            Ok(body) => match parse_api_body(&body, &ts) {
+                Ok(value) => {
+                    let avs = value.get("s").and_then(|v| v.as_str()).unwrap_or("");
+                    if avs.is_empty() {
+                        // status!=1 时 jmcomic 报 errors/msg——原样透出更有用。
+                        let msg = value
+                            .get("msg")
+                            .or_else(|| value.get("errors"))
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "接口没返回登录凭据".to_string());
+                        return Err(format!("登录失败：{msg}"));
+                    }
+                    return Ok(avs.to_string());
+                }
+                Err(error) => last = error,
+            },
+            Err(error) => last = error,
+        }
+    }
+    Err(if last.is_empty() {
+        "登录接口全部域名都没通".to_string()
+    } else {
+        last
+    })
+}
+
 /// 用 curl 调接口（走下载链路同一套代理/cookie，UA 换成移动端）。
 fn curl_app(app: &tauri::AppHandle, url: &str, ts: &str, token: &str) -> Result<String, String> {
     let mut command = std::process::Command::new("curl");
@@ -135,6 +192,59 @@ fn curl_app(app: &tauri::AppHandle, url: &str, ts: &str, token: &str) -> Result<
         Some((body, code)) if code == "200" => Ok(body.to_string()),
         Some((_, code)) => Err(format!("站点接口 HTTP {code}")),
         None => Err("站点接口返回空".to_string()),
+    }
+}
+
+/// POST 版 curl（登录用）：同一个 UA/token 头，body 走 form-encoded。
+fn curl_post(
+    app: &tauri::AppHandle,
+    url: &str,
+    ts: &str,
+    token: &str,
+    form: &str,
+) -> Result<String, String> {
+    let mut command = std::process::Command::new("curl");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .arg("-sS")
+        .arg("-L")
+        .arg("--max-time")
+        .arg("25")
+        .arg("--connect-timeout")
+        .arg("8")
+        .arg("-A")
+        .arg(APP_UA)
+        .arg("-H")
+        .arg(format!("token: {token}"))
+        .arg("-H")
+        .arg(format!("tokenparam: {ts},{APP_VERSION}"))
+        .arg("-H")
+        .arg("content-type: application/x-www-form-urlencoded")
+        .arg("-H")
+        .arg(format!("cookie: {}", netdl::cookie_for(app, url)))
+        .arg("-X")
+        .arg("POST")
+        .arg("--data")
+        .arg(form)
+        .arg("-w")
+        .arg("\n%{http_code}")
+        .arg(url);
+    if let Some(proxy) = netdl::proxy_arg() {
+        command.arg("--proxy").arg(proxy);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("调用 curl 失败：{e}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.rsplit_once('\n').map(|(body, code)| (body, code.trim()));
+    match lines {
+        Some((body, code)) if code == "200" => Ok(body.to_string()),
+        Some((_, code)) => Err(format!("登录接口 HTTP {code}")),
+        None => Err("登录接口返回空".to_string()),
     }
 }
 

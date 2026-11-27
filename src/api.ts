@@ -443,6 +443,9 @@ export const api = {
     invoke<number>("site_login_import", { host, cookies }),
   /** 看一条登录态快照里存了哪些 cookie 名（值不回显）。 */
   siteLoginDetail: (id: number) => invoke<string[]>("site_login_detail", { id }),
+  /** 18comic 账号密码 API 登录（绕开网页 reCAPTCHA），成功返回写入的 cookie 数。 */
+  jmApiLogin: (username: string, password: string) =>
+    invoke<number>("jm_api_login", { username, password }),
   /** 用画匣专属配置的真 Edge（--app 窗）打开站点：登录一次永久有效。 */
   openInEdge: (url: string) => invoke<void>("open_in_edge", { url }),
 

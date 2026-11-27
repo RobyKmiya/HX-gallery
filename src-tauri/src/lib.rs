@@ -1177,6 +1177,39 @@ async fn site_login_import(
     crate::site_login::import_cookie_text(&app, &host, &cookies)
 }
 
+/// 18comic 账号密码直接登录（移动端 API）。
+///
+/// 内嵌浏览器里 18comic 的网页登录按钮点了没反应：它依赖 Google reCAPTCHA，
+/// gstatic 加载不出来就永远拿不到 token（管理员 2026-11-27 反馈登录不了）。
+/// 移动接口登录不碰网页：POST /login 换回 AVS cookie，走既有的
+/// 「存快照 + 注入已开标签 + 刷新」链路（import_cookie_text）。
+#[tauri::command]
+async fn jm_api_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    username: String,
+    password: String,
+) -> Result<usize, String> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Err("账号和密码都要填".to_string());
+    }
+    let avs = crate::jm_api::api_login(&app, username.trim(), &password)?;
+    // 顺带把账密存进浏览器账号簿（DPAPI）：登录框自动填充（credential_for_host）
+    // 从此有 18comic 的账号可填，不再「密码栏空的还不提示」。
+    let site = "18comic.vip".to_string();
+    let user = username.trim().to_string();
+    let note = "API 登录自动保存".to_string();
+    run_blocking(state, move |state| {
+        with_library(state, |library| {
+            let enc = dpapi_protect(password.as_bytes())?;
+            db::upsert_credential(&library.conn, None, &site, &user, Some(&enc), &note)
+        })
+    })
+    .await
+    .map_err(|e| format!("登录成功，但保存账号失败：{e}"))?;
+    crate::site_login::import_cookie_text(&app, "18comic.vip", &format!("AVS={avs}"))
+}
+
 /// 看某条登录态快照里存了哪些 cookie 的**名字**（值不回显）。
 ///
 /// 「注入了还是没登录」多半是快照里根本没有登录标志 cookie（比如 18comic 的
@@ -2591,6 +2624,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             site_login_delete,
             site_login_import,
             site_login_detail,
+            jm_api_login,
             open_in_edge,
             adblock_read_custom,
             adblock_write_custom,

@@ -70,6 +70,9 @@ export default function BrowserDataSettings() {
   const [loginNote, setLoginNote] = useState("");
   const [loginDetails, setLoginDetails] = useState<Record<number, string[]>>({});
   const [cookieText, setCookieText] = useState("");
+  /** 18comic 账号密码 API 登录（绕开网页 reCAPTCHA）。 */
+  const [jmUser, setJmUser] = useState("");
+  const [jmPass, setJmPass] = useState("");
   const [siteDrafts, setSiteDrafts] = useState<Record<string, string>>({});
   const [busySite, setBusySite] = useState("");
 
@@ -203,6 +206,27 @@ export default function BrowserDataSettings() {
       await loadLogins();
     } catch (error) {
       setHint(`保存登录态失败：${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 18comic 账号密码直接登录：移动端 API 换 AVS cookie，绕开网页 reCAPTCHA。 */
+  const jmLogin = async () => {
+    if (!jmUser.trim() || !jmPass) {
+      setHint("18comic 账号密码都要填");
+      return;
+    }
+    setBusy(true);
+    try {
+      const count = await api.jmApiLogin(jmUser.trim(), jmPass);
+      setHint(
+        `18comic 登录成功（${count} 项 Cookie 已入库）；已打开的 18comic 标签会自动刷新成已登录`,
+      );
+      setJmPass("");
+      await loadLogins();
+    } catch (error) {
+      setHint(`18comic 登录失败：${String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -555,6 +579,35 @@ export default function BrowserDataSettings() {
                 </div>
               );
             })}
+          </div>
+          <p className="settings-hint">
+            <strong>18comic 账号登录</strong>：网页登录按钮依赖 Google 验证码（加载不出时点了没反应），
+            这里直接走官方 App 接口登录，登录态写进本机加密库，浏览器和下载都能用。
+          </p>
+          <div className="browser-data-toolbar">
+            <input
+              value={jmUser}
+              onChange={(event) => setJmUser(event.target.value)}
+              placeholder="18comic 用户名"
+              className="settings-inline-input"
+              autoComplete="off"
+            />
+            <input
+              type="password"
+              value={jmPass}
+              onChange={(event) => setJmPass(event.target.value)}
+              placeholder="密码"
+              className="settings-inline-input"
+              autoComplete="new-password"
+            />
+            <button
+              type="button"
+              className="btn btn-primary btn-compact"
+              onClick={() => void jmLogin()}
+              disabled={busy || !jmUser.trim() || !jmPass}
+            >
+              登录 18comic
+            </button>
           </div>
           <p className="settings-hint">其它站点用下面这行手填域名：</p>
           <div className="browser-data-toolbar">
