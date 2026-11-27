@@ -8,6 +8,7 @@ import {
 } from "react";
 import { api, assetUrl } from "../api";
 import { useLibraryActions } from "../libraryActions";
+import { usePointerDrag } from "../usePointerDrag";
 import { formatDateTime } from "../format";
 import type { ArchiveCardData, Tag, TagCategory } from "../types";
 import {
@@ -23,6 +24,8 @@ import {
 } from "./Icons";
 
 const TAG_ORDER_KEY = "huaxia.tagOrder";
+/** 拖拽键分隔符：组名可能带冒号等字符，用一个不会出现在界面文字里的控制符。 */
+const TAG_KEY_SEP = "\u0001";
 
 function loadTagOrder(): number[] {
   try {
@@ -91,10 +94,6 @@ export default function TagCenter({
   /** 自定义标签顺序（localStorage 持久化），不在 order 里的标签排在最后。 */
   const [tagOrder, setTagOrder] = useState<number[]>(loadTagOrder);
   const [dragSource, setDragSource] = useState<{
-    group: string;
-    index: number;
-  } | null>(null);
-  const [dragOverTarget, setDragOverTarget] = useState<{
     group: string;
     index: number;
   } | null>(null);
@@ -332,7 +331,6 @@ export default function TagCenter({
     (group: string, groupIds: number[], target: number) => {
       const from = dragSource;
       setDragSource(null);
-      setDragOverTarget(null);
       if (!from || from.group !== group || from.index === target) return;
       const movingId = groupIds[from.index];
       const targetId = groupIds[target];
@@ -351,6 +349,31 @@ export default function TagCenter({
     },
     [dragSource, tagOrder, tags],
   );
+
+  /** 当前拖动行的上下文：hook 只认一个 onStart/onDrop，组与组内序号在这里记。 */
+  const dragContextRef = useRef<{
+    group: string;
+    groupIds: number[];
+    index: number;
+  } | null>(null);
+  /** 指针拖拽排序（HTML5 draggable 在 WebView2 里被系统拖放吞掉，见 usePointerDrag）。 */
+  const tagDrag = usePointerDrag({
+    axis: "y",
+    onStart: () => {
+      const context = dragContextRef.current;
+      if (context) {
+        setDragSource({ group: context.group, index: context.index });
+      }
+    },
+    onDrop: (_from, to) => {
+      const context = dragContextRef.current;
+      if (!context) return;
+      const index = Number(to.slice(to.lastIndexOf(TAG_KEY_SEP) + 1));
+      if (Number.isFinite(index)) {
+        handleDrop(context.group, context.groupIds, index);
+      }
+    },
+  });
 
   const toggleSelect = useCallback((tagId: number) => {
     setSelectedIds((previous) =>
@@ -465,11 +488,9 @@ export default function TagCenter({
     group: string,
     groupIds: number[],
   ) => {
-    const isDragging = dragSource?.group === group && dragSource.index === index;
-    const isDragOver =
-      dragOverTarget?.group === group &&
-      dragOverTarget.index === index &&
-      !isDragging;
+    const dragKey = `${group}${TAG_KEY_SEP}${index}`;
+    const isDragging = tagDrag.dragId === dragKey;
+    const isDragOver = tagDrag.overId === dragKey && !isDragging;
     return (
       <TagRow
         key={tag.id}
@@ -482,20 +503,10 @@ export default function TagCenter({
         onDeleted={handleDeleted}
         onBrowse={onBrowseTag}
         onRegisterSave={registerSave}
-        dragIndex={index}
-        onDragStart={() => setDragSource({ group, index })}
-        onDragOver={(target) => {
-          if (!dragSource || dragSource.group !== group) return;
-          setDragOverTarget((previous) =>
-            previous?.group === group && previous.index === target
-              ? previous
-              : { group, index: target },
-          );
-        }}
-        onDrop={(target) => handleDrop(group, groupIds, target)}
-        onDragEnd={() => {
-          setDragSource(null);
-          setDragOverTarget(null);
+        dragKey={dragKey}
+        onDragBegin={(event) => {
+          dragContextRef.current = { group, groupIds, index };
+          tagDrag.begin(event, dragKey);
         }}
         isDragging={isDragging}
         isDragOver={isDragOver}
@@ -846,12 +857,9 @@ interface TagRowProps {
     tagId: number,
     entry: { dirty: boolean; save: () => Promise<boolean> } | null,
   ) => void;
-  /** 同组内序号；提供时才渲染拖动手柄。 */
-  dragIndex?: number;
-  onDragStart?: (index: number) => void;
-  onDragOver?: (index: number) => void;
-  onDrop?: (index: number) => void;
-  onDragEnd?: () => void;
+  /** 拖动键（`组\u0001序号`）；提供时才渲染拖动手柄。 */
+  dragKey?: string;
+  onDragBegin?: (event: React.PointerEvent) => void;
   isDragging?: boolean;
   isDragOver?: boolean;
 }
@@ -866,11 +874,8 @@ function TagRow({
   onDeleted,
   onBrowse,
   onRegisterSave,
-  dragIndex,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
+  dragKey,
+  onDragBegin,
   isDragging = false,
   isDragOver = false,
 }: TagRowProps) {
@@ -1029,22 +1034,12 @@ function TagRow({
   return (
     <div
       ref={rowRef}
-      className={`tag-row${dragIndex !== undefined ? " is-sortable" : ""}${
+      data-drag-id={dragKey}
+      className={`tag-row${dragKey !== undefined ? " is-sortable" : ""}${
         selected ? " is-selected" : ""
       }${isDragging ? " is-dragging" : ""}${
         isDragOver ? " is-drag-over" : ""
       }`}
-      onDragOver={(event) => {
-        if (onDragOver === undefined || dragIndex === undefined) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        onDragOver(dragIndex);
-      }}
-      onDrop={(event) => {
-        if (onDrop === undefined || dragIndex === undefined) return;
-        event.preventDefault();
-        onDrop(dragIndex);
-      }}
     >
       <button
         type="button"
@@ -1056,21 +1051,11 @@ function TagRow({
         {selected && <CheckIcon width={11} height={11} />}
       </button>
 
-      {dragIndex !== undefined && onDragStart !== undefined && (
+      {dragKey !== undefined && onDragBegin !== undefined && (
         <span
           className="tag-drag-handle"
-          title="拖动排序（仅同组内）"
-          draggable
-          onDragStart={(event) => {
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", String(tag.id));
-            // 整行作为拖拽影像，但只有手柄可发起拖动，避免干扰输入框选字
-            if (rowRef.current) {
-              event.dataTransfer.setDragImage(rowRef.current, 20, 16);
-            }
-            onDragStart(dragIndex);
-          }}
-          onDragEnd={onDragEnd}
+          title="按住拖动排序（仅同组内）"
+          onPointerDown={onDragBegin}
         >
           ⋮⋮
         </span>

@@ -10,6 +10,13 @@ import "./App.css";
 
 type BootPhase = "booting" | "welcome" | "library";
 
+/** 进程内起点（模块加载即埋点）：用来算启动屏至少该露多久。 */
+const APP_STARTED_AT = performance.now();
+/** 启动屏（原生小窗）最短露面时长：低于这个数，动效还没起来就交接了。 */
+const SPLASH_MIN_VISIBLE_MS = 700;
+/** 启动动效总时长：库开得再快也让加载屏走完这一段，否则就是「黑一下就进库」。 */
+const BOOT_MIN_ANIMATION_MS = 950;
+
 export default function App() {
   const [phase, setPhase] = useState<BootPhase>("booting");
   const [library, setLibrary] = useState<LibraryState | null>(null);
@@ -29,6 +36,12 @@ export default function App() {
       for (;;) {
         const state = await api.getLibraryState();
         if (state.libraryPath) {
+          // 走完最短动效：库开得快（内盘/盘已醒）时以前一帧就切走了，
+          // 管理员看到的就是「黑一下直接进库，什么动效都没有」。
+          const remaining = BOOT_MIN_ANIMATION_MS - (performance.now() - APP_STARTED_AT);
+          if (remaining > 0) {
+            await new Promise((resolve) => setTimeout(resolve, remaining));
+          }
           setLastLibraryPath(state.lastLibraryPath);
           setError(state.error);
           setLibrary(state);
@@ -76,9 +89,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // 首帧就绪：亮主窗、关掉原生启动屏。不等数据——锁屏/加载屏自己会接管反馈；
-    // 这一步晚一拍，用户就要多看一会儿启动屏（管理员 2026-11-27）。
-    void api.splashFinish();
+    // 交接原生启动屏 → 主窗。两个条件都满足才换：
+    // ① 双 rAF：保证 BootScreen 已经真的绘制到屏幕上（mount 时只是提交了 DOM，
+    //    以前在这里直接关启动屏，主窗亮起的那一帧还是空的 = 管理员说的「黑屏」）；
+    // ② 启动屏至少露 SPLASH_MIN_VISIBLE_MS，让加载动效看得见（不再是「黑一下就进库」）。
+    let splashTimer = 0;
+    let splashDone = false;
+    const handoff = () => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (splashDone) return;
+          splashDone = true;
+          void api.splashFinish();
+        });
+      });
+    };
+    const visibleFor = performance.now() - APP_STARTED_AT;
+    splashTimer = window.setTimeout(
+      handoff,
+      Math.max(0, SPLASH_MIN_VISIBLE_MS - visibleFor),
+    );
     let cancelled = false;
 
     void (async () => {
@@ -100,6 +130,7 @@ export default function App() {
 
     return () => {
       cancelled = true;
+      window.clearTimeout(splashTimer);
     };
   }, [bootLibrary]);
 

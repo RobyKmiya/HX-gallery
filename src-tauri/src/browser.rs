@@ -66,6 +66,7 @@ pub struct BrowserSettings {
     /// 标签栏最大宽度占比（0.2–0.7）。
     pub tabs_width: f64,
     /// 「打开原图并另存」时弹系统保存对话框选目的地（可直接选散图收藏夹文件夹）。
+    /// 默认开：静默存到某个目录会让人「不知道图去哪了」（管理员 2026-11-27）。
     pub save_ask_dir: bool,
     /// 另存的默认文件夹；空 = 图片\画匣下载。
     pub save_dir: String,
@@ -81,7 +82,7 @@ impl Default for BrowserSettings {
             shortcuts: true,
             show_titles: true,
             tabs_width: 0.44,
-            save_ask_dir: false,
+            save_ask_dir: true,
             save_dir: String::new(),
         }
     }
@@ -2491,7 +2492,7 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
         copyText(src); ack("已复制图片地址");
       }));
       menu.appendChild(item("打开原图并另存", function () {
-        enqueue("save", src, "已发送：另存原图");
+        enqueue("save", src, "正在另存原图…");
       }));
     }
     if (selection) {
@@ -3149,11 +3150,13 @@ fn save_image_via_host(app: &AppHandle, label: &str, url: &str) {
         let dest =         if ask_dir {
             use tauri_plugin_dialog::DialogExt;
             let file_name = download_file_name(&parsed);
-            let picked = app_for_save
-                .dialog()
-                .file()
-                .set_file_name(&file_name)
-                .blocking_save_file();
+            // 挂父窗：没父窗的系统对话框可能开在主窗后面，用户只看到「点了没反应」。
+            let parent = with_state(&label_for_save, |state| state.window.clone());
+            let mut dialog = app_for_save.dialog().file().set_file_name(&file_name);
+            if let Some(parent) = parent {
+                dialog = dialog.set_parent(&parent);
+            }
+            let picked = dialog.blocking_save_file();
             match picked {
                 Some(path) => match path.into_path() {
                     Ok(path) => path,
@@ -3197,7 +3200,9 @@ fn save_image_via_host(app: &AppHandle, label: &str, url: &str) {
             _ => false,
         };
         if ok {
-            toast_toolbar(&label_for_save, "已另存到 图片\\画匣下载", "ok");
+            // 报真实路径：之前固定写「已另存到 图片\画匣下载」，选了别处也这么提示，
+            // 用户根本不知道图落在哪（管理员 2026-11-27）。
+            toast_toolbar(&label_for_save, &format!("已另存：{}", dest.display()), "ok");
         } else {
             let _ = std::fs::remove_file(&dest);
             log_for(&label_for_save, &format!("另存原图失败：{url}"));

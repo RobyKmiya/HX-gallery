@@ -13,6 +13,7 @@
  * - 非浏览器标签共享一个 LibraryView，切标签只换 activeKind，状态不丢。
  */
 import { useEffect, useRef, useState } from "react";
+import { usePointerDrag } from "../usePointerDrag";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
@@ -406,10 +407,6 @@ export default function WorkspaceTabs({
     });
   };
 
-  /** 标签条拖拽排序：记录拖动中的标签与落点（同 TagCenter 的实现方式）。 */
-  const [dragTabId, setDragTabId] = useState<string | null>(null);
-  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
-
   /** 落点排序：把 from 标签移动到 to 标签的位置（不是硬交换，同标签中心）。 */
   const reorderTabs = (fromId: string, toId: string) => {
     if (fromId === toId) return;
@@ -423,6 +420,12 @@ export default function WorkspaceTabs({
       return next;
     });
   };
+
+  /** 标签条拖拽排序（指针事件；HTML5 draggable 在 WebView2 里会被系统拖放吞掉）。 */
+  const tabDrag = usePointerDrag({
+    axis: "x",
+    onDrop: reorderTabs,
+  });
 
   /** 面板里的「跳到该标签」走这里；home 关不掉，直接切过去。 */
   const activateTab = (kind: string) => {
@@ -447,39 +450,20 @@ export default function WorkspaceTabs({
       >
         {tabs.map((tab) => {
           const active = tab.id === activeId;
-          const dragging = dragTabId === tab.id;
-          const dragOver = dragOverTabId === tab.id && !dragging;
+          const dragging = tabDrag.dragId === tab.id;
+          const dragOver = tabDrag.overId === tab.id && !dragging;
           return (
             <div
               key={tab.id}
-              onClick={() => setActiveId(tab.id)}
+              data-drag-id={tab.id}
+              onPointerDown={(event) => tabDrag.begin(event, tab.id)}
+              onClick={() => {
+                if (tabDrag.shouldIgnoreClick()) return;
+                setActiveId(tab.id);
+              }}
               className={`workspace-tab${active ? " is-active" : ""}${
                 dragging ? " is-dragging" : ""
               }${dragOver ? " is-drag-over" : ""}`}
-              draggable
-              onDragStart={(event) => {
-                event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", tab.id);
-                setDragTabId(tab.id);
-              }}
-              onDragEnd={() => {
-                setDragTabId(null);
-                setDragOverTabId(null);
-              }}
-              onDragOver={(event) => {
-                if (!dragTabId || dragTabId === tab.id) return;
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-                setDragOverTabId((prev) => (prev === tab.id ? prev : tab.id));
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (dragTabId && dragTabId !== tab.id) {
-                  reorderTabs(dragTabId, tab.id);
-                }
-                setDragTabId(null);
-                setDragOverTabId(null);
-              }}
               style={{
                 display: "flex",
                 alignItems: "center",

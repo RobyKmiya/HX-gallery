@@ -4106,13 +4106,6 @@ export default function LibraryView({
           onOpenDetail={() => setReaderDetailOpen(true)}
           detailOpen={readerDetailOpen}
           onCloseDetail={() => setReaderDetailOpen(false)}
-          onOpenSettings={() => {
-            setReaderCard(null);
-            setReaderSeriesIds(null);
-            setReaderEntryMode(null);
-            setReaderDetailOpen(false);
-            onOpenTab?.("settings");
-          }}
         />
       )}
 

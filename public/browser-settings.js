@@ -47,7 +47,7 @@
       shortcuts: true,
       showTitles: true,
       tabsWidth: 0.44,
-      saveAskDir: false,
+      saveAskDir: true,
       saveDir: ""
     };
   }

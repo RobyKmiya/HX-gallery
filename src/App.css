@@ -4510,7 +4510,7 @@ body.is-splitting {
 
 .reader-head-title h2 {
   margin: 1px 0 0;
-  max-width: 46vw;
+  max-width: 30vw;
   font-size: 14px;
   font-weight: 650;
   overflow: hidden;
@@ -4540,7 +4540,7 @@ body.is-splitting {
 }
 
 .reader-page-name {
-  max-width: 28vw;
+  max-width: 16vw;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4894,6 +4894,13 @@ body.is-splitting {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 不给收缩：以前标题 + 页名一长，右侧按钮被挤到窗口外，齿轮直接看不见
+     （管理员 2026-11-27）。宁可让标题省略，也不让工具按钮消失。 */
+  flex: 0 0 auto;
+}
+
+.reader-head-tools .icon-button {
+  flex: 0 0 auto;
 }
 
 .reader-head-tools .icon-button {
@@ -9195,6 +9202,8 @@ body.is-splitting {
   opacity: 0.45;
   transform: scale(1.02);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  /* 指针拖拽要靠 elementFromPoint 找落点，拖着的行必须让位，否则永远命中自己 */
+  pointer-events: none;
 }
 .tag-row.is-drag-over {
   border-color: var(--accent-strong);
@@ -9312,50 +9321,103 @@ body.is-splitting {
 }
 
 /* ============================================================
-   阅读器：画面浮动详情按钮（管理员 2026-11-27）
-   沉浸模式工具栏隐藏，详情入口改由画面右下角常驻按钮承担。
+   阅读器：顶栏「详情」按钮 + 阅读设置面板（管理员 2026-11-27）
+   浮动详情按钮已按管理员要求撤掉：详情只留顶栏一处 + I 键，
+   齿轮改成阅读器内就地弹出设置面板（gallery 标签里也能用）。
    ============================================================ */
-.reader-float-detail {
-  position: absolute;
-  right: 18px;
-  bottom: 18px;
-  z-index: 55;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 16px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  background: rgba(24, 27, 34, 0.92);
-  backdrop-filter: blur(8px);
-  color: var(--text);
-  font-size: 13px;
+.reader-detail-btn {
+  width: auto;
+  gap: 5px;
+  padding: 0 10px;
+  font-size: 12px;
   font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 8px 22px -10px rgba(0, 0, 0, 0.9);
-  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease,
-    border-color 0.18s ease;
 }
-.reader-float-detail:hover {
-  background: rgba(232, 163, 92, 0.16);
-  border-color: rgba(232, 163, 92, 0.42);
-  color: var(--accent-strong);
-  transform: translateY(-2px);
+
+.reader-prefs {
+  position: absolute;
+  top: 56px;
+  right: 14px;
+  z-index: 70;
+  width: 324px;
+  max-height: calc(100vh - 96px);
+  overflow: auto;
+  padding: 14px 14px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(18, 20, 26, 0.97);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.9);
+  animation: prefs-in 0.16s ease-out both;
 }
-.reader-float-detail:active {
-  transform: scale(0.94);
+@keyframes prefs-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
 }
-/* 沉浸模式稍收敛但仍然明确可见（管理员反馈找不到详情入口） */
-.reader-float-detail.is-immersive {
-  opacity: 0.8;
+.reader-prefs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
 }
-.reader-float-detail.is-immersive:hover {
-  opacity: 1;
+.reader-prefs-head strong {
+  font-size: 13px;
 }
-@media (prefers-reduced-motion: reduce) {
-  .reader-float-detail,
-  .reader-float-detail:hover,
-  .reader-float-detail:active { transition: none; transform: none; }
+.reader-prefs-label {
+  margin: 10px 0 6px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  text-transform: uppercase;
+}
+.reader-prefs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.reader-prefs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.reader-prefs-row select {
+  flex: 0 0 158px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 12px;
+}
+.reader-prefs-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.reader-prefs-key {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.reader-prefs-key kbd {
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text);
+}
+.reader-prefs-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 /* ============================================================
@@ -9587,9 +9649,20 @@ body.reader-immersive .workspace-tabs { display: none !important; }
 .workspace-tab.is-dragging {
   opacity: 0.45;
   cursor: grabbing;
+  /* 同上：指针拖拽判定落点时不能让拖动元素挡住下面的标签 */
+  pointer-events: none;
 }
 .workspace-tab.is-drag-over {
   background: rgba(124, 147, 255, 0.14) !important;
   border-top-color: var(--accent, #7c93ff) !important;
   box-shadow: 0 0 0 2px rgba(124, 147, 255, 0.3);
+}
+
+/* 指针拖拽进行中（usePointerDrag）：锁掉文本选中与光标，拖到哪儿都是抓手 */
+body.is-pointer-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+body.is-pointer-dragging * {
+  cursor: grabbing !important;
 }

@@ -11,16 +11,21 @@ import {
 import { api, readerPageUrl } from "../api";
 import ReaderMenu, { type ReaderMenuEntry } from "./ReaderMenu";
 import {
+  SHORTCUT_LABELS,
   SHORTCUTS_CHANGED_EVENT,
+  describeBinding,
   loadShortcuts,
   matchShortcut,
   type ShortcutAction,
 } from "../shortcuts";
 import {
+  DEFAULT_GESTURES,
+  GESTURE_LABELS,
   GESTURES_CHANGED_EVENT,
   ZONES_CHANGED_EVENT,
   loadGestures,
   loadZones,
+  saveGestures,
   saveZones,
   type GestureAction,
   type GestureSlot,
@@ -54,6 +59,20 @@ import {
   TrashIcon,
 } from "./Icons";
 
+/** 齿轮面板里的快捷键速查表（顺序即展示顺序，绑定值取用户当前配置）。 */
+const READER_KEY_HINTS: ShortcutAction[] = [
+  "openDetail",
+  "bookmarkLeft",
+  "bookmarkRight",
+  "toggleBookmark",
+  "openBookmarks",
+  "toggleImmersive",
+  "toggleThumbs",
+  "nextPage",
+  "prevPage",
+  "toggleSpread",
+];
+
 interface ReaderProps {
   card: ArchiveCardData;
   onClose: () => void;
@@ -74,8 +93,6 @@ interface ReaderProps {
   detailOpen?: boolean;
   /** 详情浮层开着时单击画面：只关详情，不连携翻页。 */
   onCloseDetail?: () => void;
-  /** 打开设置（工具栏齿轮）：直达鼠标手势 / 快捷键页。 */
-  onOpenSettings?: () => void;
   /** 本次进入直接用的模式（画廊双击卡片时由 LibraryView 指定）。 */
   enterMode?: "immersive" | "normal" | null;
 }
@@ -247,7 +264,6 @@ export default function Reader({
   onOpenDetail,
   detailOpen = false,
   onCloseDetail,
-  onOpenSettings,
   enterMode = null,
 }: ReaderProps) {
   const [info, setInfo] = useState<ReaderInfo | null>(null);
@@ -280,6 +296,8 @@ export default function Reader({
   const [secondData, setSecondData] = useState<ReaderPage | null>(null);
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  /** 阅读设置面板（顶栏齿轮）：手势 + 快捷键速查，就地改就地生效。 */
+  const [prefsOpen, setPrefsOpen] = useState(false);
   /** 沉浸（无框）阅读：顶栏 / 底栏 / 进度条一律不占位、不自动冒头，只留角落一颗淡点还原。 */
   const [immersive, setImmersive] = usePersistentFlag("huaxia.reader.immersive", true);
   // 阅读 HUD（沉浸态的页码 + 2px 进度线）：追求极简沉浸的人可以关掉（设置 → 阅读）。
@@ -1830,7 +1848,7 @@ const archiveEpochRef = useRef(0);
         ]
       : []),
     { label: "画廊详情", hint: "I", dividerBefore: true, onClick: () => onOpenDetail?.() },
-    { label: "阅读设置（手势 / 快捷键）", onClick: () => onOpenSettings?.() },
+    { label: "阅读设置（手势 / 快捷键）", onClick: () => setPrefsOpen((value) => !value) },
     { label: "复制当前页到剪贴板", hint: "Ctrl+C", onClick: copyCurrentPage },
     { label: "在资源管理器中显示", hint: "Ctrl+Enter", onClick: revealArchive },
     { label: "设为桌面壁纸", onClick: wallpaperCurrentPage },
@@ -2079,25 +2097,26 @@ const archiveEpochRef = useRef(0);
             {onOpenDetail && (
               <button
                 type="button"
-                className="icon-button"
+                className={`icon-button reader-detail-btn${detailOpen ? " is-active" : ""}`}
                 onClick={onOpenDetail}
                 aria-label="详情与编辑"
                 title="详情与编辑 (I)"
               >
-                <TagIcon width={16} height={16} />
+                <TagIcon width={15} height={15} />
+                <span>详情</span>
               </button>
             )}
-            {onOpenSettings && (
-              <button
-                type="button"
-                className="icon-button"
-                onClick={onOpenSettings}
-                aria-label="阅读设置"
-                title="阅读设置：鼠标手势 / 快捷键（也可在右键菜单进入）"
-              >
-                <GearIcon width={16} height={16} />
-              </button>
-            )}
+            {/* 齿轮常驻：设置面板在阅读器内就地弹出，不依赖工作台标签切换
+                （管理员 2026-11-27：gallery 标签里根本没有齿轮）。 */}
+            <button
+              type="button"
+              className={`icon-button${prefsOpen ? " is-active" : ""}`}
+              onClick={() => setPrefsOpen((value) => !value)}
+              aria-label="阅读设置"
+              title="阅读设置：鼠标手势 / 快捷键（也可在右键菜单进入）"
+            >
+              <GearIcon width={16} height={16} />
+            </button>
             <button
               type="button"
               className="icon-button"
@@ -2574,19 +2593,83 @@ const archiveEpochRef = useRef(0);
       {/* 沉浸右下角的还原点按钮已按管理员要求移除（2026-11-27）：
           退出途径还在——F 切工具栏、右键菜单「退出沉浸模式」、鼠标后退侧键、Esc 退出阅读。 */}
 
-      {/* 画面浮动详情按钮：沉浸模式也常驻，点开画廊详情（管理员 2026-11-27）。
-          放在 stage 之外，点击不会冒泡触发分区翻页。 */}
-      {onOpenDetail && !detailOpen && (
-        <button
-          type="button"
-          className={`reader-float-detail${immersive ? " is-immersive" : ""}`}
-          onClick={onOpenDetail}
-          aria-label="画廊详情"
-          title="画廊详情 (I)"
-        >
-          <TagIcon width={17} height={17} />
-          <span>详情</span>
-        </button>
+      {/* 阅读设置面板（顶栏齿轮 / 右键菜单）：手势六槽 + 常用键速查，
+          改完即时生效（saveGestures 会发 GESTURES_CHANGED_EVENT，本组件已在听）。 */}
+      {prefsOpen && (
+        <div className="reader-prefs" role="dialog" aria-label="阅读设置">
+          <div className="reader-prefs-head">
+            <strong>阅读设置</strong>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setPrefsOpen(false)}
+              aria-label="关闭阅读设置"
+            >
+              <CloseIcon width={14} height={14} />
+            </button>
+          </div>
+
+          <p className="reader-prefs-label">鼠标手势（阅读器内生效）</p>
+          <div className="reader-prefs-list">
+            {(Object.keys(GESTURE_LABELS) as GestureSlot[]).map((slot) => (
+              <label className="reader-prefs-row" key={slot}>
+                <span>{GESTURE_LABELS[slot]}</span>
+                <select
+                  value={gestures[slot]}
+                  onChange={(event) => {
+                    const next = {
+                      ...gestures,
+                      [slot]: event.target.value as GestureAction,
+                    };
+                    setGestures(next);
+                    saveGestures(next);
+                  }}
+                >
+                  <option value="none">不做任何事</option>
+                  {(Object.keys(SHORTCUT_LABELS) as ShortcutAction[]).map(
+                    (action) => (
+                      <option key={action} value={action}>
+                        {SHORTCUT_LABELS[action]}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+            ))}
+          </div>
+
+          <p className="reader-prefs-label">常用快捷键（设置 → 快捷键 可改键）</p>
+          <div className="reader-prefs-keys">
+            {READER_KEY_HINTS.map((action) => (
+              <div className="reader-prefs-key" key={action}>
+                <span>{SHORTCUT_LABELS[action]}</span>
+                <kbd>{describeBinding(shortcuts[action])}</kbd>
+              </div>
+            ))}
+          </div>
+
+          <div className="reader-prefs-actions">
+            <button
+              type="button"
+              className="btn btn-quiet btn-compact"
+              onClick={() => {
+                const next = { ...DEFAULT_GESTURES };
+                setGestures(next);
+                saveGestures(next);
+                onNotify("已恢复默认手势", "success");
+              }}
+            >
+              恢复默认手势
+            </button>
+            <button
+              type="button"
+              className="btn btn-compact"
+              onClick={() => setPrefsOpen(false)}
+            >
+              完成
+            </button>
+          </div>
+        </div>
       )}
 
       {pageOpsOpen && (

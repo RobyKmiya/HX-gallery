@@ -22,12 +22,19 @@ export default function BootScreen({ walls }: { walls: WallpaperSource[] }) {
   const [urls, setUrls] = useState<string[]>([]);
   useEffect(() => {
     let alive = true;
-    void wallpaperDisplayUrls(walls).then((list) => {
-      if (!alive) return;
-      setUrls(list.filter((url): url is string => Boolean(url)));
-    });
+    const load = () =>
+      wallpaperDisplayUrls(walls).then((list) => {
+        if (!alive) return;
+        setUrls(list.filter((url): url is string => Boolean(url)));
+      });
+    void load();
+    // 首次启动时本地缓存是后端在后台复制的（外接硬盘上的原图动不动十几兆），
+    // 一次没取到会退回原地址——硬盘睡着时就是一屏纯色。1.6 秒后再要一次，
+    // 缓存刚生成好就能在同一屏里贴上来（管理员 2026-11-27 反馈）。
+    const retry = window.setTimeout(() => void load(), 1600);
     return () => {
       alive = false;
+      window.clearTimeout(retry);
     };
   }, [walls]);
   const [index, setIndex] = useState(0);
