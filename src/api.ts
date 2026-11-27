@@ -355,6 +355,9 @@ export const api = {
   /** 老板键第一步：把主窗藏起来。呼回键默认 Ctrl+Shift+H，可在设置里改。 */
   hideMainWindow: () => invoke<void>("hide_main_window"),
 
+  /** 前端首帧就绪：亮主窗、关原生启动屏（splash.html）。 */
+  splashFinish: () => invoke<void>("splash_finish"),
+
   /** 老板键全局呼回键：读当前绑定（Rust 侧持久化 + 注册）。 */
   getBossRecall: () => invoke<string>("get_boss_recall"),
 

@@ -1843,6 +1843,9 @@ fn attach_tab_hooks(
         // 右键菜单（引擎级）：页面 preventDefault 掉 WebView2 原生菜单后，
         // 由本脚本画匣系自己的菜单。
         .initialization_script(CONTEXT_MENU_SCRIPT)
+        // 18comic 登录桥：网页 reCAPTCHA 在墙内加载不出来导致登录键无响应，
+        // 拦下点击交给引擎走 jm API 登录。
+        .initialization_script(JM_LOGIN_HOOK)
 }
 
 /// 下载瞬间抓到的作品页元数据（标题 + tag 分组）。
@@ -2223,13 +2226,57 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
 })();
 "###;
 
+/// 内容页 18comic 登录桥脚本（引擎级，所有内容标签注入；非 jm 域名不生效）。
+///
+/// 管理员 2026-11-27 二次反馈：网页会员登录弹窗的「登錄」按下去没反应——
+/// 站点提交前要拿 reCAPTCHA token，而 WebView2 里 gstatic 被墙加载不出来，
+/// 站点自己的 JS 拿不到 token 就直接 return，按钮永远没响应。
+/// 治法：捕获阶段拦下登录按钮点击，账密推进 `__xkLoginQ`，由引擎轮询器
+/// 走 jm API（官方 app 协议，无验证码）登录、注入 AVS cookie 后刷新页面。
+const JM_LOGIN_HOOK: &str = r###"
+(function () {
+  if (window.__xkJmLoginHook) return;
+  window.__xkJmLoginHook = true;
+  var h = location.hostname || '';
+  if (h.indexOf('18comic') === -1 && h.indexOf('jmcomic') === -1 && h.indexOf('jm') !== 0) return;
+  document.addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== document) {
+      if (el.tagName === 'BUTTON' || el.tagName === 'A' ||
+          (el.tagName === 'INPUT' && (el.type === 'submit' || el.type === 'button'))) break;
+      el = el.parentNode;
+    }
+    if (!el || el === document) return;
+    var text = (el.textContent || el.value || '').trim();
+    if (!/^(登錄|登录|login|sign\s*in)$/i.test(text)) return;
+    // 从按钮往上找 3 层，容出弹窗的容器结构；没有账密就不拦（站点自己报错）。
+    var box = el;
+    for (var i = 0; i < 3 && box; i++) {
+      var user = box.querySelector &&
+        box.querySelector('input[name*="user" i], input[type="text"], input[type="email"]');
+      var pass = box.querySelector && box.querySelector('input[type="password"]');
+      if (user && pass) break;
+      box = box.parentNode;
+    }
+    if (!box || !user || !pass || !user.value || !pass.value) return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.__xkLoginQ = window.__xkLoginQ || [];
+    window.__xkLoginQ.push({ user: user.value, pass: pass.value });
+    el.__xkOrig = text;
+    el.textContent = '登入中…';
+    el.disabled = true;
+  }, true);
+})();
+"###;
+
 /// 内容页右键菜单脚本（引擎级，所有内容标签注入）。
 ///
 /// WebView2 的规则：页面在 `contextmenu` 事件里 `preventDefault()`，原生默认
 /// 菜单就不弹——所以纯页内实现即可。菜单本体也是 Shadow DOM（不沾站点样式）。
-/// 本地动作（复制/后退/刷新）页面内完成；需要引擎的动作（开新标签）推进
-/// `window.__xkReqQ` 队列，由引擎轮询器消化（与工具栏同一套契约，数组队列
-/// 保证连点两次不会互相覆盖）。
+/// 本地动作（复制/全选）页面内完成；其余动作（开新标签/另存原图/历史导航）
+/// 推进 `window.__xkReqQ` 队列，由引擎轮询器消化（与工具栏同一套契约，数组
+/// 队列保证连点两次不会互相覆盖）。
 const CONTEXT_MENU_SCRIPT: &str = r###"
 (function () {
   if (window.__xkCtxMenu) return;
@@ -2284,18 +2331,22 @@ const CONTEXT_MENU_SCRIPT: &str = r###"
     if (img && (img.currentSrc || img.src)) {
       items.push(item("在新标签打开图片", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "new", url: img.currentSrc || img.src }); }));
       items.push(item("复制图片地址", function () { copyText(img.currentSrc || img.src); }));
+      // 不能用 <a download>.click()：跨源链接的 download 属性会被 Chromium
+      // 无视，点了变成普通导航（当前标签直接跳到原图，永远也存不了盘）。
+      // 改走队列，宿主用 curl（带 cookie / UA / referer）抓原图存进 图片\画匣下载。
       items.push(item("打开原图并另存", function () {
         var url = img.currentSrc || img.src;
-        var a = document.createElement("a");
-        a.href = url; a.download = "";
-        document.body.appendChild(a); a.click(); a.remove();
+        if (url) (window.__xkReqQ = window.__xkReqQ || []).push({ action: "save", url: url });
       }));
     }
     if (selection) items.push(item("复制选中文本", function () { copyText(selection); }));
     items.push(sep());
-    items.push(item("后退", function () { history.back(); }));
-    items.push(item("前进", function () { history.forward(); }));
-    items.push(item("刷新", function () { location.reload(); }));
+    // 后退/前进/刷新走队列：宿主的 history_action 带原生 reload、空白页兜底和
+    // 「没有可后退的页面」提示；页面裸调 history.back() 在第一条记录上就是
+    // 静默无效，管理员看到的就是「点了没反应」。
+    items.push(item("后退", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "back" }); }));
+    items.push(item("前进", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "forward" }); }));
+    items.push(item("刷新", function () { (window.__xkReqQ = window.__xkReqQ || []).push({ action: "reload" }); }));
     items.push(sep());
     items.push(item("全选", function () {
       var range = document.createRange();
@@ -2651,6 +2702,71 @@ fn handle_toolbar_action(
         }
         // 工具栏 ⚙：打开设置浮层。
         "openSettings" => open_settings_window(app, label),
+        // 右键菜单「打开原图并另存」：跨源 <a download> 的 download 属性会被
+        // Chromium 无视（点了变成普通导航，on_download 管线根本触发不了），
+        // 所以菜单改成推 {action:"save", url}，由这里用 curl 直接抓原图
+        // （带浏览器真实 UA / cookie / referer，过 Cloudflare 与防盗链），
+        // 存进 图片\画匣下载。下载在后台线程跑，完成用工具栏提示汇报。
+        "save" => {
+            let url = req
+                .get("url")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            if url.trim().is_empty() {
+                return Ok(());
+            }
+            let parsed = Url::parse(&url).map_err(|_| "图片地址无效".to_string())?;
+            // 当前页地址做 referer：图床的防盗链按来源放行，没有会 403。
+            let referer = with_state(label, |state| {
+                state
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == state.active)
+                    .map(|tab| tab.url.clone())
+            })
+            .flatten()
+            .unwrap_or_default();
+            let app_for_save = app.clone();
+            let label_for_save = label.to_string();
+            std::thread::spawn(move || {
+                let dir = default_download_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let dest = dir.join(download_file_name(&parsed));
+                let mut command = crate::netdl::curl_base();
+                let cookie = crate::netdl::cookie_for(&app_for_save, &url);
+                if !cookie.is_empty() {
+                    command.arg("-H").arg(format!("Cookie: {cookie}"));
+                }
+                if !referer.trim().is_empty() {
+                    command.arg("-e").arg(&referer);
+                }
+                if let Some(proxy) = crate::netdl::proxy_arg() {
+                    command.arg("--proxy").arg(proxy);
+                }
+                command.arg("--fail").arg("--max-time").arg("120");
+                let outcome = command
+                    .arg("-o")
+                    .arg(&dest)
+                    .arg(&url)
+                    .output();
+                // 空/失败的残留文件清掉，别让用户在下载目录里捡到 0 字节的假图。
+                let ok = match &outcome {
+                    Ok(output) if output.status.success() => {
+                        std::fs::metadata(&dest).map(|meta| meta.len() > 0).unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if ok {
+                    toast_toolbar(&label_for_save, "已另存到 图片\\画匣下载", "ok");
+                } else {
+                    let _ = std::fs::remove_file(&dest);
+                    log_for(&label_for_save, &format!("另存原图失败：{url}"));
+                    toast_toolbar(&label_for_save, "另存失败：原图拉不下来", "bad");
+                }
+            });
+            Ok(())
+        }
         // ⚙ 设置面板保存：写运行态 + 落盘，立即生效（主页/步进/快捷键不用重开）。
         "config" => {
             let incoming = req.get("config").cloned().unwrap_or(serde_json::Value::Null);
@@ -2822,6 +2938,7 @@ fn start_gm_poller(label: &str, app: AppHandle) {
             let active_label = active.as_ref().map(|view| view.label().to_string());
             if let Some(view) = active.as_ref() {
                 poll_tab_req(&label, view);
+                poll_jm_login(&label, view);
                 poll_gm_xhr_queue(view);
             }
             if webviews.len() > 1 {
@@ -2829,6 +2946,7 @@ fn start_gm_poller(label: &str, app: AppHandle) {
                 let view = &webviews[cursor];
                 if active_label.as_deref() != Some(view.label()) {
                     poll_tab_req(&label, view);
+                    poll_jm_login(&label, view);
                     poll_gm_xhr_queue(view);
                 }
             }
@@ -2847,8 +2965,14 @@ fn app_of(label: &str) -> Option<AppHandle> {
 }
 
 /// 内容页请求（右键菜单「在新标签打开」等）：与工具栏同一套队列契约。
+///
+/// 注意：这里**只认领 `new`，其余动作原样留在队列里**。以前是整条队列
+/// 原子清空再过滤——本轮询器（250ms）和工具栏轮询器（200ms）同时在跑，
+/// 谁先抢到算谁的，而这里不认识的 back/forward/reload/save 会被直接丢掉，
+/// 表现就是「右键菜单/快捷键点了没反应、时灵时不灵」。
+/// 认领与保留在同一次 eval 里完成（原子），两边各取所需。
 fn poll_tab_req(label: &str, webview: &Webview) {
-    // 先看长度：绝大多数轮次队列是空的，不必把整条队列 JSON 序列化回来。
+    // 先看长度：绝大多数轮次队列是空的，不必做认领序列化。
     let pending = eval_json(
         webview,
         "window.__xkReqQ ? window.__xkReqQ.length : 0",
@@ -2861,11 +2985,12 @@ fn poll_tab_req(label: &str, webview: &Webview) {
     if pending <= 0 {
         return;
     }
-    let raw = match eval_json(
-        webview,
-        "JSON.stringify((function(){var q = window.__xkReqQ || []; window.__xkReqQ = []; return q;})())",
-        Duration::from_millis(1200),
-    ) {
+    const CLAIM_NEW_JS: &str = "JSON.stringify((function(){\
+var q = window.__xkReqQ || [], take = [], rest = [];\
+for (var i = 0; i < q.length; i++) { var it = q[i];\
+if (it && it.action === 'new' && it.url) { take.push(it); } else { rest.push(it); } }\
+window.__xkReqQ = rest; return take; })())";
+    let raw = match eval_json(webview, CLAIM_NEW_JS, Duration::from_millis(1200)) {
         Ok(raw) if !raw.trim().is_empty() && raw != "[]" => raw,
         _ => return,
     };
@@ -2889,6 +3014,76 @@ fn poll_tab_req(label: &str, webview: &Webview) {
         if let Err(error) = new_tab(&app, label, url, true) {
             log_for(label, &format!("右键新标签失败：{error}"));
         }
+    }
+}
+
+/// 18comic 登录桥消费端：认领页面侧 `__xkLoginQ`，走 jm API 登录
+/// （官方 app 协议，无 reCAPTCHA），成功注入 AVS cookie 并刷新页面。
+/// 登录要走网络（几秒），放独立线程，别堵住 250ms 的轮询主线程。
+const JM_LOGIN_CLAIM_JS: &str = "JSON.stringify((function(){\
+var q = window.__xkLoginQ || [], take = q; window.__xkLoginQ = [];\
+return take; })())";
+
+fn poll_jm_login(label: &str, webview: &Webview) {
+    let raw = match eval_json(webview, JM_LOGIN_CLAIM_JS, Duration::from_millis(800)) {
+        Ok(raw) if raw.trim() != "[]" && !raw.trim().is_empty() => raw,
+        _ => return,
+    };
+    let reqs: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let Some(app) = app_of(label) else {
+        return;
+    };
+    for req in reqs {
+        let user = req
+            .get("user")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let pass = req
+            .get("pass")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if user.is_empty() || pass.is_empty() {
+            continue;
+        }
+        let webview = webview.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let restore = |message: &str| {
+                // 把按钮文本还原，让用户能再点一次。
+                let _ = webview.eval(&format!(
+                    "(function(){{var b=document.querySelectorAll('button,a,input');\
+                     for(var i=0;i<b.length;i++){{var el=b[i];\
+                     if(el.__xkOrig){{el.textContent=el.__xkOrig;el.disabled=false;\
+                     delete el.__xkOrig;}}}}\
+                     var t=document.createElement('div');t.textContent={};\
+                     t.style.cssText='position:fixed;top:14px;left:50%;transform:translateX(-50%);\
+                     z-index:99999;background:#c0392b;color:#fff;padding:8px 18px;border-radius:8px;\
+                     font-size:13px';document.body.appendChild(t);\
+                     setTimeout(function(){{t.remove();}},6000);}})()",
+                    serde_json::to_string(message).unwrap_or_else(|_| "\"登录失败\"".to_string())
+                ));
+            };
+            match crate::jm_api::api_login(&app, &user, &pass) {
+                Ok(avs) => {
+                    match crate::site_login::import_cookie_text(&app, "18comic.vip", &format!("AVS={avs}"))
+                    {
+                        Ok(_) => {
+                            let _ = webview.eval("location.reload();");
+                        }
+                        Err(error) => restore(&format!("登录成功但注入 cookie 失败：{error}")),
+                    }
+                }
+                Err(error) => restore(&format!("18comic 登录失败：{}", {
+                    let brief = error.lines().next().unwrap_or("");
+                    brief
+                })),
+            }
+        });
     }
 }
 

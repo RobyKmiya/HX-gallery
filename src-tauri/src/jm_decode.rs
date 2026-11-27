@@ -13,23 +13,18 @@
 //!
 //! 即「把竖直分块按倒序摆回来」。
 //!
-//! **段数不能只信公式**：num 由 `scramble_id` + 作品 id + 文件名算 md5 得出，
-//! 而 `scramble_id` 随站点改版会变（页面取不到时我们只能退回默认值），文件名
-//! 也可能带后缀/查询串。2026-11-26 管理员第二次反馈「还是错位」，就是段数算错：
-//! 段数错 → 块数与真实不符 → 怎么倒序都是花的。
-//!
-//! 所以这里加了一层**画面自校验**：把图缩到很小，用「相邻行差异」衡量连续度，
-//! 把候选段数（含 0 = 不处理）逐个试一遍，取最连续的那个。公式给出的段数优先，
-//! 只有在它明显没把画面变得连续时才改用搜索出来的结果。
+//! **段数不能只信公式？不，恰恰只能信公式。** num 由 `scramble_id` + 作品 id +
+//! 文件名算 md5 得出（官方 get_num），输入对输出就对。2026-11-26 曾因
+//! scramble_id 正则抓错数/aid 传成专辑 id 导致段数错，当时加了一层「画面自校验」
+//! 兜底；2026-11-27 管理员第三次反馈「还是错位」，实测根因就是这层自校验：
+//! 真实漫画在缩略图上的连续度打分完全失灵，把公式算对的段数否决掉了。
+//! 已删掉自校验，回归官方行为：无条件信任公式（入参也已修正为章节 photo_id）。
 
 use md5::{Digest, Md5};
 
 /// 站点算法常量（见 JMComic-Crawler-Python JmMagicConstants）。
 const SCRAMBLE_268850: u64 = 268850;
 const SCRAMBLE_421926: u64 = 421926;
-
-/// 候选段数上限：公式里 x 取 8 或 10，(ord % x) * 2 + 2 最大 20。
-const MAX_SEGMENTS: usize = 20;
 
 /// 计算一张图的竖直切片数。返回 0 表示未混淆。
 pub fn segmentation_num(scramble_id: u64, aid: u64, filename: &str) -> usize {
@@ -100,83 +95,28 @@ fn permute(img: &image::RgbImage, num: usize) -> image::RgbImage {
     out
 }
 
-/// 画面纵向连续度：相邻行平均差异，越小越连续。
-fn seam_score(img: &image::RgbImage) -> f64 {
-    let (w, h) = img.dimensions();
-    if h < 2 || w == 0 {
-        return 0.0;
-    }
-    let mut total = 0f64;
-    for y in 1..h {
-        let mut row = 0f64;
-        for x in 0..w {
-            let a = img.get_pixel(x, y - 1);
-            let b = img.get_pixel(x, y);
-            row += (a[0] as i32 - b[0] as i32).abs() as f64
-                + (a[1] as i32 - b[1] as i32).abs() as f64
-                + (a[2] as i32 - b[2] as i32).abs() as f64;
-        }
-        total += row / (w as f64 * 3.0);
-    }
-    total / (h - 1) as f64
-}
-
-/// 缩略一份用于打分（宽 64，保持比例）。打分开销必须小：一张图要试十来个段数。
-fn thumbnail(img: &image::RgbImage) -> image::RgbImage {
-    let (w, h) = img.dimensions();
-    if w <= 64 {
-        return img.clone();
-    }
-    let new_h = ((h as u64 * 64) / w as u64).max(2) as u32;
-    image::imageops::resize(img, 64, new_h, image::imageops::FilterType::Triangle)
-}
-
 /// 选段数 + 还原，原地覆盖 `path`。返回实际使用的段数（0 表示没动）。
 ///
-/// `computed` 是公式算出来的段数，作为优先候选。
+/// `computed` 是公式（segmentation_num）给出的段数，**无条件信任**。
+///
+/// 2026-11-27 教训（管理员第三次反馈「还是错位」）：上一版加的「画面自校验」
+/// 把正确的段数否决了——64px 缩略图上的连续度打分在真实漫画上完全失灵
+/// （实测一张真实本子：还原后 32.3 vs 不动 26.8，还原反而「更不连续」），
+/// 于是 trust_computed 过不了、搜索又选中 0 = 不处理，一张都没还原、
+/// 整本原样错位入库。合成渐变测试图骗过了打分，真实画面骗不过它。
+/// 官方 JMComic-Crawler-Python 从不校验：段数只由 scramble_id + photo_id +
+/// 文件名决定，输入对输出就对。入参现已修正为章节 photo_id（jm_api.rs），
+/// 照官方信公式。
 pub fn decode_image_file(path: &std::path::Path, computed: usize) -> Result<usize, String> {
-    let img = image::open(path).map_err(|e| format!("读图失败（{}）：{e}", path.display()))?;
-    let rgb = img.to_rgb8();
-    let (_, height) = rgb.dimensions();
-
-    let small = thumbnail(&rgb);
-    let identity = seam_score(&small);
-    let mut best = computed;
-    let mut best_score = if computed == 0 {
-        identity
-    } else {
-        seam_score(&permute(&small, computed))
-    };
-    // 公式算出来的段数明显让画面更连续 → 直接信它。
-    let trust_computed = computed > 0 && best_score <= identity * 0.82;
-
-    if !trust_computed {
-        // 公式不可信（页面没给 scramble_id / 文件名对不上）：把候选段数都试一遍。
-        if identity < best_score {
-            best = 0;
-            best_score = identity;
-        }
-        let mut candidate = 2usize;
-        while candidate <= MAX_SEGMENTS {
-            if candidate != computed && candidate <= height as usize {
-                let score = seam_score(&permute(&small, candidate));
-                // 平手时保留更小的段数：真实段数不会凭空变大。
-                if score < best_score * 0.985 {
-                    best = candidate;
-                    best_score = score;
-                }
-            }
-            candidate += 2;
-        }
-    }
-
-    if best == 0 {
+    if computed == 0 {
         return Ok(0);
     }
-    let out = permute(&rgb, best);
+    let img = image::open(path).map_err(|e| format!("读图失败（{}）：{e}", path.display()))?;
+    let rgb = img.to_rgb8();
+    let out = permute(&rgb, computed);
     out.save(path)
         .map_err(|e| format!("写回还原图失败（{}）：{e}", path.display()))?;
-    Ok(best)
+    Ok(computed)
 }
 
 #[cfg(test)]
@@ -259,49 +199,76 @@ mod tests {
         }
     }
 
+    /// 公式段数正确时（整除高度），decode 应一次性还原出原图。
     #[test]
-    fn auto_detect_repairs_wrong_segmentation() {
+    fn decode_trusts_computed_segmentation() {
         let dir = std::env::temp_dir().join("hx-jm-test");
         let _ = std::fs::create_dir_all(&dir);
 
-        // 真实段数 12，但公式给了一个错的 8（模拟 scramble_id/文件名对不上）。
         let original = gradient(1200);
         let scrambled = permute(&original, 12);
-        let path = dir.join("wrong-num.png");
+        let path = dir.join("trust-num.png");
         scrambled.save(&path).expect("写测试图失败");
 
-        let used = decode_image_file(&path, 8).expect("还原失败");
-        assert_eq!(used, 12, "应当自动纠正到真实段数");
+        let used = decode_image_file(&path, 12).expect("还原失败");
+        assert_eq!(used, 12);
 
         let restored = image::open(&path).expect("读回失败").to_rgb8();
         let (w, h) = original.dimensions();
-        let mut same = 0usize;
         for y in 0..h {
             for x in 0..w {
-                if original.get_pixel(x, y) == restored.get_pixel(x, y) {
-                    same += 1;
-                }
+                assert_eq!(
+                    original.get_pixel(x, y),
+                    restored.get_pixel(x, y),
+                    "第 {y} 行还原不一致"
+                );
             }
         }
-        assert!(
-            same as f64 >= (w * h) as f64 * 0.98,
-            "还原结果与原始图不一致：{same}/{}",
-            w * h
-        );
         let _ = std::fs::remove_file(&path);
     }
 
+    /// computed == 0 表示公式判定未混淆：文件必须原样保留。
     #[test]
-    fn auto_detect_keeps_clean_image_untouched() {
+    fn decode_zero_leaves_file_untouched() {
         let dir = std::env::temp_dir().join("hx-jm-test");
         let _ = std::fs::create_dir_all(&dir);
         let original = gradient(900);
         let path = dir.join("clean.png");
         original.save(&path).expect("写测试图失败");
 
-        // 公式说 10 段，但这张图本来就没混淆 → 不应该被倒序。
-        let used = decode_image_file(&path, 10).expect("处理失败");
-        assert_eq!(used, 0, "本来没混淆的图不该动");
+        let used = decode_image_file(&path, 0).expect("处理失败");
+        assert_eq!(used, 0, "未混淆的图不该动");
+        let restored = image::open(&path).expect("读回失败").to_rgb8();
+        let (w, h) = original.dimensions();
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(original.get_pixel(x, y), restored.get_pixel(x, y));
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 18comic 成品全是 webp（2026-11-27 实测整本 39 张 webp）：
+    /// image crate 必须能读也能写回 webp，否则还原会整批静默失败。
+    #[test]
+    fn decode_roundtrip_webp() {
+        let dir = std::env::temp_dir().join("hx-jm-test");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let original = gradient(480);
+        let scrambled = permute(&original, 8);
+        let path = dir.join("probe.webp");
+        scrambled.save(&path).expect("webp 写盘失败（编码器缺失？）");
+
+        let used = decode_image_file(&path, 8).expect("webp 还原失败");
+        assert_eq!(used, 8);
+        let restored = image::open(&path).expect("读回失败").to_rgb8();
+        let (w, h) = original.dimensions();
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(original.get_pixel(x, y), restored.get_pixel(x, y));
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

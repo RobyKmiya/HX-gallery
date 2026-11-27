@@ -302,7 +302,9 @@ pub(crate) fn proxy_arg() -> Option<String> {
     None
 }
 
-fn curl_base() -> std::process::Command {
+/// curl 命令基底（浏览器真实 UA / 重定向上限 / 不弹黑框）。
+/// pub(crate)：右键菜单「打开原图并另存」的宿主侧下载也复用这一套。
+pub(crate) fn curl_base() -> std::process::Command {
     let mut command = std::process::Command::new("curl");
     #[cfg(windows)]
     {
@@ -1744,25 +1746,14 @@ pub(crate) fn download_and_package(
                                 &filename,
                             );
                             if num > 0 {
-                                match crate::jm_decode::decode_image_file(&dest, num) {
-                                    Ok(applied) => {
-                                        if applied != num {
-                                            // 公式段数没对上，靠画面连续性纠正过来了。
-                                            set_status(|s| {
-                                                s.stage = format!(
-                                                    "第 {} 张：段数按画面校正 {}→{}",
-                                                    index + 1,
-                                                    num,
-                                                    applied
-                                                )
-                                            });
-                                        }
-                                    }
-                                    Err(error) => {
-                                        set_status(|s| {
-                                            s.stage = format!("第 {} 张还原失败：{error}", index + 1)
-                                        });
-                                    }
+                                // 官方行为：无条件信任公式段数（2026-11-27 教训：
+                                // 「画面自校验」会在真实漫画上把正确的段数否决掉）。
+                                if let Err(error) =
+                                    crate::jm_decode::decode_image_file(&dest, num)
+                                {
+                                    set_status(|s| {
+                                        s.stage = format!("第 {} 张还原失败：{error}", index + 1)
+                                    });
                                 }
                             }
                         }

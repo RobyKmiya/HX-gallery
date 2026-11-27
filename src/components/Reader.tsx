@@ -305,6 +305,15 @@ export default function Reader({
       void api.setWindowDecorations(false).catch(() => {});
     };
   }, []);
+
+  // 沉浸态把顶部标签栏整个藏掉（管理员 2026-11-27「不需要顶部栏框」）：
+  // 在 body 上切 class 交给 App.css 显隐；清理函数保证卸载 / 切态不留残留。
+  useEffect(() => {
+    document.body.classList.toggle("reader-immersive", immersive);
+    return () => {
+      document.body.classList.remove("reader-immersive");
+    };
+  }, [immersive]);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [thumbsOpen, setThumbsOpen] = useState(false);
   /** 缩略图栏宽度：分界线可拖，缩略图随空余位置自适应（11-23）。 */

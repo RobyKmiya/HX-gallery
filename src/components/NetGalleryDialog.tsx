@@ -95,6 +95,8 @@ export default function NetGalleryDialog({
   const [expanded, setExpanded] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const doneNotified = useRef(false);
+  /** 本轮任务里至少有一项下载完成过（关对话框时据此补刷库）。 */
+  const completedRef = useRef(false);
   /** 刚完成、正在放礼炮的项；1.6 秒后自动移除。 */
   const [celebratingIds, setCelebratingIds] = useState<Set<string>>(() => new Set());
   const prevStatesRef = useRef<Map<string, ReturnType<typeof itemState>>>(new Map());
@@ -128,6 +130,7 @@ export default function NetGalleryDialog({
     }
     prevStatesRef.current = next;
     if (justDone.length === 0) return;
+    completedRef.current = true;
 
     setCelebratingIds((old) => {
       const updated = new Set(old);
@@ -187,6 +190,16 @@ export default function NetGalleryDialog({
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
   }, [items.length, onDone]);
+
+  /** 关闭：本轮有下载完成过、且轮询还没来得及触发刷新 → 先补刷一次库再关。
+   *  管理员 2026-11-27：下好了画廊、直接点返回主页，看到的还是旧库。 */
+  const closeDialog = () => {
+    if (completedRef.current && !doneNotified.current) {
+      doneNotified.current = true;
+      onDone?.();
+    }
+    onClose();
+  };
 
   /** 开始：把每行链接做成一个独立任务，全部提交（后端并行 + 闸门限流）。 */
   const startAll = async () => {
@@ -307,7 +320,7 @@ export default function NetGalleryDialog({
   return (
     <div
       className={embedded ? "panel-embedded" : "modal-backdrop"}
-      onClick={embedded ? undefined : onClose}
+      onClick={embedded ? undefined : closeDialog}
     >
       <div
         className={`modal net-dl-dialog${embedded ? " is-embedded" : ""}`}
@@ -329,7 +342,7 @@ export default function NetGalleryDialog({
               </span>
             )}
             {!embedded && (
-              <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+              <button type="button" className="icon-button" onClick={closeDialog} aria-label="关闭">
                 <CloseIcon />
               </button>
             )}
@@ -540,7 +553,7 @@ export default function NetGalleryDialog({
         </div>
 
         <footer className="modal-actions net-dl-footer">
-          <button type="button" className="btn" onClick={onClose}>
+          <button type="button" className="btn" onClick={closeDialog}>
             关闭
           </button>
           {activeCount > 0 ? (

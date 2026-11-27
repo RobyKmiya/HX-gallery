@@ -39,6 +39,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // 首帧就绪：亮主窗、关掉原生启动屏。不等数据——锁屏/加载屏自己会接管反馈；
+    // 这一步晚一拍，用户就要多看一会儿启动屏（管理员 2026-11-27）。
+    void api.splashFinish();
     let cancelled = false;
 
     void (async () => {

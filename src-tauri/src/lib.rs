@@ -2212,6 +2212,21 @@ fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     window.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
 }
 
+/// 前端首帧就绪：亮出主窗、关掉原生启动屏（splash.html）。
+/// 启动屏解决的是「外接硬盘唤醒阻塞 setup + WebView2 冷启动」期间
+/// 窗口一片空白毫无反馈的问题（管理员 2026-11-27 二次反馈）。
+#[tauri::command]
+fn splash_finish(app: tauri::AppHandle) {
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.close();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+}
+
 /// 老板键呼回键的持久化路径（config/shortcuts.json）。
 fn boss_recall_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     app.path()
@@ -2541,6 +2556,23 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             crate::loose_images::serve(context.app_handle(), request)
         })
         .setup(move |app| {
+            // 兜底定时器必须先于一切可能阻塞的活儿启动：外接硬盘在休眠时，
+            // 下面 AppState::new → db::open_library 会把 setup 整个卡住几十秒。
+            // 前端首帧就绪会调 splash_finish 正常交接；这条定时器防的是
+            // 「前端永远没起来」（WebView 崩了/资源缺失）的极端情况。
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    if let Some(splash) = handle.get_webview_window("splash") {
+                        let _ = splash.close();
+                    }
+                    if let Some(main) = handle.get_webview_window("main") {
+                        let _ = main.show();
+                        let _ = main.set_focus();
+                    }
+                });
+            }
             // 上次发布成功后补记基线：之后关窗不会再无脑抬版本
             release::settle_baseline_after_success(app.handle());
             // 内置「画匣盾」用户脚本：首次启动写入脚本仓库，之后不覆盖（用户可停用）。
@@ -2623,6 +2655,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .invoke_handler(tauri::generate_handler![            get_library_state,
             set_window_decorations,
             hide_main_window,
+            splash_finish,
             get_boss_recall,
             set_boss_recall,
             copy_reader_page,

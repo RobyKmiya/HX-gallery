@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>画匣</title>
+    <style>
+      /* 原生启动屏：进程一起来就显示，不等前端 React 加载、不等外接硬盘唤醒。
+         样式与应用内 BootScreen 同一套视觉（厚三层加载条）。 */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        background: #14151a;
+        overflow: hidden;
+        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+        user-select: none;
+      }
+      .core {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        animation: core-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      @keyframes core-in {
+        from { opacity: 0; transform: translateY(12px); }
+        to { opacity: 1; transform: none; }
+      }
+      .mark {
+        width: 46px;
+        height: 46px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, rgba(232, 163, 92, 0.9), rgba(232, 120, 92, 0.85));
+        box-shadow: 0 10px 30px -8px rgba(232, 163, 92, 0.55),
+          inset 0 1px 0 rgba(255, 255, 255, 0.35);
+        animation: mark-float 3.2s ease-in-out infinite;
+      }
+      @keyframes mark-float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-5px); }
+      }
+      .brand {
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.28em;
+        text-indent: 0.28em;
+        color: #f2f3f7;
+      }
+      .bar {
+        position: relative;
+        width: 300px;
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        overflow: hidden;
+        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45),
+          0 6px 22px -8px rgba(0, 0, 0, 0.6);
+      }
+      .bar-breath {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: linear-gradient(
+          90deg,
+          rgba(232, 163, 92, 0.25),
+          rgba(232, 163, 92, 0.6) 45%,
+          rgba(232, 163, 92, 0.25)
+        );
+        background-size: 200% 100%;
+        animation: breath 2.6s ease-in-out infinite;
+      }
+      @keyframes breath {
+        0%, 100% { background-position: 0% 0; opacity: 0.75; }
+        50% { background-position: 100% 0; opacity: 1; }
+      }
+      .bar-sweep {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 38%;
+        border-radius: inherit;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 214, 156, 0.95) 45%,
+          rgba(255, 236, 200, 0.98) 55%,
+          transparent
+        );
+        animation: sweep 1.6s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+      }
+      @keyframes sweep {
+        from { transform: translateX(-120%); }
+        to { transform: translateX(320%); }
+      }
+      .bar-gloss {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 45%;
+        border-radius: 999px 999px 40% 40%;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent);
+        pointer-events: none;
+      }
+      .stage {
+        font-size: 12.5px;
+        color: rgba(240, 241, 246, 0.85);
+        letter-spacing: 0.05em;
+      }
+      .hint {
+        font-size: 11px;
+        color: rgba(240, 241, 246, 0.45);
+        letter-spacing: 0.03em;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .core, .mark, .bar-breath, .bar-sweep { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="core">
+      <div class="mark"></div>
+      <div class="brand">画匣</div>
+      <div class="bar">
+        <div class="bar-breath"></div>
+        <div class="bar-sweep"></div>
+        <div class="bar-gloss"></div>
+      </div>
+      <div class="stage">正在打开画匣…</div>
+      <div class="hint">画廊库在外接硬盘时，唤醒会多等几秒</div>
+    </div>
+  </body>
+</html>
