@@ -9322,14 +9322,15 @@ body.is-splitting {
   z-index: 55;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
+  gap: 7px;
+  padding: 10px 16px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(18, 20, 26, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(24, 27, 34, 0.92);
   backdrop-filter: blur(8px);
-  color: var(--text-soft);
-  font-size: 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   box-shadow: 0 8px 22px -10px rgba(0, 0, 0, 0.9);
   transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease,
@@ -9344,9 +9345,9 @@ body.is-splitting {
 .reader-float-detail:active {
   transform: scale(0.94);
 }
-/* 沉浸模式更收敛：半透明，鼠标移上去才显出来 */
+/* 沉浸模式稍收敛但仍然明确可见（管理员反馈找不到详情入口） */
 .reader-float-detail.is-immersive {
-  opacity: 0.55;
+  opacity: 0.8;
 }
 .reader-float-detail.is-immersive:hover {
   opacity: 1;
