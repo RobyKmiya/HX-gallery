@@ -566,6 +566,7 @@ export default function WorkspaceTabs({
             onSwitchLibrary={onSwitchLibrary}
             onOpenTab={(kind, title) => openTab(kind as TabKind, title)}
             activeKind={reactKind}
+            activeTabId={activeTab?.id ?? "home"}
             onActivateTab={activateTab}
             startupTarget={startupTargetRef.current}
             navRequest={navRequest}

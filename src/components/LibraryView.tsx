@@ -87,7 +87,36 @@ import {AlertIcon,
 
 interface NavSnapshot {
   collectionId: number | null;
+  /** 压栈时所在的标签 id：后退/前进只在同标签历史里查找。旧条目缺失视为 home。 */
+  tabId?: string;
 }
+
+/** 旧历史条目没有 tabId，统一视为 home。 */
+const snapshotTabId = (snapshot: NavSnapshot): string => snapshot.tabId ?? "home";
+
+/** 从 from 往前找第一条属于 tabId 的快照下标，找不到返回 -1。 */
+const findBackIndex = (
+  history: NavSnapshot[],
+  from: number,
+  tabId: string,
+): number => {
+  for (let i = from - 1; i >= 0; i--) {
+    if (snapshotTabId(history[i]) === tabId) return i;
+  }
+  return -1;
+};
+
+/** 从 from 往后找第一条属于 tabId 的快照下标，找不到返回 -1。 */
+const findForwardIndex = (
+  history: NavSnapshot[],
+  from: number,
+  tabId: string,
+): number => {
+  for (let i = from + 1; i < history.length; i++) {
+    if (snapshotTabId(history[i]) === tabId) return i;
+  }
+  return -1;
+};
 
 interface LibraryViewProps {
   library: LibraryState;
@@ -98,6 +127,8 @@ interface LibraryViewProps {
   onActivateTab?: (kind: string) => void;
   /** 当前激活的标签类型：非 home 时本组件改为渲染对应的嵌入式面板。 */
   activeKind?: string;
+  /** 当前激活标签的 id：导航历史按标签隔离（后退/前进不跨标签）。 */
+  activeTabId?: string;
   /** 启动页指定的目标（指定收藏 / 标签 / 散图）。 */
   startupTarget?: { kind: "collection" | "tag" | "loose"; id: number | null } | null;
   /** 新页发来的导航意图；带 token，值变了就触发一次。 */
@@ -242,6 +273,7 @@ export default function LibraryView({
   onOpenTab,
   onActivateTab,
   activeKind = "home",
+  activeTabId,
   startupTarget = null,
   navRequest = null,
   onNavHandled,
@@ -616,10 +648,13 @@ export default function LibraryView({
   const navHistoryRef = useRef<NavSnapshot[]>([]);
   const navIndexRef = useRef(0);
   const lastSideNavAtRef = useRef(0);
+  /** 最新 activeTabId：用 ref 存，避免 tab 切换瞬间闭包里还是旧 id。 */
+  const activeTabIdRef = useRef(activeTabId ?? "home");
+  activeTabIdRef.current = activeTabId ?? "home";
   const [, refreshNav] = useReducer((value: number) => value + 1, 0);
 
   const navSnapshot = useMemo<NavSnapshot>(
-    () => ({ collectionId: activeCollectionId }),
+    () => ({ collectionId: activeCollectionId, tabId: activeTabIdRef.current }),
     [activeCollectionId],
   );
 
@@ -659,16 +694,27 @@ export default function LibraryView({
       setQuickEditCard(null);
       return;
     }
-    if (navIndexRef.current <= 0) return;
-    navIndexRef.current -= 1;
-    applyNavSnapshot(navHistoryRef.current[navIndexRef.current]);
+    // 只在当前标签自己的历史里回退；没有更早的同标签快照就不动。
+    const target = findBackIndex(
+      navHistoryRef.current,
+      navIndexRef.current,
+      activeTabIdRef.current,
+    );
+    if (target < 0) return;
+    navIndexRef.current = target;
+    applyNavSnapshot(navHistoryRef.current[target]);
     refreshNav();
   }, [readerCard, selected, quickEditCard, applyNavSnapshot]);
 
   const goForward = useCallback(() => {
-    if (navIndexRef.current >= navHistoryRef.current.length - 1) return;
-    navIndexRef.current += 1;
-    applyNavSnapshot(navHistoryRef.current[navIndexRef.current]);
+    const target = findForwardIndex(
+      navHistoryRef.current,
+      navIndexRef.current,
+      activeTabIdRef.current,
+    );
+    if (target < 0) return;
+    navIndexRef.current = target;
+    applyNavSnapshot(navHistoryRef.current[target]);
     refreshNav();
   }, [applyNavSnapshot]);
 
@@ -717,9 +763,18 @@ export default function LibraryView({
     };
   }, [goBack, goForward]);
 
-  const canGoBack = navIndexRef.current > 0;
+  const canGoBack =
+    findBackIndex(
+      navHistoryRef.current,
+      navIndexRef.current,
+      activeTabId ?? "home",
+    ) >= 0;
   const canGoForward =
-    navIndexRef.current < navHistoryRef.current.length - 1;
+    findForwardIndex(
+      navHistoryRef.current,
+      navIndexRef.current,
+      activeTabId ?? "home",
+    ) >= 0;
   const [renamingCollectionId, setRenamingCollectionId] = useState<
     number | null
   >(null);
