@@ -492,8 +492,9 @@ pub fn apply_picker_to_tabs(picker: bool) {
 /// webview 不动，全局行为不受影响。必须等 webview 创建完成后调用
 ///（with_webview 的闭包在主线程异步执行，时序天然满足）。
 #[cfg(windows)]
-fn disable_browser_accelerator_keys(webview: &Webview) {
+fn disable_browser_accelerator_keys(webview: &Webview, label: &str) {
     let view = webview.clone();
+    let label = label.to_string();
     // WebView2 的 CoreWebView2 是异步初始化的：add_child 返回时 controller 可能
     // 还没就绪，`CoreWebView2()` 返回 Err 时静默退出等于白关（1.1.96 实测——
     // 只设一次没生效，Ctrl+T/Tab 仍被吞）。这里起个后台线程，每 200ms 重试，
@@ -524,10 +525,12 @@ fn disable_browser_accelerator_keys(webview: &Webview) {
                 .recv_timeout(std::time::Duration::from_millis(1200))
                 .unwrap_or(false)
             {
+                log_for(&label, "AreBrowserAcceleratorKeysEnabled=false 已设置");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        log_for(&label, "AreBrowserAcceleratorKeysEnabled 设置最终失败（重试耗尽）");
     });
 }
 
@@ -544,38 +547,69 @@ fn disable_browser_accelerator_keys(webview: &Webview) {
 fn attach_accelerator_interceptor(webview: &Webview, label: &str) {
     let label = label.to_string();
     let view = webview.clone();
-    let _ = view.with_webview(move |platform| {
-        use webview2_com::AcceleratorKeyPressedEventHandler;
-        use webview2_com::Microsoft::Web::WebView2::Win32::{
-            ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
-        };
-        let controller: ICoreWebView2Controller = platform.controller();
-        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(
-            move |_sender, args| {
-                let Some(args) = args else {
-                    return Ok(());
+    // 与 disable 一样带重试：with_webview 派发偶尔赶不上 webview 注册完成。
+    std::thread::spawn(move || {
+        for attempt in 0..12 {
+            let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+            let view_for_attempt = view.clone();
+            let label_for_handler = label.clone();
+            let _ = view_for_attempt.with_webview(move |platform| {
+                use webview2_com::AcceleratorKeyPressedEventHandler;
+                use webview2_com::Microsoft::Web::WebView2::Win32::{
+                    ICoreWebView2Controller, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
                 };
-                let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
-                let _ = unsafe { args.KeyEventKind(&mut kind) };
-                if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN {
-                    return Ok(());
+                let register = || -> Result<(), String> {
+                    let controller: ICoreWebView2Controller = platform.controller();
+                    let label_for_handler = label_for_handler.clone();
+                    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(
+                        move |_sender, args| {
+                            let Some(args) = args else {
+                                return Ok(());
+                            };
+                            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+                            let _ = unsafe { args.KeyEventKind(&mut kind) };
+                            if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN {
+                                return Ok(());
+                            }
+                            let mut vk: u32 = 0;
+                            let _ = unsafe { args.VirtualKey(&mut vk) };
+                            if let Some((action, arg)) = map_accelerator(vk) {
+                                // 截住，不让 WebView2 再做任何默认处理。
+                                let _ = unsafe { args.SetHandled(true) };
+                                log_for(
+                                    &label_for_handler,
+                                    &format!("加速键拦截 vk={vk:#x} -> {action}"),
+                                );
+                                if let Ok(mut map) = BROWSERS.lock() {
+                                    if let Some(state) = map.get_mut(&label_for_handler) {
+                                        state
+                                            .accel_queue
+                                            .push_back((action.to_string(), arg.to_string()));
+                                    }
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let mut token: i64 = 0;
+                    unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) }
+                        .map_err(|e| format!("add_AcceleratorKeyPressed: {e}"))
+                };
+                let _ = tx.send(register());
+            });
+            match rx.recv_timeout(Duration::from_millis(1200)) {
+                Ok(Ok(())) => {
+                    log_for(&label, "原生加速键拦截器已挂载");
+                    return;
                 }
-                let mut vk: u32 = 0;
-                let _ = unsafe { args.VirtualKey(&mut vk) };
-                if let Some((action, arg)) = map_accelerator(vk) {
-                    // 截住，不让 WebView2 再做任何默认处理（打印/查找/建标签…）。
-                    let _ = unsafe { args.SetHandled(true) };
-                    if let Ok(mut map) = BROWSERS.lock() {
-                        if let Some(state) = map.get_mut(&label) {
-                            state.accel_queue.push_back((action.to_string(), arg.to_string()));
-                        }
-                    }
+                Ok(Err(error)) => {
+                    log_for(&label, &format!("加速键拦截挂载失败（重试 {attempt}）：{error}"))
                 }
-                Ok(())
-            },
-        ));
-        let mut token: i64 = 0;
-        let _ = unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) };
+                Err(_) => log_for(&label, &format!("加速键拦截挂载超时（重试 {attempt}）")),
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        log_for(&label, "加速键拦截挂载最终失败（12 次重试耗尽，快捷键将不可用）");
     });
 }
 
@@ -597,7 +631,7 @@ fn map_accelerator(vk: u32) -> Option<(&'static str, &'static str)> {
     let alt = modifier_down(0x12); // VK_MENU
     let shift = modifier_down(0x10); // VK_SHIFT
     let action: &'static str = match (ctrl, alt, shift, vk) {
-        // Ctrl 系
+        // Ctrl 系（管理员 2026-11-28：Ctrl+Shift 组合全砍，Ctrl+Tab 单键循环）
         (true, false, false, 0x54) => "new",              // T
         (true, false, false, 0x57) => "close",            // W
         (true, false, false, 0x52) => "reload",           // R
@@ -606,10 +640,7 @@ fn map_accelerator(vk: u32) -> Option<(&'static str, &'static str)> {
         (true, false, false, 0xBD) => "zoomOut",          // OEM_MINUS
         (true, false, false, 0x30) => "zoomReset",        // 0
         (true, false, false, 0xBC) => "openSettings",     // OEM_COMMA（,）
-        // Ctrl+Shift 系
-        (true, false, true, 0x09) => "prevTab",           // Tab
-        (true, false, true, 0x45) => "pickElement",       // E
-        (true, false, true, 0x49) => "devtools",          // I
+        (true, false, false, 0x09) => "nextTab",          // Tab（循环切换）
         // Alt 系
         (false, true, false, 0x25) => "back",             // ←
         (false, true, false, 0x27) => "forward",          // →
@@ -628,7 +659,7 @@ fn map_accelerator(vk: u32) -> Option<(&'static str, &'static str)> {
 /// 所有引擎自建 webview 统一走这里。
 #[cfg(windows)]
 fn harden_webview_keys(webview: &Webview, label: &str) {
-    disable_browser_accelerator_keys(webview);
+    disable_browser_accelerator_keys(webview, label);
     attach_accelerator_interceptor(webview, label);
 }
 
@@ -2509,14 +2540,9 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
     var ctrl = e.ctrlKey || e.metaKey;
     var k = (e.key || "").toLowerCase();
 
-    // 元素屏蔽：Alt+E（单按，最顺手）或 Ctrl+Shift+E。
-    // __hxPickerApi 恒注册（圆点开关只管圆点显隐），这里没有「没启用」一说了。
+    // 元素屏蔽：Alt+E 单键（管理员 2026-11-28：Ctrl+Shift 组合全砍）。
+    // __hxPickerApi 由引擎恒注入脚本（huaxia-picker.js）注册，永远可用。
     if (e.altKey && !ctrl && !e.shiftKey && k === "e") {
-      e.preventDefault();
-      if (!togglePicker()) tip("这个页面没有元素屏蔽（脚本未注入，内页可能被站点拦了）");
-      return;
-    }
-    if (ctrl && e.shiftKey && !e.altKey && k === "e") {
       e.preventDefault();
       if (!togglePicker()) tip("这个页面没有元素屏蔽（脚本未注入，内页可能被站点拦了）");
       return;
@@ -2553,15 +2579,15 @@ const CONTENT_SHORTCUTS_SCRIPT: &str = r###"
       } catch (err) { tip(location.href); }
       return;
     }
-    // F12 / Ctrl+Shift+I：开发者工具（排查屏蔽规则时用）。
-    if (e.key === "F12" || (ctrl && e.shiftKey && !e.altKey && k === "i")) {
+    // F12：开发者工具（排查屏蔽规则时用）。
+    if (e.key === "F12") {
       e.preventDefault(); push("devtools"); return;
     }
     if (e.key === "F5") { e.preventDefault(); push("reload"); return; }
     if (e.ctrlKey && e.key === "Tab") {
-      // Ctrl+Tab / Ctrl+Shift+Tab：下一个 / 上一个标签（页面里没别的含义）。
+      // Ctrl+Tab：循环切换到下一个标签（管理员 2026-11-28：单键循环即可）。
       e.preventDefault();
-      push(e.shiftKey ? "prevTab" : "nextTab");
+      push("nextTab");
     }
   }, true);
   // 鼠标侧键：XButton1(button 3)=后退，XButton2(button 4)=前进。

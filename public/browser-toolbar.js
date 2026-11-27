@@ -276,8 +276,8 @@
       if (k === "-") { e.preventDefault(); req("zoomOut"); return; }
       if (k === "0") { e.preventDefault(); req("zoomReset"); return; }
       if (k === ",") { e.preventDefault(); req("openSettings"); return; }
-      // Ctrl+Shift+Tab：上一个标签（Ctrl+Tab 由内容页/引擎处理）
-      if (e.shiftKey && k === "tab") { e.preventDefault(); req("prevTab"); return; }
+      // Ctrl+Tab：循环切换标签（管理员 2026-11-28：单键循环，Ctrl+Shift 组合全砍）
+      if (k === "tab") { e.preventDefault(); req("nextTab"); return; }
     }
     if (e.altKey && !e.ctrlKey && e.key === "ArrowLeft") { e.preventDefault(); req("back"); return; }
     if (e.altKey && !e.ctrlKey && e.key === "ArrowRight") { e.preventDefault(); req("forward"); return; }

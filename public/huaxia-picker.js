@@ -206,9 +206,12 @@
       // 圆点开关只管圆点显隐：关掉时 API（__hxPickerApi）照常注册，
       // Alt+E 快捷键照样能进元素屏蔽。
       if (!pickerEnabled) return;
+      // document-start 时 documentElement 极少数情况下还没就绪，兜一层。
+      var root = document.documentElement;
+      if (!root) { setTimeout(mount, 60); return; }
       // 挂 documentElement：站点给 body 加 transform/overflow 时，fixed 圆点是
       // 相对 body 定位的，会被裁掉或跟着滚走。
-      document.documentElement.appendChild(dot);
+      root.appendChild(dot);
     }
 
     mount();
