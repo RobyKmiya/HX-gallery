@@ -1283,7 +1283,7 @@ fn run_nhentai_download(app: &AppHandle, url: &str) -> Result<String, String> {
         s.stage = "准备下载…".to_string();
     });
 
-    download_and_package(app, urls, &title, &tag_map, url, None)
+    download_and_package(app, urls, &title, &tag_map, url, None, None)
 }
 
 fn nhentai_gallery_id(url: &str) -> Option<String> {
@@ -1322,7 +1322,7 @@ fn run_nhentai_from_html(app: &AppHandle, page_url: &str) -> Result<String, Stri
         s.tags = flat;
         s.total = urls.len();
     });
-    download_and_package(app, urls, &title, &tag_map, page_url, None)
+    download_and_package(app, urls, &title, &tag_map, page_url, None, None)
 }
 
 fn nhentai_title_from_html(html: &str) -> Option<String> {
@@ -1452,7 +1452,7 @@ fn run_18comic_download(app: &AppHandle, url: &str) -> Result<String, String> {
     } else {
         None
     };
-    download_and_package(app, urls, &title, &tags, url, jm.as_ref())
+    download_and_package(app, urls, &title, &tags, url, jm.as_ref(), None)
 }
 
 /// 从 /photo/{id} 或 /album/{id} 取章节/作品 id。
@@ -1660,6 +1660,9 @@ pub(crate) struct JmDecode {
 
 /// 下载一组图片并打包入库（nhentai API / HTML / 18comic 共用）。
 /// `jm` 非空时，每张图下载完按 18comic 算法还原混淆。
+/// `progress` 为 Some((base, grand)) 时表示「整本里的第 N 章」：
+/// done 上报为 base+本章数、total 上报为 grand（整本总张数），
+/// 进度条才能跨章单调前进——否则每章重置，前端看到的是「不跟进度、瞬间完成」。
 pub(crate) fn download_and_package(
     app: &AppHandle,
     urls: Vec<String>,
@@ -1667,11 +1670,21 @@ pub(crate) fn download_and_package(
     tag_map: &HashMap<String, Vec<String>>,
     referer: &str,
     jm: Option<&JmDecode>,
+    progress: Option<(usize, usize)>,
 ) -> Result<String, String> {
     let count = urls.len();
     if count == 0 {
         return Err("没有可下载的图片".to_string());
     }
+    // 多章整本下载：进度条按整本累计（base = 前面各章张数之和）。
+    // pack_total 清零：itemPercent 靠它区分下载/打包分支，上章残留会让进度条错走 90+ 段。
+    let (done_base, grand_total) = progress.unwrap_or((0, count));
+    set_status(|s| {
+        s.done = done_base;
+        s.total = grand_total;
+        s.pack_done = 0;
+        s.pack_total = 0;
+    });
     let temp = std::env::temp_dir().join(format!(
         "xk-netdl-nh-{}-{}",
         std::process::id(),
@@ -1758,7 +1771,7 @@ pub(crate) fn download_and_package(
                         }
                         let n = done.fetch_add(1, Ordering::SeqCst) + 1;
                         set_status(|s| {
-                            s.done = n;
+                            s.done = done_base + n;
                             s.stage = format!("下载中 {n}/{count}");
                         });
                     }
@@ -1804,8 +1817,8 @@ pub(crate) fn download_and_package(
 
     set_status(|s| {
         s.stage = "打包 CBZ…".to_string();
-        s.pack_done = 0;
-        s.pack_total = ordered.len();
+        s.pack_done = done_base;
+        s.pack_total = grand_total;
     });
     let dir = app
         .path()
@@ -1816,8 +1829,8 @@ pub(crate) fn download_and_package(
     let target = dir.join(format!("{}.cbz", sanitize(title)));
     package_cbz(&ordered, &target, Some(&|done, total| {
         set_status(|s| {
-            s.pack_done = done;
-            s.pack_total = total;
+            s.pack_done = done_base + done;
+            s.pack_total = grand_total;
             s.stage = format!("打包 CBZ… {done}/{total}");
         });
     }))?;

@@ -272,6 +272,9 @@ pub fn run_album_via_api(app: &tauri::AppHandle, aid: u64) -> Result<String, Str
     ));
 
     let mut imported = String::new();
+    // 整本累计进度：done_base = 前面各章张数之和，grand = 整本总张数。
+    // 进度条跨章单调前进（修复「不跟进度、瞬间完成」）。
+    let mut done_before_chapter = 0usize;
     for (index, chapter) in album.chapters.iter().enumerate() {
         if netdl::task_is_canceled_public() {
             return Err("已取消".to_string());
@@ -282,11 +285,13 @@ pub fn run_album_via_api(app: &tauri::AppHandle, aid: u64) -> Result<String, Str
             format!("{} {}", album.title, chapter.name)
         };
         netdl::set_running_stage(&format!(
-            "第 {}/{} 章「{}」：{} 页",
+            "第 {}/{} 章「{}」：{} 页（整本进度 {}/{} 张）",
             index + 1,
             album.chapters.len(),
             chapter.name,
-            chapter.pages.len()
+            chapter.pages.len(),
+            done_before_chapter,
+            total
         ));
         let urls: Vec<String> = chapter
             .pages
@@ -303,10 +308,13 @@ pub fn run_album_via_api(app: &tauri::AppHandle, aid: u64) -> Result<String, Str
             }
         }
         let referer = format!("https://{}/", API_DOMAINS[0]);
-        // 每章一个任务段：scramble 交给画面自校验兜底（aid 用专辑 id）。
+        // 段数公式的 md5 入参是**章节 photo_id**（jmcomic JmImageDetail.of 里
+        // aid=photo_id，get_num_by_detail 用它），不是专辑 id——单章本子两者恰好
+        // 相等所以从来没暴露；多章合集传专辑 id 会让段数全错、图片拼接错位
+        // （管理员 2026-11-27 截图）。这里必须传 chapter.photo_id。
         let jm = netdl::JmDecode {
             scramble_id: 220980,
-            aid,
+            aid: chapter.photo_id,
         };
         let path = netdl::download_and_package(
             app,
@@ -315,10 +323,12 @@ pub fn run_album_via_api(app: &tauri::AppHandle, aid: u64) -> Result<String, Str
             &tag_map,
             &referer,
             Some(&jm),
+            Some((done_before_chapter, total)),
         )?;
         if imported.is_empty() {
             imported = path;
         }
+        done_before_chapter += chapter.pages.len();
     }
     if imported.is_empty() {
         return Err("没有下载到任何章节".to_string());
