@@ -473,6 +473,22 @@ export const api = {
     invoke<{ key: string; ok: boolean; detail: string }[]>("health_check"),
   /** 导出诊断包（zip：自检结果 + d2 日志 + 脱敏设置），返回落盘路径。 */
   exportDiagBundle: () => invoke<string>("export_diag_bundle"),
+  /** 备份与迁移（1.2.5 提案 M2）。 */
+  exportBackup: () =>
+    invoke<{ path: string; archive_count: number; library_path: string }>(
+      "export_backup",
+    ),
+  listBackups: () =>
+    invoke<
+      { name: string; path: string; size: number; kind: string; created_ms: number }[]
+    >("list_backups"),
+  restoreBackup: (path: string) =>
+    invoke<{
+      restored_db: boolean;
+      restored_settings: boolean;
+      archive_count: number;
+      warnings: string[];
+    }>("restore_backup", { zipPath: path }),
   saveWallpaperLock: (config: WallpaperLockConfig) =>
     invoke<WallpaperLockConfig>("save_wallpaper_lock", { config }),
   /** 设置/修改密码；空串 = 清除密码（默认无密码）。 */

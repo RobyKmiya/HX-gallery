@@ -45,6 +45,7 @@ type SettingsTab =
   | "keys"
   | "gestures"
   | "storage"
+  | "backup"
   | "diag"
   | "guide"
   | "more";
@@ -89,6 +90,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: "keys", label: "快捷键" },
   { key: "gestures", label: "鼠标手势" },
   { key: "storage", label: "存储" },
+  { key: "backup", label: "备份迁移" },
   { key: "diag", label: "诊断" },
   { key: "guide", label: "新手教程" },
   { key: "more", label: "更多入口" },
@@ -197,6 +199,79 @@ export default function SettingsDialog({
       setDiagError(`导出失败：${String(error)}`);
     } finally {
       setDiagBusy(false);
+    }
+  };
+
+  // ── 备份与迁移（1.2.5 提案 M2）──
+  interface BackupEntry {
+    name: string;
+    path: string;
+    size: number;
+    kind: string;
+    created_ms: number;
+  }
+  interface RestoreReport {
+    restored_db: boolean;
+    restored_settings: boolean;
+    archive_count: number;
+    warnings: string[];
+  }
+  const [backupList, setBackupList] = useState<BackupEntry[] | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupReport, setBackupReport] = useState<string | null>(null);
+  const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
+  const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+
+  const KIND_LABEL: Record<string, string> = {
+    export: "手动导出",
+    "daily-db": "每日库快照",
+    "daily-settings": "每日设置快照",
+  };
+
+  const refreshBackups = async () => {
+    try {
+      setBackupList(await api.listBackups());
+    } catch (error) {
+      setBackupError(`读取备份列表失败：${String(error)}`);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "backup") void refreshBackups();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  const runBackupExport = async () => {
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupReport(null);
+    try {
+      const report = await api.exportBackup();
+      setBackupReport(
+        `备份完成：${report.path}（${report.archive_count} 本画集的库快照 + 全部设置）`,
+      );
+      await refreshBackups();
+    } catch (error) {
+      setBackupError(`备份失败：${String(error)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const runRestore = async (path: string) => {
+    setRestoreBusy(true);
+    setBackupError(null);
+    setRestoreConfirm(null);
+    try {
+      const report = await api.restoreBackup(path);
+      setRestoreReport(report);
+      await refreshBackups();
+    } catch (error) {
+      setBackupError(`恢复失败：${String(error)}`);
+    } finally {
+      setRestoreBusy(false);
     }
   };
 
@@ -655,6 +730,106 @@ export default function SettingsDialog({
                       切换库目录
                     </button>
                     <p className="settings-hint">导入与扫描从侧栏迁到这里，侧栏只留浏览。</p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {tab === "backup" && (
+              <>
+                <h3>备份与迁移</h3>
+                <p className="settings-hint">
+                  备份 = 库快照（VACUUM INTO 一致性副本）+ 全部设置（含壁纸锁），
+                  <b>不含媒体文件本体</b>。每日自动快照：库 + 设置各保留最近 7 份。
+                  恢复前会自动再做一次安全快照，怎么折腾都有后路。
+                </p>
+                <div className="diag-actions">
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    disabled={backupBusy}
+                    onClick={() => void runBackupExport()}
+                  >
+                    {backupBusy ? "备份中…" : "立即备份"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-quiet btn-compact"
+                    onClick={() => void refreshBackups()}
+                  >
+                    刷新列表
+                  </button>
+                </div>
+                {backupError && (
+                  <p className="settings-hint" style={{ color: "var(--danger)" }}>
+                    {backupError}
+                  </p>
+                )}
+                {backupReport && (
+                  <p className="settings-hint" style={{ color: "var(--ok, #7fc46f)" }}>
+                    {backupReport}
+                  </p>
+                )}
+                {restoreReport && (
+                  <div className="diag-item diag-ok" style={{ borderRadius: 10 }}>
+                    <span className="diag-mark">✓</span>
+                    <span className="diag-detail">
+                      恢复完成：库{restoreReport.restored_db ? "已替换" : "未动"}（
+                      {restoreReport.archive_count} 本画集）· 设置
+                      {restoreReport.restored_settings ? "已替换" : "未动"}
+                      {restoreReport.warnings.length > 0
+                        ? ` · ${restoreReport.warnings.join("；")}`
+                        : ""}
+                    </span>
+                  </div>
+                )}
+                <ul className="diag-list">
+                  {(backupList ?? []).map((entry) => (
+                    <li key={entry.path} className="diag-item diag-ok">
+                      <span className="diag-key">
+                        {KIND_LABEL[entry.kind] ?? entry.kind}
+                      </span>
+                      <span className="diag-detail">
+                        {entry.name} · {formatBytes(entry.size)} ·{" "}
+                        {new Date(entry.created_ms).toLocaleString()}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-quiet btn-compact"
+                        disabled={restoreBusy}
+                        style={{ marginLeft: "auto" }}
+                        onClick={() =>
+                          setRestoreConfirm(
+                            restoreConfirm === entry.path ? null : entry.path,
+                          )
+                        }
+                      >
+                        {restoreConfirm === entry.path ? "收起" : "恢复"}
+                      </button>
+                    </li>
+                  ))}
+                  {backupList && backupList.length === 0 && (
+                    <li className="diag-item diag-ok">
+                      <span className="diag-detail">还没有备份——点「立即备份」或等每日自动快照。</span>
+                    </li>
+                  )}
+                </ul>
+                {restoreConfirm && (
+                  <div className="diag-item diag-bad" style={{ borderRadius: 10, marginTop: 12 }}>
+                    <span className="diag-mark">⚠</span>
+                    <span className="diag-detail">
+                      即将用这份备份<b>覆盖当前库与设置</b>（恢复前会自动做安全快照）。
+                      确认继续吗？
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-compact"
+                      disabled={restoreBusy}
+                      style={{ marginLeft: "auto" }}
+                      onClick={() => void runRestore(restoreConfirm)}
+                    >
+                      {restoreBusy ? "恢复中…" : "确认恢复"}
+                    </button>
                   </div>
                 )}
               </>

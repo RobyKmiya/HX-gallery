@@ -1093,7 +1093,7 @@ fn backup_database(conn: &Connection, gallery_dir: &Path, version: i64) -> Resul
 /// 与迁移备份不同，这里失败只降级为跳过（eprintln），绝不阻断打开库——
 /// 备份是为了防数据丢失，不该成为启动失败的源头。
 fn daily_backup(conn: &Connection, gallery_dir: &Path) -> Result<(), String> {
-    const KEEP: usize = 3;
+    const KEEP: usize = 7;
     const MIN_INTERVAL_MS: i64 = 20 * 60 * 60 * 1000;
 
     let backup_dir = gallery_dir.join("backups");

@@ -2657,8 +2657,8 @@ fn daily_backup_skips_fresh_and_prunes_old() {
     let after_skip = fs::read_dir(&backups).unwrap().count();
     assert_eq!(after_skip, 1, "20 小时内重复打开不应新增日备");
 
-    // 伪造 3 份过期日备（时间戳远小于当前，排序在最前）。
-    for index in 0..3i64 {
+    // 伪造 7 份过期日备（时间戳远小于当前，排序在最前）。
+    for index in 0..7i64 {
         let stamp: i64 = 1_000_000_000_000 + index; // 2001 年，肯定过期
         fs::write(backups.join(format!("library-daily-{stamp}.db")), b"stale").unwrap();
     }
@@ -2672,7 +2672,7 @@ fn daily_backup_skips_fresh_and_prunes_old() {
         .filter(|name| name.starts_with("library-daily-"))
         .collect();
     names.sort();
-    assert_eq!(names.len(), 3, "日备应滚动保留最近 3 份");
+    assert_eq!(names.len(), 7, "日备应滚动保留最近 7 份（M2：管理员 11-28 拍板 3→7）");
     assert!(
         !names.iter().any(|name| name.contains("1000000000000")),
         "最老的过期日备应被清理"

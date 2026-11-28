@@ -1,6 +1,7 @@
 mod anim;
 mod archive;
 mod asset_protocol;
+mod backup;
 mod browser;
 mod blocked_elements;
 mod container;
@@ -152,7 +153,7 @@ fn wait_maintenance(timeout: std::time::Duration) -> Result<MutexGuard<'static, 
     }
 }
 
-fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let config_dir = app
         .path()
         .app_config_dir()
@@ -480,6 +481,22 @@ fn health_check(app: AppHandle) -> Vec<diag::HealthItem> {
     diag::run_health(&app)
 }
 
+/// 备份与迁移（1.2.5 提案 M2）。
+#[tauri::command]
+fn export_backup(app: AppHandle) -> Result<backup::BackupReport, String> {
+    backup::export_backup(&app)
+}
+
+#[tauri::command]
+fn list_backups(app: AppHandle) -> Vec<backup::BackupEntry> {
+    backup::list_backups(&app)
+}
+
+#[tauri::command]
+fn restore_backup(app: AppHandle, zip_path: String) -> Result<backup::RestoreReport, String> {
+    backup::restore_backup(&app, &zip_path)
+}
+
 /// 导出诊断包（zip：自检结果 + d2 日志 + 脱敏设置），返回落盘路径。
 #[tauri::command]
 fn export_diag_bundle(app: AppHandle) -> Result<String, String> {
@@ -692,6 +709,9 @@ async fn open_library(
         let mut settings = read_settings(&app);
         settings.library_path = Some(display_path);
         write_settings(&app, &settings);
+
+        // 每日 settings 快照（1.2.5 M2：settings.json 不再是「丢了就没了」）。
+        backup::daily_settings_snapshot(&app, &target);
 
         build_library_state(&state_handle)
     })
@@ -2873,6 +2893,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
                                             "opened library at {}（后台）",
                                             library.root.to_string_lossy()
                                         );
+                                        backup::daily_settings_snapshot(&handle, &library.root);
                                         Ok(Some(library))
                                     }
                                     Err(error) => {
@@ -2901,6 +2922,9 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
         .invoke_handler(tauri::generate_handler![            get_library_state,
             health_check,
             export_diag_bundle,
+            export_backup,
+            list_backups,
+            restore_backup,
             set_window_decorations,
             hide_main_window,
             splash_finish,
