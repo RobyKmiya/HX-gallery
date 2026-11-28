@@ -1,4 +1,10 @@
-import { memo, useEffect, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { assetUrl } from "../api";
 import { formatBytes, formatDate, formatDateTime } from "../format";
 import type { ArchiveCardData } from "../types";
@@ -18,7 +24,8 @@ interface ArchiveCardProps {
   onOpen: (card: ArchiveCardData) => void;
   selectionMode?: boolean;
   selected?: boolean;
-  onToggleSelect?: (id: number) => void;
+  /** 透传原始鼠标事件：修饰键策略由宿主统一处理（M4）。 */
+  onToggleSelect?: (id: number, event?: ReactMouseEvent) => void;
   onQuickEdit?: (card: ArchiveCardData) => void;
   onRead?: (card: ArchiveCardData) => void;
   eager?: boolean;
@@ -86,9 +93,12 @@ function ArchiveCard({
   };
   useEffect(() => clearClickTimer, []);
 
-  const activate = () => {
-    if (selectionMode && onToggleSelect) {
-      onToggleSelect(card.id);
+  const activate = (event?: ReactMouseEvent) => {
+    // M4：Ctrl/Cmd/Shift 点选一律走宿主的选择状态机，不开详情。
+    const wantsSelection =
+      !!event && (event.ctrlKey || event.metaKey || event.shiftKey);
+    if ((selectionMode || wantsSelection) && onToggleSelect) {
+      onToggleSelect(card.id, event);
       return;
     }
     if (!onOpenReader) {
@@ -116,7 +126,7 @@ function ArchiveCard({
           : `打开 ${card.title}`
       }
       aria-pressed={selectionMode ? selected : undefined}
-      onClick={activate}
+      onClick={(event) => activate(event)}
       onDoubleClick={(event) => {
         if (!onOpenReader) return;
         // 双击是「直接开看」：把还没落地的单击详情取消掉。

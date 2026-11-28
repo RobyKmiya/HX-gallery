@@ -7,6 +7,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
@@ -16,6 +17,7 @@ import { api, assetUrl } from "../api";
 import { LibraryActionsContext } from "../libraryActions";
 import { usePersistentFlag, usePersistentSize } from "../layout";
 import { formatBytes } from "../format";
+import { rangeSelection } from "../selection";
 import type {
   ArchiveCardData,
   ArchivePage,
@@ -633,6 +635,8 @@ export default function LibraryView({
   );
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  /** M4：Shift 范围选的锚点（最近一次点中的卡片 id）。用 ref 存，不触发重渲染。 */
+  const selectionAnchorRef = useRef<number | null>(null);
   const [batchCollectionId, setBatchCollectionId] = useState<number | "">("");
   const [batchQueueId, setBatchQueueId] = useState<number | "">("");
   const [queues, setQueues] = useState<Queue[]>([]);
@@ -1658,21 +1662,143 @@ export default function LibraryView({
     [patchCachedCards],
   );
 
-  const toggleSelect = useCallback((id: number) => {
-    setSelectedIds((previous) =>
-      previous.includes(id)
-        ? previous.filter((item) => item !== id)
-        : [...previous, id],
-    );
-  }, []);
+  /** M4：画廊展示顺序，Shift 范围选按它算（与 groupedItems 扁平序一致）。 */
+  const orderIds = useMemo(() => items.map((card) => card.id), [items]);
+
+  /**
+   * M4：Windows 风格选择语义，全部集中在宿主：
+   * - Shift+点击      = 从锚点到目标的连续区间（替换选区）
+   * - Ctrl+Shift+点击 = 同上，但在旧选区上追加
+   * - Ctrl/Cmd+点击   = 切换单条
+   * - 普通点击（已在多选模式）= 只选这一条
+   * 卡片层不解析修饰键，只把原始鼠标事件透传上来。
+   */
+  const handleCardSelect = useCallback(
+    (id: number, event?: ReactMouseEvent) => {
+      const additive = !!event && (event.ctrlKey || event.metaKey);
+      const ranged = !!event && event.shiftKey;
+
+      if (ranged) {
+        const ids = rangeSelection(orderIds, selectionAnchorRef.current, id);
+        setSelectedIds((previous) => {
+          const next = additive ? [...previous] : [];
+          for (const nextId of ids) {
+            if (!next.includes(nextId)) next.push(nextId);
+          }
+          return next;
+        });
+      } else if (additive) {
+        setSelectedIds((previous) =>
+          previous.includes(id)
+            ? previous.filter((item) => item !== id)
+            : [...previous, id],
+        );
+      } else {
+        setSelectedIds([id]);
+      }
+      selectionAnchorRef.current = id;
+      setSelectionMode(true);
+    },
+    [orderIds],
+  );
+
+  /**
+   * M4：Ctrl+A 全选当前已加载的画集（分页模式＝当前页，滚动模式＝已加载部分）。
+   * 不去后台分页拉全库：批量移入回收站是危险操作，范围必须所见即所得。
+   */
+  const selectAllVisible = useCallback(() => {
+    if (items.length === 0) return;
+    setSelectedIds(items.map((card) => card.id));
+    selectionAnchorRef.current = null;
+    setSelectionMode(true);
+    notify(`已全选当前 ${items.length} 个画集`, "info");
+  }, [items, notify]);
+
+  /** 全局键盘监听只挂一次，用 ref 转发最新实现，避免依赖变化反复解绑。 */
+  const selectAllRef = useRef<() => void>(() => {});
+  selectAllRef.current = () => selectAllVisible();
 
   const exitSelection = useCallback(() => {
     setSelectionMode(false);
     setSelectedIds([]);
+    selectionAnchorRef.current = null;
     setBatchCollectionId("");
     setBatchQueueId("");
     setBatchDeleteConfirm(false);
   }, []);
+
+  // M4：Ctrl+A 全选 / Esc 退出选择。
+  // 浏览器标签激活时画廊是隐藏的，不抢它的 Ctrl+A；有浮层盖着时同样不响应。
+  // selectionMode 本身不算浮层——Ctrl+A 就是要从普通模式进入选择模式。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable ||
+          target.closest("[role='dialog']"))
+      ) {
+        return;
+      }
+      if (activeKind === "browser") return;
+      if (
+        readerCard ||
+        quickEditCard ||
+        selected ||
+        openSeries ||
+        cardMenu ||
+        filterOpen ||
+        tagFilterOpen ||
+        importing ||
+        importReport ||
+        dragActive
+      ) {
+        return;
+      }
+
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "a"
+      ) {
+        event.preventDefault();
+        selectAllRef.current();
+        return;
+      }
+
+      if (
+        event.key === "Escape" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        selectionMode
+      ) {
+        event.preventDefault();
+        exitSelection();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    activeKind,
+    readerCard,
+    quickEditCard,
+    selected,
+    openSeries,
+    cardMenu,
+    filterOpen,
+    tagFilterOpen,
+    importing,
+    importReport,
+    dragActive,
+    selectionMode,
+    exitSelection,
+  ]);
 
   /** 把当前多选的画集合成一个合集：主网格从此只留一张轮换封面的卡。 */
   const createSeriesFromSelection = useCallback(
@@ -1969,6 +2095,7 @@ export default function LibraryView({
   );
 
   useEffect(() => {
+    selectionAnchorRef.current = null;
     setSelectedIds([]);
   }, [
     activeCollectionId,
@@ -2751,6 +2878,20 @@ export default function LibraryView({
 
       <main
         className="main-panel"
+        onClick={(event) => {
+          // M4：点画廊空白区 = 清空选择（对齐资源管理器）。
+          // 卡片、按钮、工具条各有自己的点击处理，别在这里把选区清掉。
+          if (!selectionMode) return;
+          const target = event.target as HTMLElement;
+          if (
+            target.closest(
+              ".archive-card, button, input, select, textarea, a, [role='dialog'], .modal-backdrop, .selection-bar",
+            )
+          ) {
+            return;
+          }
+          exitSelection();
+        }}
         onContextMenu={(event) => {
           // 卡片自己的右键菜单已经 preventDefault，这里只管空白处。
           if (event.defaultPrevented) return;
@@ -2883,7 +3024,7 @@ export default function LibraryView({
               onClick={() =>
                 selectionMode ? exitSelection() : setSelectionMode(true)
               }
-              title="多选画集后批量加入收藏夹"
+              title="多选画集后批量加入收藏夹（Ctrl+A 全选 · Ctrl+点击多选 · Shift+点击连选）"
             >
               <CheckIcon width={14} height={14} />
               {selectionMode ? `已选 ${selectedIds.length}` : "多选"}
@@ -3613,7 +3754,7 @@ export default function LibraryView({
                         }}
                         selectionMode={selectionMode}
                         selected={selectedIds.includes(card.id)}
-                        onToggleSelect={toggleSelect}
+                        onToggleSelect={handleCardSelect}
                         onQuickEdit={setQuickEditCard}
                         onRead={setReaderCard}
                         eager={viewMode === "pages"}
@@ -3691,6 +3832,18 @@ export default function LibraryView({
                 <div className="selection-bar">
                   <span className="selection-count">
                     已选 {selectedIds.length} 个画集
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-compact"
+                    onClick={selectAllVisible}
+                    disabled={items.length === 0 || batchBusy}
+                    title="Ctrl+A：全选当前页／当前已加载的画集"
+                  >
+                    全选当前页
+                  </button>
+                  <span className="selection-hint">
+                    Ctrl+A 全选 · Ctrl+点击多选 · Shift+点击连选
                   </span>
                   <select
                     value={batchCollectionId}
@@ -4221,6 +4374,7 @@ export default function LibraryView({
                 onClick={() => {
                   setSelectionMode(true);
                   setSelectedIds([cardMenu.card.id]);
+                  selectionAnchorRef.current = cardMenu.card.id;
                   closeCardMenu();
                 }}
               >
