@@ -817,39 +817,14 @@ fn custom_adblock_domains() -> std::sync::Arc<Vec<String>> {
     list
 }
 
-/// URL 级拦截：域名命中，或带联盟/追踪参数（推广跳转）都算广告。
+/// URL 级拦截：**只按域名黑名单**（管理员 2026-11-28 定案）。
 ///
-/// 只看域名会把 trip.com 这类正常站点一起封掉；看参数更精准——管理员给的
-/// 广告链接是 `?allianceid=…&SID=…&utm_campaign=…&trip_sub…`，正常访问没有这些。
-/// 刻意**不**收 `sid=`：太多站点拿它当会话 id，会大面积误伤。
+/// 以前还有一层「联盟/追踪参数」规则（utm_/gclid/allianceid…），实测误伤面
+/// 太宽——正常站点的着陆页/统计跳转都带这类参数，整个页面被 404、
+/// 新签被静默吞掉（管理员：防广告新标签的功能限制过于宽泛，严肃处理）。
+/// 现在广告拦截只认两样：内置名单 + `adblock.txt` 自定义域名。
 fn adblock_url_blocked(uri: &tauri::http::Uri) -> bool {
-    if let Some(host) = uri.host() {
-        if adblock_host_blocked(host) {
-            return true;
-        }
-    }
-    const TRACKING_PARAMS: &[&str] = &[
-        "allianceid=",
-        "utm_campaign=",
-        "utm_source=",
-        "utm_medium=",
-        "trip_sub",
-        "gclid=",
-        "fbclid=",
-        "aff_id=",
-        "affiliate_id=",
-        "click_id=",
-        // 2026-11-26 补：ourdreamland.ai 这类广告跳转常用 clickid/tracker/ref 组合。
-        // ref= 太宽（正常站也用），只认 ref=tr / ref=ad 这种推广值。
-        "clickid=",
-        "tracker=",
-        "affiliate=",
-        "ref=tr",
-        "ref=ad",
-        "ref=aff",
-    ];
-    let query = uri.query().unwrap_or("").to_lowercase();
-    !query.is_empty() && TRACKING_PARAMS.iter().any(|param| query.contains(param))
+    uri.host().map(adblock_host_blocked).unwrap_or(false)
 }
 
 /// 域名是否命中（含子域），**零分配**。
@@ -1863,7 +1838,6 @@ fn attach_tab_hooks(
 ) -> tauri::WebviewBuilder<tauri::Wry> {
     let builder = attach_adblock(builder);
     let label_for_new = label.to_string();
-    let tab_id_for_new = tab_id.to_string();
     let label_for_dl = label.to_string();
     let label_for_nav = label.to_string();
     let tab_id_for_nav = tab_id.to_string();
@@ -1882,12 +1856,13 @@ fn attach_tab_hooks(
                 _ => tauri::webview::PermissionResponse::Default,
             }
         })
-        // 弹窗接管 v3（管理员 2026-11-27：nhentai 弹窗 live.onlidex.com 开成
-        // 新标签整页卡死，问「新窗新签的开页广告有什么好方法」）：
-        // - 名单内广告弹窗：直接 Deny（沿用）；
-        // - **跨源**弹窗（域名和当前页不同 = 广告/联盟的典型形态）：转后台
-        //   标签，不再抢屏幕焦点，工具栏提示一句，用户看见不顺眼随手关；
-        // - 同源弹窗（站内正常开新页）：维持原样开在前面。
+        // 弹窗接管 v4（管理员 2026-11-28 拍板：**向 Edge 看齐**）：
+        // - 一切新标签请求（target=_blank / window.open）→ **前台开新签**，不阻拦、
+        //   不再区分跨源/同源、不再转后台——源标签原地不动，广告标签用户随手关；
+        // - 只有**域名黑名单**（is_ad_navigation）才 Deny——广告拦截收口到
+        //   网络层名单，不再对链接做任何脚本化的宽泛限制；
+        // - 以前 v3 的「跨源转后台」把 bilibili 这类正常新签藏进后台，管理员
+        //   以为「点了没反应」，整条特殊路径删除。
         .on_new_window(move |new_url, _features| {
             let target = new_url.to_string();
             if is_ad_navigation(&target) {
@@ -1895,21 +1870,8 @@ fn attach_tab_hooks(
                 toast_toolbar(&label_for_new, "已拦截广告弹窗", "bad");
                 return NewWindowResponse::Deny;
             }
-            let cross_origin = match (tab_url_of(&label_for_new, &tab_id_for_new), host_of(&target))
-            {
-                (Some(current), Some(popup_host)) => {
-                    host_of(&current).map(|host| host != popup_host).unwrap_or(false)
-                }
-                _ => false,
-            };
-            if cross_origin {
-                crumb(format!("跨源弹窗转后台 {target}"));
-                queue_pending_tab(&label_for_new, &target, false);
-                let host = host_of(&target).unwrap_or_else(|| "外部站点".to_string());
-                toast_toolbar(&label_for_new, &format!("弹窗已转后台标签：{host}"), "ok");
-            } else {
-                queue_pending_tab(&label_for_new, &target, true);
-            }
+            crumb(format!("弹窗开新签 {target}"));
+            queue_pending_tab(&label_for_new, &target, true);
             NewWindowResponse::Deny
         })
         // 顶层导航拦截：资源级拦截管不到主文档，广告页会整页接管当前标签。
@@ -4136,25 +4098,6 @@ fn log_for(label: &str, message: &str) {
     {
         log(message);
     }
-}
-
-/// 读某个标签当前 URL（弹窗判「跨源」用；不拿锁外句柄，只查状态表）。
-fn tab_url_of(label: &str, tab_id: &str) -> Option<String> {
-    with_state(label, |state| {
-        state
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.url.clone())
-    })
-    .flatten()
-}
-
-/// 取 URL 的主机名（小写、去 www.）；解析失败返回 None。
-fn host_of(url: &str) -> Option<String> {
-    tauri::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(|host| host.to_lowercase()))
 }
 
 fn note_tab_url(label: &str, tab_id: &str, url: &str) {

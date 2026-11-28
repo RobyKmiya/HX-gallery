@@ -2432,6 +2432,9 @@ export default function LibraryView({
             aria-expanded={!collectionsCollapsed}
             title={collectionsCollapsed ? "展开收藏夹列表" : "折叠收藏夹列表"}
           >
+            {/* 管理员 2026-11-28：折叠按钮要有自己的图标——紧凑模式只留图标时
+                它才可见可点（以前 compact 下 caret/文字/计数全隐藏 = 空白框）。 */}
+            <FolderIcon />
             <span className={`nav-caret${collectionsCollapsed ? "" : " is-open"}`}>▸</span>
             <span className="nav-label">收藏夹</span>
             <span className="nav-count">
@@ -2517,6 +2520,7 @@ export default function LibraryView({
                   <CollectionGlyph
                     icon={collection.icon ?? "heart"}
                     color={collection.color}
+                    size={18}
                   />
                   <span className="nav-label">{displayName}</span>
                   <span className="nav-count">
