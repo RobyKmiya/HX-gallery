@@ -468,6 +468,11 @@ export const api = {
   // ---------- 壁纸锁（管理员 2026-11-25；防君子不防小人） ----------
   /** 读壁纸锁配置（哈希/盐不下发，只给开关、壁纸列表、轮换间隔）。 */
   getWallpaperLock: () => invoke<WallpaperLockConfig>("get_wallpaper_lock"),
+  /** 诊断与健康自检（1.2.4 提案 #1）。 */
+  healthCheck: () =>
+    invoke<{ key: string; ok: boolean; detail: string }[]>("health_check"),
+  /** 导出诊断包（zip：自检结果 + d2 日志 + 脱敏设置），返回落盘路径。 */
+  exportDiagBundle: () => invoke<string>("export_diag_bundle"),
   saveWallpaperLock: (config: WallpaperLockConfig) =>
     invoke<WallpaperLockConfig>("save_wallpaper_lock", { config }),
   /** 设置/修改密码；空串 = 清除密码（默认无密码）。 */

@@ -5,6 +5,7 @@ mod browser;
 mod blocked_elements;
 mod container;
 mod d2;
+mod diag;
 mod gallery_dl;
 mod netdl;
 pub mod db;
@@ -471,6 +472,18 @@ fn serve_wallpaper_cache(app: &AppHandle,
         .header("Content-Type", mime)
         .body(bytes)
         .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
+/// 诊断与健康自检（1.2.4 提案 #1）：设置 → 诊断 面板调用。
+#[tauri::command]
+fn health_check(app: AppHandle) -> Vec<diag::HealthItem> {
+    diag::run_health(&app)
+}
+
+/// 导出诊断包（zip：自检结果 + d2 日志 + 脱敏设置），返回落盘路径。
+#[tauri::command]
+fn export_diag_bundle(app: AppHandle) -> Result<String, String> {
+    diag::export_bundle(&app)
 }
 
 #[tauri::command]
@@ -2886,6 +2899,8 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![            get_library_state,
+            health_check,
+            export_diag_bundle,
             set_window_decorations,
             hide_main_window,
             splash_finish,

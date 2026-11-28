@@ -9760,3 +9760,40 @@ body.is-pointer-dragging {
 body.is-pointer-dragging * {
   cursor: grabbing !important;
 }
+
+/* ---------- 诊断面板（1.2.4 提案 #1：一键自检 + 诊断包） ---------- */
+.diag-actions {
+  display: flex;
+  gap: 10px;
+  margin: 12px 0 6px;
+}
+.diag-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.diag-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 13px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+.diag-item:last-child { border-bottom: 0; }
+.diag-mark {
+  width: 16px;
+  flex-shrink: 0;
+  font-weight: 700;
+  text-align: center;
+}
+.diag-ok .diag-mark { color: #7fc46f; }
+.diag-bad .diag-mark { color: #e8737f; }
+.diag-bad { background: rgba(232, 115, 127, 0.06); }
+.diag-key { flex-shrink: 0; min-width: 150px; font-weight: 600; color: var(--text-soft); }
+.diag-detail { color: var(--muted); }

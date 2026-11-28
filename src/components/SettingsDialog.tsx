@@ -45,6 +45,7 @@ type SettingsTab =
   | "keys"
   | "gestures"
   | "storage"
+  | "diag"
   | "guide"
   | "more";
 
@@ -88,6 +89,7 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: "keys", label: "快捷键" },
   { key: "gestures", label: "鼠标手势" },
   { key: "storage", label: "存储" },
+  { key: "diag", label: "诊断" },
   { key: "guide", label: "新手教程" },
   { key: "more", label: "更多入口" },
 ];
@@ -164,6 +166,39 @@ export default function SettingsDialog({
   /** 正在录制的动作；null = 不在录制。 */
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
   const [keyHint, setKeyHint] = useState("");
+
+  // 诊断面板（1.2.4 提案 #1）：一键自检 + 诊断包导出。
+  const [healthItems, setHealthItems] = useState<
+    { key: string; ok: boolean; detail: string }[] | null
+  >(null);
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [diagBundlePath, setDiagBundlePath] = useState<string | null>(null);
+  const [diagBusy, setDiagBusy] = useState(false);
+  const [diagError, setDiagError] = useState<string | null>(null);
+
+  const runHealthCheck = async () => {
+    setHealthBusy(true);
+    setDiagError(null);
+    try {
+      setHealthItems(await api.healthCheck());
+    } catch (error) {
+      setDiagError(`自检失败：${String(error)}`);
+    } finally {
+      setHealthBusy(false);
+    }
+  };
+
+  const exportDiag = async () => {
+    setDiagBusy(true);
+    setDiagError(null);
+    try {
+      setDiagBundlePath(await api.exportDiagBundle());
+    } catch (error) {
+      setDiagError(`导出失败：${String(error)}`);
+    } finally {
+      setDiagBusy(false);
+    }
+  };
 
   // 录制：按下的第一枚非修饰键直接作为绑定；Esc 取消。
   useEffect(() => {
@@ -621,6 +656,56 @@ export default function SettingsDialog({
                     </button>
                     <p className="settings-hint">导入与扫描从侧栏迁到这里，侧栏只留浏览。</p>
                   </div>
+                )}
+              </>
+            )}
+
+            {tab === "diag" && (
+              <>
+                <h3>健康自检</h3>
+                <p className="settings-hint">
+                  一键检查：库连接 / 完整性 / 库盘可写 / 引擎加速键挂载 / 广告拦截 /
+                  用户脚本 / 壁纸锁 / 日志体积。出问题时先跑这里，再导出诊断包。
+                </p>
+                <div className="diag-actions">
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    disabled={healthBusy}
+                    onClick={() => void runHealthCheck()}
+                  >
+                    {healthBusy ? "自检中…" : "跑自检"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-quiet btn-compact"
+                    disabled={diagBusy}
+                    onClick={() => void exportDiag()}
+                  >
+                    {diagBusy ? "打包中…" : "导出诊断包"}
+                  </button>
+                </div>
+                {diagError && (
+                  <p className="settings-hint" style={{ color: "var(--danger)" }}>
+                    {diagError}
+                  </p>
+                )}
+                {diagBundlePath && (
+                  <p className="settings-hint">诊断包已生成：{diagBundlePath}</p>
+                )}
+                {healthItems && (
+                  <ul className="diag-list">
+                    {healthItems.map((item) => (
+                      <li
+                        key={item.key}
+                        className={`diag-item${item.ok ? " diag-ok" : " diag-bad"}`}
+                      >
+                        <span className="diag-mark">{item.ok ? "✓" : "✗"}</span>
+                        <span className="diag-key">{item.key}</span>
+                        <span className="diag-detail">{item.detail}</span>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </>
             )}

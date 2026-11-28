@@ -600,6 +600,9 @@ fn attach_accelerator_interceptor(webview: &Webview, label: &str) {
             match rx.recv_timeout(Duration::from_millis(1200)) {
                 Ok(Ok(())) => {
                     log_for(&label, "原生加速键拦截器已挂载");
+                    if let Ok(mut map) = ACCEL_MOUNTED.lock() {
+                        map.insert(label.clone(), true);
+                    }
                     return;
                 }
                 Ok(Err(error)) => {
@@ -610,6 +613,9 @@ fn attach_accelerator_interceptor(webview: &Webview, label: &str) {
             std::thread::sleep(Duration::from_millis(200));
         }
         log_for(&label, "加速键拦截挂载最终失败（12 次重试耗尽，快捷键将不可用）");
+        if let Ok(mut map) = ACCEL_MOUNTED.lock() {
+            map.insert(label, false);
+        }
     });
 }
 
@@ -802,6 +808,33 @@ pub fn reload_custom_adblock() {
     if let Ok(mut guard) = CUSTOM_ADBLOCK.lock() {
         *guard = None;
     }
+}
+
+/// 各浏览器实例的加速键拦截器挂载结果（诊断面板读这里，1.2.4）。
+static ACCEL_MOUNTED: std::sync::LazyLock<Mutex<HashMap<String, bool>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 诊断面饭用：实例 → 拦截器是否挂载成功。
+pub fn accel_mount_status() -> Vec<(String, bool)> {
+    match ACCEL_MOUNTED.lock() {
+        Ok(map) => {
+            let mut list: Vec<(String, bool)> =
+                map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            list.sort();
+            list
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 广告拦截内置名单规模（诊断面板用）。
+pub fn builtin_adblock_domains() -> usize {
+    ADBLOCK_DOMAINS.len()
+}
+
+/// 自定义拦截名单规模（诊断面板用）。
+pub fn custom_adblock_domain_count() -> usize {
+    custom_adblock_domains().len()
 }
 
 fn custom_adblock_domains() -> std::sync::Arc<Vec<String>> {
