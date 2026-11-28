@@ -372,12 +372,14 @@ export const api = {
 
   // ---------- 内置浏览器（工作台标签用；方案 docs/浏览器内置阅读器方案.md） ----------
 
-  /** 挂载内置浏览器引擎（宿主 = main 窗），返回 label。 */
+  /** 挂载内置浏览器引擎，返回 label。宿主默认 main 窗；拆出窗传自己的 label。 */
   d2EmbedOpen: (args: {
     url: string;
     adblock?: boolean;
     home?: string;
     picker?: boolean;
+    /** A7：引擎宿主窗口 label（拆出窗里传 getCurrentWindow().label）。 */
+    hostLabel?: string;
     /** 初始占位矩形（逻辑像素）：从第一帧就把工具栏摆到位，避免开新标签时顶栏错位。 */
     rect?: { x: number; y: number; w: number; h: number };
   }) => invoke<string>("d2_embed_open", args),

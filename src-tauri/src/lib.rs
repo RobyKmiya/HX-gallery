@@ -2446,6 +2446,9 @@ fn detach_tab(app: tauri::AppHandle, token: String) -> Result<String, String> {
     .title("画匣 · 独立标签")
     .inner_size(1100.0, 760.0)
     .min_inner_size(480.0, 360.0)
+    // A8：与主窗一致用无边框 + 自绘窗控，避免「系统框 + 自绘框」双框叠加。
+    .decorations(false)
+    .background_color(tauri::window::Color(6, 7, 10, 255))
     .build();
     match built {
         Ok(window) => {

@@ -506,8 +506,19 @@ export default function SettingsDialog({
                     <option value="1">先盖住，点一下才显示</option>
                   </select>
                 </label>
+                <label className="settings-row">
+                  <span>退出时彻底关闭所有标签</span>
+                  <input
+                    type="checkbox"
+                    checked={tabSettings.clearTabsOnExit === true}
+                    onChange={(event) =>
+                      updateTabSettings({ clearTabsOnExit: event.target.checked })
+                    }
+                  />
+                </label>
                 <p className="settings-hint">
-                  指定收藏在下次启动时生效；浏览器标签不随重启恢复（重新打开会新开）。
+                  默认关闭：下次启动会原样恢复本次打开的标签（含网页和画集）。
+                  勾选后，退出时清空全部标签，下次只显示主页。启动模式与指定收藏在下次启动时生效。
                 </p>
               </>
             )}

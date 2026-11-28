@@ -14,7 +14,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { usePointerDrag } from "../usePointerDrag";
-import { listen } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import type { LibraryState, NavIntent } from "../types";
@@ -125,7 +125,7 @@ function readDetachedTab(): WorkTab | null {
   return result;
 }
 
-/** 启动时决定初始标签集合：拆窗标签 / 主页 / 上次的非浏览器标签 / 指定收藏。 */
+/** 启动时决定初始标签集合：拆窗标签 / 主页 / 上次的完整标签快照 / 指定收藏。 */
 function initialTabs(): WorkTab[] {
   const detached = readDetachedTab();
   if (detached) return [detached];
@@ -133,6 +133,39 @@ function initialTabs(): WorkTab[] {
   if (settings.startupMode === "last") {
     const persisted = readPersistedTabs();
     if (persisted) {
+      // A4：优先完整快照（含 browser 的 url / gallery 的 archiveId）。
+      if (persisted.tabs?.length) {
+        const restored = persisted.tabs
+          .filter((tab) => isTabKind(tab.kind))
+          .filter(
+            (tab) =>
+              // gallery 必须有合法 archiveId；browser 允许空 url（新页）。
+              (tab.kind !== "gallery" ||
+                (typeof tab.archiveId === "number" && tab.archiveId > 0)),
+          )
+          .slice(0, 12)
+          .map((tab) => ({
+            id: tab.id,
+            kind: tab.kind as TabKind,
+            title: tab.title || TAB_TITLE[tab.kind as TabKind],
+            url: tab.url ?? null,
+            archiveId: tab.archiveId,
+          }));
+        if (restored.length) {
+          // 保证主页总在（home 标签不可关）。
+          if (!restored.some((tab) => tab.kind === "home")) {
+            restored.unshift({
+              id: "home",
+              kind: "home",
+              title: TAB_TITLE.home,
+              url: null,
+              archiveId: undefined,
+            });
+          }
+          return restored;
+        }
+      }
+      // 老数据兜底：只有 kinds 字符串数组。
       const kinds = persisted.kinds
         .filter(
           (kind): kind is TabKind =>
@@ -160,8 +193,11 @@ function initialActiveId(tabs: WorkTab[]): string {
   if (settings.startupMode === "last") {
     const persisted = readPersistedTabs();
     if (persisted) {
-      const match = tabs.find((tab) => tab.kind === persisted.active);
-      if (match) return match.id;
+      // 新快照存的是 tab.id；老数据存的是 kind，两种都兼容。
+      const byId = tabs.find((tab) => tab.id === persisted.active);
+      if (byId) return byId.id;
+      const byKind = tabs.find((tab) => tab.kind === persisted.active);
+      if (byKind) return byKind.id;
     }
   }
   return tabs[0]?.id ?? "home";
@@ -206,10 +242,13 @@ function BrowserHost({
         // 顶栏会错位并列 ~800ms（管理员 2026-11-26 截图）。
         const rectEl = holderRef.current;
         const rect = rectEl?.getBoundingClientRect();
+        // A7：宿主写死 main 会让拆出窗的引擎挂到主窗上；显式传当前窗 label。
+        const hostLabel = getCurrentWindow().label;
         const opened = await api.d2EmbedOpen({
           url,
           adblock: true,
           home,
+          hostLabel,
           rect: rect
             ? { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
             : undefined,
@@ -345,6 +384,8 @@ export default function WorkspaceTabs({
   });
   /** 标签右键菜单：定位 + 目标 tab。 */
   const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  /** A4/A7：当前是否为拆出的独立窗（带 ?detach=token）。 */
+  const isDetachedWindow = !!new URLSearchParams(window.location.search).get("detach");
   /** 启动目标只在首帧算一次。 */
   const startupTargetRef = useRef<StartupTarget | null>(readStartupTarget(readTabSettings()));
   /** 启动遮罩：仅首帧按设置决定，之后点一下揭开。 */
@@ -366,22 +407,64 @@ export default function WorkspaceTabs({
     return () => window.removeEventListener(TAB_SETTINGS_EVENT, onSettings);
   }, []);
 
+  // A7：独立窗「合并回主窗」→ 主窗读 token 还原标签（不跨窗拖拽的替代方案）。
+  useEffect(() => {
+    if (isDetachedWindow) return;
+    let dead = false;
+    let unlisten: (() => void) | null = null;
+    void listen<string>("huaxia://reattach-tab", (event) => {
+      const token = event.payload;
+      try {
+        const raw = window.localStorage.getItem(`${DETACH_KEY_PREFIX}${token}`);
+        window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
+        if (!raw) return;
+        const tab = JSON.parse(raw) as Partial<WorkTab>;
+        if (!tab.kind || !isTabKind(tab.kind)) return;
+        if (tab.kind === "browser" && tab.url) {
+          openUrlTab(tab.url);
+        } else {
+          openTab(tab.kind, tab.title, true, tab.archiveId);
+        }
+      } catch {
+        // 合并失败就忽略，用户还能从新窗重新操作。
+      }
+    }).then((un) => {
+      if (dead) un();
+      else unlisten = un;
+    });
+    return () => {
+      dead = true;
+      if (unlisten) unlisten();
+    };
+    // openTab/openUrlTab 用 ref 里的 tabs/settings，这里只需订阅一次。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDetachedWindow]);
+
   // 标签集合落盘（跳过首帧，避免用默认主页覆盖「上次的标签」）。
+  // A4：写完整快照；「退出时彻底关闭」开关打开时写空态；拆出的新窗不覆盖主窗快照。
   useEffect(() => {
     if (!hydratedRef.current) {
       hydratedRef.current = true;
       return;
     }
-    const kind = tabs.find((tab) => tab.id === activeId)?.kind ?? "home";
+    if (isDetachedWindow) return; // 新窗标签独立，绝不写回共享的持久化快照。
+    const clear = settings.clearTabsOnExit;
     savePersistedTabs({
-      kinds: tabs
-        .filter((tab) => tab.kind !== "browser" && tab.kind !== "gallery")
-        .map((tab) => tab.kind),
-      active: kind,
+      kinds: clear ? [] : tabs.map((tab) => tab.kind),
+      active: clear ? "home" : activeId,
       groups,
       groupOf,
+      tabs: clear
+        ? []
+        : tabs.map((tab) => ({
+            id: tab.id,
+            kind: tab.kind,
+            title: tab.title,
+            url: tab.url ?? null,
+            archiveId: tab.archiveId,
+          })),
     });
-  }, [tabs, activeId, groups, groupOf]);
+  }, [tabs, activeId, groups, groupOf, settings.clearTabsOnExit]);
 
   /** 统一开标签入口：单例已存在则召回；可多开的按「新开页行为」决定新建还是复用。 */
   const openTab = (
@@ -558,15 +641,9 @@ export default function WorkspaceTabs({
     const tab = tabs.find((entry) => entry.id === id);
     if (!tab || tab.kind === "home") return;
 
-    // 网页标签的逃生舱：有网址就用独立浏览器引擎开新窗（保留多标签/登录态），
-    // 主窗关掉外壳标签。新页（url 为空）没有可搬的引擎，直接忽略。
-    if (tab.kind === "browser") {
-      if (!tab.url) return;
-      void api.d2Open(tab.url, true).then(() => closeTab(id)).catch(() => {});
-      return;
-    }
-
-    // 其余功能标签：新开一份 App 窗口（共享同一库），按 token 还原标签。
+    // A7/A8/A10：所有标签（含网页）统一走完整 App 窗。
+    // 网页标签不再开独立浏览器引擎窗（那套 UI 与主窗不一致、双系统框、登录态割裂）；
+    // 新窗里的 BrowserHost 会用 hostLabel 把引擎挂到新窗自己身上，数据天然同源。
     const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     try {
       window.localStorage.setItem(
@@ -583,6 +660,37 @@ export default function WorkspaceTabs({
       window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
     });
   };
+
+  /** A7：把独立窗当前标签合并回主窗（token 经 localStorage 共享，主窗监听还原）。 */
+  const mergeBackToMain = () => {
+    if (!isDetachedWindow) return;
+    const tab = activeTab;
+    if (!tab) return;
+    const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      window.localStorage.setItem(`${DETACH_KEY_PREFIX}${token}`, JSON.stringify(tab));
+      void emitTo("main", "huaxia://reattach-tab", token).then(() => {
+        void getCurrentWindow().close();
+      }).catch(() => {
+        window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
+      });
+    } catch {
+      // localStorage 不可用时放弃合并，不打断使用。
+    }
+  };
+
+  // 独立窗 Ctrl+Shift+M 合并回主窗。
+  useEffect(() => {
+    if (!isDetachedWindow) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        mergeBackToMain();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   /** 标签条拖拽：横向排序 + 跨组归属 + 拖出拆窗。 */
   const tabDrag = usePointerDrag({
@@ -727,6 +835,25 @@ export default function WorkspaceTabs({
         >
           ＋
         </button>
+        {/* A7：独立窗的「合并回主窗」入口（指针事件不跨 HWND，用按钮/快捷键替代拖拽） */}
+        {isDetachedWindow && (
+          <button
+            type="button"
+            onClick={mergeBackToMain}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "var(--accent, #7c93ff)",
+              cursor: "pointer",
+              fontSize: 12,
+              padding: "4px 8px",
+              whiteSpace: "nowrap",
+            }}
+            title="把这个标签合并回主窗口（Ctrl+Shift+M）"
+          >
+            ⤓ 合并回主窗
+          </button>
+        )}
         {/* 自定义窗条拖拽区 + 窗口控制（原生标题栏已永久去除） */}
         <div
           data-tauri-drag-region

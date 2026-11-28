@@ -27,6 +27,8 @@ export interface TabSettings {
   startupKind: StartupTargetKind;
   startupId: number | null;
   masked: boolean;
+  /** A4：退出时彻底关闭所有标签（默认 false＝保留当前状态下次恢复）。 */
+  clearTabsOnExit: boolean;
 }
 
 const SETTINGS_KEY = "huaxia.tabs.settings";
@@ -38,10 +40,12 @@ export const TAB_SETTINGS_EVENT = "huaxia:tabs-settings";
 const DEFAULTS: TabSettings = {
   newBehavior: "new",
   newTabPage: "huaxia",
-  startupMode: "home",
+  // A4：默认恢复上次的标签；用户可在设置里改成「启动时打开主页」。
+  startupMode: "last",
   startupKind: "collection",
   startupId: null,
   masked: false,
+  clearTabsOnExit: false,
 };
 
 export function readTabSettings(): TabSettings {
@@ -53,9 +57,9 @@ export function readTabSettings(): TabSettings {
       newBehavior: parsed.newBehavior === "reuse" ? "reuse" : "new",
       newTabPage: parsed.newTabPage === "bing" ? "bing" : "huaxia",
       startupMode:
-        parsed.startupMode === "last" || parsed.startupMode === "specific"
+        parsed.startupMode === "home" || parsed.startupMode === "specific"
           ? parsed.startupMode
-          : "home",
+          : "last",
       startupKind:
         parsed.startupKind === "tag" || parsed.startupKind === "loose"
           ? parsed.startupKind
@@ -65,6 +69,7 @@ export function readTabSettings(): TabSettings {
           ? parsed.startupId
           : null,
       masked: parsed.masked === true,
+      clearTabsOnExit: parsed.clearTabsOnExit === true,
     };
   } catch {
     return { ...DEFAULTS };
@@ -95,7 +100,16 @@ export interface TabGroup {
   collapsed: boolean;
 }
 
-/** 上次关闭时的标签集合（只存非浏览器标签，浏览器恢复会重开 webview，太慢）。 */
+/** A4：完整标签快照（含 browser 的 url、gallery 的 archiveId），下次启动原样恢复。 */
+export interface PersistedWorkTab {
+  id: string;
+  kind: string;
+  title: string;
+  url?: string | null;
+  archiveId?: number;
+}
+
+/** 上次关闭时的标签集合。kinds 是老结构（只存 kind），tabs 是 A4 起的完整快照。 */
 export interface PersistedTabs {
   kinds: string[];
   active: string;
@@ -103,6 +117,8 @@ export interface PersistedTabs {
   groups?: TabGroup[];
   /** M5：kind → groupId 的归属映射。 */
   groupOf?: Record<string, string>;
+  /** A4：完整标签快照；老数据没有此字段时回退 kinds 路径。 */
+  tabs?: PersistedWorkTab[];
 }
 
 /** 内置的默认分组方案：画匣功能页 / 阅读 / 工具，浏览器单独一组。 */
@@ -142,11 +158,25 @@ export function readPersistedTabs(): PersistedTabs | null {
             ),
           )
         : undefined;
+    // A4：完整标签快照，逐字段校验；老数据没有此字段时回退 kinds 路径。
+    const tabs = Array.isArray(parsed.tabs)
+      ? parsed.tabs.filter(
+          (t): t is PersistedWorkTab =>
+            !!t &&
+            typeof t.id === "string" &&
+            typeof t.kind === "string" &&
+            typeof t.title === "string" &&
+            (t.url === undefined || t.url === null || typeof t.url === "string") &&
+            (t.archiveId === undefined ||
+              (typeof t.archiveId === "number" && Number.isFinite(t.archiveId))),
+        )
+      : undefined;
     return {
       kinds: parsed.kinds.filter((kind): kind is string => typeof kind === "string"),
       active: typeof parsed.active === "string" ? parsed.active : "home",
       groups,
       groupOf,
+      tabs,
     };
   } catch {
     return null;
