@@ -4,6 +4,7 @@ import { api } from "./api";
 import type { LibraryState, WallpaperLockConfig } from "./types";
 import Welcome from "./components/Welcome";
 import WorkspaceTabs from "./components/WorkspaceTabs";
+import { detectDetachedWindow } from "./tabSettings";
 import WallpaperLock from "./components/WallpaperLock";
 import BootScreen from "./components/BootScreen";
 import "./App.css";
@@ -16,6 +17,16 @@ const APP_STARTED_AT = performance.now();
 const SPLASH_MIN_VISIBLE_MS = 700;
 /** 启动动效总时长：库开得再快也让加载屏走完这一段，否则就是「黑一下就进库」。 */
 const BOOT_MIN_ANIMATION_MS = 950;
+
+/**
+ * A7：拆出的独立标签窗（index.html?detach=token）。
+ *
+ * 它**不是**第二次启动：不能关启动屏（会去 show 主窗）、不能等启动动效、
+ * 不能走壁纸锁（用户已经解过）、也不能 fallback 恢复主窗的标签快照。
+ * 一旦走成完整启动流程，新窗会把主窗的 browser 标签全复制过来、每个都往
+ * 自己身上挂一个原生引擎，直接卡死（2026-11-28 实机反馈）。
+ */
+const IS_DETACHED_WINDOW = detectDetachedWindow();
 
 export default function App() {
   const [phase, setPhase] = useState<BootPhase>("booting");
@@ -36,9 +47,10 @@ export default function App() {
       for (;;) {
         const state = await api.getLibraryState();
         if (state.libraryPath) {
-          // 走完最短动效：库开得快（内盘/盘已醒）时以前一帧就切走了，
-          // 管理员看到的就是「黑一下直接进库，什么动效都没有」。
-          const remaining = BOOT_MIN_ANIMATION_MS - (performance.now() - APP_STARTED_AT);
+          // 拆窗是新窗，没有启动屏也没有动效，库已由主窗开好：立即进库。
+          const remaining = IS_DETACHED_WINDOW
+            ? 0
+            : BOOT_MIN_ANIMATION_MS - (performance.now() - APP_STARTED_AT);
           if (remaining > 0) {
             await new Promise((resolve) => setTimeout(resolve, remaining));
           }
@@ -130,26 +142,32 @@ export default function App() {
         });
       });
     };
-    const visibleFor = performance.now() - APP_STARTED_AT;
-    splashTimer = window.setTimeout(
-      handoff,
-      Math.max(0, SPLASH_MIN_VISIBLE_MS - visibleFor),
-    );
+    if (!IS_DETACHED_WINDOW) {
+      // 只有主窗才交接启动屏。新窗调 splash_finish 会把已经藏起来的主窗
+      // 又 show 出来，并抢走焦点（2026-11-28 实机反馈的「两个窗互相盖」）。
+      const visibleFor = performance.now() - APP_STARTED_AT;
+      splashTimer = window.setTimeout(
+        handoff,
+        Math.max(0, SPLASH_MIN_VISIBLE_MS - visibleFor),
+      );
+    }
     let cancelled = false;
 
     void (async () => {
-      // 先看壁纸锁：开着就停在锁屏，等输密码；不开才正常加载库。
-      try {
-        const config = await api.getWallpaperLock();
-        if (cancelled) return;
-        if (config.enabled) {
-          setLockConfig(config);
-          setLocked(true);
-          setPhase("welcome");
-          return;
+      // 拆出的新窗不重走锁屏：用户已经解锁过，锁屏只在应用启动时出现一次。
+      if (!IS_DETACHED_WINDOW) {
+        try {
+          const config = await api.getWallpaperLock();
+          if (cancelled) return;
+          if (config.enabled) {
+            setLockConfig(config);
+            setLocked(true);
+            setPhase("welcome");
+            return;
+          }
+        } catch {
+          // 读不到锁配置就当没开锁，不影响进库。
         }
-      } catch {
-        // 读不到锁配置就当没开锁，不影响进库。
       }
       if (!cancelled) await bootLibrary();
     })();

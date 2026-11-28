@@ -156,14 +156,52 @@ export function usePointerDrag(options: PointerDragOptions): PointerDrag {
         movedRef.current = false;
       };
 
+      /**
+       * 指针直接离开本窗口（拖出去拆窗、切到别的窗口）时 pointerup 收不到，
+       * finish 永远不会跑——`is-pointer-dragging` 和拖拽 id 就永久留在状态里，
+       * 整个标签栏「点不动、拖不动」（2026-11-28 实机反馈）。
+       *
+       * 这里按「已拖动 + 指针已出界」判定为拖出拆窗，否则只做状态清理。
+       */
+      const finishOutside = (x: number, y: number) => {
+        const start = startRef.current;
+        const moved = movedRef.current;
+        detach();
+        startRef.current = null;
+        overRef.current = null;
+        document.body.classList.remove("is-pointer-dragging");
+        setDragId(null);
+        setOverId(null);
+        movedRef.current = false;
+        if (!start || !moved) return;
+        ignoreClickRef.current = true;
+        window.setTimeout(() => {
+          ignoreClickRef.current = false;
+        }, 300);
+        optionsRef.current.onDropOutside?.(start.id, x, y);
+      };
+      const onBlur = () => {
+        if (startRef.current) finishOutside(0, 0);
+      };
+      const onPointerLeave = (leaveEvent: PointerEvent) => {
+        // 只有真的拖起来了才算「拖出窗口」；单纯按下后移出去不算。
+        if (startRef.current && movedRef.current) {
+          finishOutside(leaveEvent.clientX, leaveEvent.clientY);
+        }
+      };
+
       // 捕获阶段监听：目标元素里若有 webview/输入框先吞掉事件也不影响排序。
       window.addEventListener("pointermove", move, true);
       window.addEventListener("pointerup", finish, true);
       window.addEventListener("pointercancel", cancel, true);
+      window.addEventListener("blur", onBlur, true);
+      document.documentElement.addEventListener("pointerleave", onPointerLeave, true);
       cleanupRef.current = () => {
         window.removeEventListener("pointermove", move, true);
         window.removeEventListener("pointerup", finish, true);
         window.removeEventListener("pointercancel", cancel, true);
+        window.removeEventListener("blur", onBlur, true);
+        document.documentElement.removeEventListener("pointerleave", onPointerLeave, true);
       };
     },
     [detach],

@@ -2438,11 +2438,19 @@ fn splash_finish(app: tauri::AppHandle) {
 fn detach_tab(app: tauri::AppHandle, token: String) -> Result<String, String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     let label = format!("hx-detached-{}", uuid::Uuid::new_v4().simple());
+    // 双重标记：URL query 可能被某些 webview 版本吞掉，初始化脚本直接注入
+    // 全局变量做兜底。前端只要看到其中任意一个就按「独立窗」处理——这一步
+    // 没兜住的话新窗会 fallback 恢复主窗的标签快照，多个引擎叠在一起就卡死。
+    let boot_script = format!(
+        "window.__HX_DETACHED__ = true; window.__HX_DETACH_TOKEN__ = {};",
+        serde_json::to_string(&token).unwrap_or_else(|_| "\"\"".to_string())
+    );
     let built = WebviewWindowBuilder::new(
         &app,
         &label,
         WebviewUrl::App(format!("index.html?detach={}", token).into()),
     )
+    .initialization_script(&boot_script)
     .title("画匣 · 独立标签")
     .inner_size(1100.0, 760.0)
     .min_inner_size(480.0, 360.0)
@@ -3127,6 +3135,21 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             //
             // 性能纪律不变：这段代码跑完窗口才会真正消失，只允许
             // 「读内存 + 写几个小文件」，先藏窗再退进程。
+            // 拆出的独立窗被关掉：把它身上挂的内嵌引擎一并清掉。
+            // 前端 BrowserHost 的 cleanup 在窗口直接销毁时可能来不及跑，
+            // 不兜底的话引擎会残留在状态表里（2026-11-28 拆窗卡死的次生问题）。
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label().starts_with("hx-detached-") {
+                    let cleaned = crate::browser::close_embeds_hosted_by(window.label());
+                    if cleaned > 0 {
+                        release::log_close_timing(
+                            window.app_handle(),
+                            &format!("独立窗销毁，清理内嵌引擎 {cleaned} 个"),
+                            std::time::Duration::ZERO,
+                        );
+                    }
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() != "main" {
                     return;

@@ -34,6 +34,34 @@ export interface TabSettings {
 const SETTINGS_KEY = "huaxia.tabs.settings";
 const STATE_KEY = "huaxia.tabs.state";
 
+/**
+ * 当前窗是不是「拆出的独立标签窗」。
+ *
+ * 两个来源取并集：Rust 建窗时用 `initialization_script` 注入的全局标记
+ * （可靠），以及 URL 上的 `?detach=`（可能被 webview 吞掉）。任一命中即算——
+ * 漏判的后果很重：新窗会走完整启动流程并恢复主窗标签快照，多个原生引擎
+ * 叠在同一个窗口里直接卡死（2026-11-28 实机反馈）。
+ */
+export function detectDetachedWindow(): boolean {
+  try {
+    if ((window as { __HX_DETACHED__?: boolean }).__HX_DETACHED__ === true) return true;
+    return !!new URLSearchParams(window.location.search).get("detach");
+  } catch {
+    return false;
+  }
+}
+
+/** 拆窗 token：优先用注入的全局变量，其次 URL query。 */
+export function detachToken(): string | null {
+  try {
+    const injected = (window as { __HX_DETACH_TOKEN__?: unknown }).__HX_DETACH_TOKEN__;
+    if (typeof injected === "string" && injected) return injected;
+    return new URLSearchParams(window.location.search).get("detach");
+  } catch {
+    return null;
+  }
+}
+
 /** 设置变更事件：设置面板写入后派发，标签壳监听重读。 */
 export const TAB_SETTINGS_EVENT = "huaxia:tabs-settings";
 

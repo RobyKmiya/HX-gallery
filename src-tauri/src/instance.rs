@@ -18,8 +18,8 @@ mod platform {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
     use windows_sys::Win32::System::Threading::CreateMutexW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, PostMessageW,
-        ShowWindow, SW_RESTORE,
+        BringWindowToTop, EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsIconic,
+        IsWindowVisible, PostMessageW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
 
     /// 互斥体名字。`Local\` 前缀表示只在当前登录会话内互斥，
@@ -31,6 +31,14 @@ mod platform {
 
     /// 主窗口标题前缀，取自 `tauri.conf.json` 的 `title`。
     const WINDOW_TITLE_PREFIX: &str = "画匣";
+
+    /// 主窗的完整标题（`tauri.conf.json` → `app.windows[0].title`）。
+    ///
+    /// 光按前缀「画匣」匹配会误伤拆出的独立窗（`画匣 · 独立标签`）：
+    /// 两个窗都以「画匣」开头，EnumWindows 先撞上哪个就把哪个提到前面，
+    /// 用户点桌面图标想回主窗主页，结果弹的是拆出去的标签窗
+    /// （2026-11-28 实机反馈）。所以优先精确匹配主窗标题。
+    const MAIN_WINDOW_TITLE: &str = "画匣 · 本地画廊";
 
     /// 持有就代表本进程是唯一实例；Drop 时释放。
     pub struct InstanceGuard {
@@ -78,6 +86,8 @@ mod platform {
     }
 
     struct Search {
+        /// 精确命中主窗（最高优先级，命中即停）。
+        exact: *mut c_void,
         visible: *mut c_void,
         any: *mut c_void,
     }
@@ -94,10 +104,17 @@ mod platform {
             return 1;
         }
         let title = String::from_utf16_lossy(&buffer[..copied as usize]);
+        // 主窗优先：不管可见与否都认它（老板键藏起来时也要能唤回）。
+        if title == MAIN_WINDOW_TITLE {
+            search.exact = hwnd;
+            return 0;
+        }
         if title.starts_with(WINDOW_TITLE_PREFIX) {
             if unsafe { IsWindowVisible(hwnd) } != 0 {
-                search.visible = hwnd;
-                return 0; // 找到可见的，停止枚举
+                if search.visible.is_null() {
+                    search.visible = hwnd; // 记下可见的，但继续找主窗
+                }
+                return 1;
             }
             if search.any.is_null() {
                 search.any = hwnd; // 先记下不可见的，继续找可见的
@@ -112,6 +129,7 @@ mod platform {
     /// 这里用 `EnumWindows` 按标题前缀匹配。
     pub fn wake_existing() -> bool {
         let mut search = Search {
+            exact: std::ptr::null_mut(),
             visible: std::ptr::null_mut(),
             any: std::ptr::null_mut(),
         };
@@ -119,7 +137,10 @@ mod platform {
             EnumWindows(Some(enum_proc), &mut search as *mut Search as isize);
         }
 
-        let target = if !search.visible.is_null() {
+        // 主窗 > 可见的「画匣*」窗 > 任意「画匣*」窗。
+        let target = if !search.exact.is_null() {
+            search.exact
+        } else if !search.visible.is_null() {
             search.visible
         } else if !search.any.is_null() {
             search.any
@@ -128,9 +149,18 @@ mod platform {
         };
 
         unsafe {
-            ShowWindow(target, SW_RESTORE);
-            // 也用消息通知对方自己 set_focus：SetForegroundWindow 在 Windows 上
-            // 受前台权限限制，常静默失败，而对方进程处理消息时置前更容易成功。
+            // 最小化的先还原，隐藏的（老板键）直接 show——两种都覆盖。
+            if IsIconic(target) != 0 {
+                ShowWindow(target, SW_RESTORE);
+            } else {
+                ShowWindow(target, SW_SHOW);
+            }
+            // SetForegroundWindow 受前台权限限制常静默失败，补 BringWindowToTop
+            // 把窗口提到 Z 序顶部，至少不会被别的窗盖住（2026-11-28 反馈：
+            // 点桌面图标窗口没到前面，看着像「没反应」）。
+            SetForegroundWindow(target);
+            BringWindowToTop(target);
+            // 也用消息通知对方自己 set_focus：对方进程处理消息时置前更容易成功。
             PostMessageW(target, WM_SHOW_INSTANCE, 0, 0);
         }
         true

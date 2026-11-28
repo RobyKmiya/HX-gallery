@@ -1344,15 +1344,19 @@ pub struct EmbedRect {
     pub h: f64,
 }
 
-/// 打开内置浏览器（宿主 = host_label 指定的窗，缺省 main）。返回引擎 label，前端拿它做 embed 同步。
+/// 打开内置浏览器。宿主 = **发起这次调用的窗口**（Tauri 注入，绝不猜）。
+///
+/// 以前宿主写死 `get_window("main")`，拆出的独立窗挂引擎时会飘回主窗，
+/// 把主窗的标签栏用原生子 webview 盖住 → 点不动、拖不动（2026-11-28 反馈）。
+/// 改成注入 `Window` 后，谁发起的命令就挂在谁身上，主窗/新窗天然各归各位。
 #[tauri::command]
 pub fn d2_embed_open(
     app: AppHandle,
+    host: tauri::Window,
     url: String,
     adblock: Option<bool>,
     home: Option<String>,
     picker: Option<bool>,
-    host_label: Option<String>,
     rect: Option<EmbedRect>,
 ) -> Result<String, String> {
     let parsed = normalize_url(&url)?;
@@ -1369,11 +1373,6 @@ pub fn d2_embed_open(
         .ok()
         .and_then(|guard| guard.clone())
         .unwrap_or_else(|| "https://e-hentai.org/".to_string());
-    // A7：拆出的独立窗也要挂引擎；宿主写死 main 会让子 webview 飘到主窗。
-    let label_host = host_label.as_deref().unwrap_or("main");
-    let host = app
-        .get_window(label_host)
-        .ok_or_else(|| format!("宿主窗口不存在：{label_host}"))?;
     let label = format!("d2-embed-{}", uuid::Uuid::new_v4().simple());
     let app_for_thread = app.clone();
     let label_for_thread = label.clone();

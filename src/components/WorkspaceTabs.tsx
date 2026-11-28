@@ -25,6 +25,8 @@ import {
   DEFAULT_TAB_GROUPS,
   TAB_SETTINGS_EVENT,
   defaultGroupOf,
+  detectDetachedWindow,
+  detachToken,
   readPersistedTabs,
   readStartupTarget,
   readTabSettings,
@@ -96,6 +98,7 @@ function hostOf(url: string): string {
 
 /** M5③：拆窗数据在主窗写入 localStorage，新窗按 token 读回（避免中文标题走 URL 编码失真）。 */
 export const DETACH_KEY_PREFIX = "huaxia.detached.";
+
 /** initialTabs() 与 initialActiveId() 会各调一次，token 只能消费一遍，故缓存。 */
 let detachedTabCache: { done: true; tab: WorkTab | null } | null = null;
 
@@ -103,7 +106,7 @@ function readDetachedTab(): WorkTab | null {
   if (detachedTabCache) return detachedTabCache.tab;
   let result: WorkTab | null = null;
   try {
-    const token = new URLSearchParams(window.location.search).get("detach");
+    const token = detachToken();
     if (!token) return null;
     const raw = window.localStorage.getItem(`${DETACH_KEY_PREFIX}${token}`);
     if (!raw) return null;
@@ -129,6 +132,12 @@ function readDetachedTab(): WorkTab | null {
 function initialTabs(): WorkTab[] {
   const detached = readDetachedTab();
   if (detached) return [detached];
+  // 拆出的新窗是「一个标签独立成窗」，**绝不能**回退到主窗的持久化快照：
+  // 否则会把主窗的 browser 标签全复制过来，每个都往新窗身上挂一个原生引擎，
+  // 新窗直接卡死（2026-11-28 实机反馈）。token 没读到就只给一个主页。
+  if (detectDetachedWindow()) {
+    return [{ id: "home", kind: "home", title: TAB_TITLE.home }];
+  }
   const settings = readTabSettings();
   if (settings.startupMode === "last") {
     const persisted = readPersistedTabs();
@@ -186,7 +195,7 @@ function initialTabs(): WorkTab[] {
 }
 
 function initialActiveId(tabs: WorkTab[]): string {
-  if (new URLSearchParams(window.location.search).get("detach")) {
+  if (detectDetachedWindow()) {
     return tabs[0]?.id ?? "home";
   }
   const settings = readTabSettings();
@@ -222,6 +231,17 @@ function BrowserHost({
   const [label, setLabel] = useState<string | null>(null);
   const modalCount = useRef(0);
   const [modalTick, setModalTick] = useState(0);
+  /**
+   * A4 恢复优化：只有「被激活过」的网页标签才真正创建引擎。
+   *
+   * 启动时如果一次恢复 5 个带网址的标签，等于同时建 5 个 WebView2 子进程，
+   * 又慢又容易卡（2026-11-28 拆窗卡死的同一类问题）。这里让它懒到第一次
+   * 可见时才挂载；一旦挂上就不再销毁，保持「切标签只隐藏」的既有语义。
+   */
+  const [everVisible, setEverVisible] = useState(visible);
+  useEffect(() => {
+    if (visible) setEverVisible(true);
+  }, [visible]);
   /** onHome/onClosed 每次渲染都是新函数，用 ref 挡住重复订阅。 */
   const onHomeRef = useRef(onHome);
   onHomeRef.current = onHome;
@@ -229,7 +249,9 @@ function BrowserHost({
   onClosedRef.current = onClosed;
 
   // 引擎生命周期：挂载/换址时开，卸载时拆（切标签不卸载，只切 visible）。
+  // 未被激活过的标签先不建引擎（见 everVisible 注释）。
   useEffect(() => {
+    if (!everVisible) return;
     let dead = false;
     let mine: string | null = null;
     setLabel(null);
@@ -242,13 +264,12 @@ function BrowserHost({
         // 顶栏会错位并列 ~800ms（管理员 2026-11-26 截图）。
         const rectEl = holderRef.current;
         const rect = rectEl?.getBoundingClientRect();
-        // A7：宿主写死 main 会让拆出窗的引擎挂到主窗上；显式传当前窗 label。
-        const hostLabel = getCurrentWindow().label;
+        // 宿主由 Rust 侧自动取「发起调用的窗口」（命令注入 Window），
+        // 前端不再传 label——谁调用就挂谁，主窗和新窗各归各位。
         const opened = await api.d2EmbedOpen({
           url,
           adblock: true,
           home,
-          hostLabel,
           rect: rect
             ? { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
             : undefined,
@@ -267,7 +288,7 @@ function BrowserHost({
       dead = true;
       if (mine) void api.d2EmbedClose(mine).catch(() => {});
     };
-  }, [url]);
+  }, [url, everVisible]);
 
   // 工具栏 ⌂ → 主窗把该标签切回「画匣新页」（卸载 webview，由 React 接管）。
   useEffect(() => {
@@ -385,7 +406,7 @@ export default function WorkspaceTabs({
   /** 标签右键菜单：定位 + 目标 tab。 */
   const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   /** A4/A7：当前是否为拆出的独立窗（带 ?detach=token）。 */
-  const isDetachedWindow = !!new URLSearchParams(window.location.search).get("detach");
+  const isDetachedWindow = detectDetachedWindow();
   /** 启动目标只在首帧算一次。 */
   const startupTargetRef = useRef<StartupTarget | null>(readStartupTarget(readTabSettings()));
   /** 启动遮罩：仅首帧按设置决定，之后点一下揭开。 */
@@ -643,7 +664,7 @@ export default function WorkspaceTabs({
 
     // A7/A8/A10：所有标签（含网页）统一走完整 App 窗。
     // 网页标签不再开独立浏览器引擎窗（那套 UI 与主窗不一致、双系统框、登录态割裂）；
-    // 新窗里的 BrowserHost 会用 hostLabel 把引擎挂到新窗自己身上，数据天然同源。
+    // 新窗里的 BrowserHost 会把引擎挂到自己身上（Rust 取发起调用的窗口），数据天然同源。
     const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     try {
       window.localStorage.setItem(
@@ -654,12 +675,37 @@ export default function WorkspaceTabs({
       return;
     }
     void api.detachTab(token).then((opened) => {
-      if (!opened) window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
-      // 功能标签拆出后主窗保留原标签（两窗共享库，各看各的）。
+      if (!opened) {
+        window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
+        return;
+      }
+      // Edge 语义：拖出＝把标签「搬」到新窗，原窗不再留一份。
+      // 新窗已成功建出来才关，失败则原样保留（不让标签凭空消失）。
+      closeTab(id);
     }).catch(() => {
       window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
     });
   };
+
+  // 切到某个标签时，如果它正躺在折叠的组里，自动展开该组——
+  // 否则「切过去了却看不见标签」（2026-11-28 反馈的「主页不存在」）会让人
+  // 以为标签丢了。只在 **切换** 时展开：用户手动折叠当前组不该被立刻弹开。
+  const lastRevealedRef = useRef("");
+  useEffect(() => {
+    if (lastRevealedRef.current === activeId) return;
+    lastRevealedRef.current = activeId;
+    const tab = tabs.find((entry) => entry.id === activeId);
+    if (!tab) return;
+    const groupId = groupIdOf(tab);
+    setGroups((prev) => {
+      const hit = prev.find((group) => group.id === groupId);
+      if (!hit || !hit.collapsed) return prev;
+      return prev.map((group) =>
+        group.id === groupId ? { ...group, collapsed: false } : group,
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
 
   /** A7：把独立窗当前标签合并回主窗（token 经 localStorage 共享，主窗监听还原）。 */
   const mergeBackToMain = () => {

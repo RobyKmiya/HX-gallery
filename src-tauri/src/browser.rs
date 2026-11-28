@@ -4342,6 +4342,30 @@ pub fn embed_close(label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 宿主窗口销毁时兜底：把挂在这个窗口上的内嵌引擎全部拆掉。
+///
+/// 正常路径是前端 BrowserHost 卸载时调 `d2_embed_close`；但拆出的独立窗
+/// 被直接关掉时 React 的 cleanup 未必来得及跑，引擎会残留在 BROWSERS 里
+/// （toolbar webview 的句柄还指着已销毁的窗口）。这里按宿主 label 兜底清一遍。
+/// 返回清理掉的引擎数。
+pub fn close_embeds_hosted_by(host_label: &str) -> usize {
+    // 持锁期间只收集 label，绝不调 webview（见 reposition 顶部的死锁铁律）。
+    let labels: Vec<String> = {
+        let Ok(map) = BROWSERS.lock() else {
+            return 0;
+        };
+        map.iter()
+            .filter(|(_, state)| state.window.label() == host_label)
+            .map(|(label, _)| label.clone())
+            .collect()
+    };
+    let count = labels.len();
+    for label in labels {
+        let _ = embed_close(&label);
+    }
+    count
+}
+
 /// 窗口尺寸变化时重排工具栏与全部内容标签。
 fn reposition(label: &str) {
     // 死锁修复（2026-11-24）：navigate/eval/reload/set_zoom/set_position/hide/close 这类
