@@ -2430,6 +2430,32 @@ fn splash_finish(app: tauri::AppHandle) {
     }
 }
 
+/// M5③：把一个工作台标签拆到独立窗口。
+/// 标签数据由主窗写进 localStorage（token 索引），新窗加载 index.html 时
+/// 从 ?detach=<token> 读回——避免中文标题/URL 经 query 编码失真。
+/// 新窗关闭只关自己：on_window_event 里只对 main 接管 exit。
+#[tauri::command]
+fn detach_tab(app: tauri::AppHandle, token: String) -> Result<String, String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    let label = format!("hx-detached-{}", uuid::Uuid::new_v4().simple());
+    let built = WebviewWindowBuilder::new(
+        &app,
+        &label,
+        WebviewUrl::App(format!("index.html?detach={}", token).into()),
+    )
+    .title("画匣 · 独立标签")
+    .inner_size(1100.0, 760.0)
+    .min_inner_size(480.0, 360.0)
+    .build();
+    match built {
+        Ok(window) => {
+            let _ = window.set_focus();
+            Ok(label)
+        }
+        Err(error) => Err(format!("拆出独立窗口失败：{error}")),
+    }
+}
+
 /// 老板键呼回键的持久化路径（config/shortcuts.json）。
 fn boss_recall_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     app.path()
@@ -2928,6 +2954,7 @@ pub fn run() {    // 单实例守卫必须在建窗口之前抢：抢不到说�
             set_window_decorations,
             hide_main_window,
             splash_finish,
+            detach_tab,
             get_boss_recall,
             set_boss_recall,
             copy_reader_page,

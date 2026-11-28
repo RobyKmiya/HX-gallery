@@ -60,6 +60,16 @@
   }
   .tab.dragging { opacity: .45; }
   .tab.drop-target { border-color: var(--accent); }
+  /* M5①：域名分组头（折叠/展开），单个小胶囊挤在 38px 工具栏里 */
+  .tab-group-head {
+    display: flex; align-items: center; flex: none;
+    height: 26px; padding: 0 6px; border-radius: 7px;
+    background: rgba(255,255,255,.05); color: var(--muted);
+    font-size: 10.5px; cursor: pointer; max-width: 110px;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  .tab-group-head:hover { background: rgba(255,255,255,.1); color: var(--text); }
+  .tab-group-head.is-collapsed { color: var(--accent); }
   .tab .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tab .spinner {
     width: 9px; height: 9px; flex: none; border-radius: 50%;
@@ -110,6 +120,7 @@
   <button id="zoomOut" title="缩小（Ctrl+−）">−</button>
   <button id="zoom" class="zoom" title="重置 100%（Ctrl+0）">100%</button>
   <button id="zoomIn" title="放大（Ctrl++）">+</button>
+  <button id="detach" title="弹出为独立窗口（M5 逃生舱）" style="display:none">⤢</button>
   <button id="settings" title="浏览器设置（Ctrl+,）">⚙</button>
 </div>
 

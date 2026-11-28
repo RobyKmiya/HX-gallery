@@ -330,6 +330,7 @@ pub fn start_watchdog(app: &AppHandle) {
 }
 
 /// 浏览器配置。宿主按需填，全部字段都有合理默认。
+#[derive(Clone)]
 pub struct BrowserOptions {
     /// 窗口标题。
     pub title: String,
@@ -3129,6 +3130,31 @@ fn handle_toolbar_action(
             crate::blocked_elements::add(app, host, selector)
         }
         "stop" => stop_loading(label),
+        // M5③ 逃生舱：内嵌引擎一键弹出为独立原生窗口。
+        // 取当前激活标签的网址与引擎配置，开一个独立窗承载它，然后拆掉内嵌
+        // 实例并通知外壳关掉对应工作台标签。
+        "detach" => {
+            if !is_embedded(label) {
+                return Ok(());
+            }
+            let (active_url, opts) = with_state(label, |state| {
+                let url = state
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == state.active)
+                    .map(|tab| tab.url.clone())
+                    .unwrap_or_else(|| "about:blank".to_string());
+                (url, state.opts.clone())
+            })
+            .ok_or_else(|| "浏览器不存在".to_string())?;
+            let target = tauri::Url::parse(&active_url)
+                .unwrap_or_else(|_| tauri::Url::parse("about:blank").expect("常量 URL 合法"));
+            let new_label = format!("d2-browser-{}", uuid::Uuid::new_v4().simple());
+            let opened = open(app, target, new_label, opts)?;
+            // 新窗开起来后拆内嵌：embed_close 会发 browser-closed 让主窗关外壳标签。
+            let _ = opened;
+            embed_close(label)
+        }
         "reorder" => {
             let tab_id = req
                 .get("tabId")
@@ -4212,6 +4238,7 @@ fn push_state(label: &str) {
             // 显示停在别的标签的百分比上，看着就像「缩放键坏了」。
             "zoom": active.map(|tab| tab.zoom).unwrap_or(1.0),
             "loading": active.map(|tab| tab.loading).unwrap_or(false),
+            "embedded": state.embedded,
             "settings": state.settings,
         })
         .to_string()

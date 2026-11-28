@@ -22,6 +22,13 @@ interface PointerDragOptions {
   onHover?: (id: string | null) => void;
   /** 松手：from 拖到了 to 上。 */
   onDrop?: (from: string, to: string) => void;
+  /**
+   * 松手时落点不在 `insideSelector` 容器内（拖出去了）。
+   * 标签拆独立窗用：拖到内容区就触发 tear-off。
+   */
+  onDropOutside?: (from: string, clientX: number, clientY: number) => void;
+  /** 判定「还在容器内」的选择器；不传则不启用 onDropOutside。 */
+  insideSelector?: string;
   /** 移动多少像素才算拖动，默认 6。 */
   threshold?: number;
   /** 判定方向：横向标签条传 "x"，纵向列表传 "y"，默认两者都算。 */
@@ -103,7 +110,7 @@ export function usePointerDrag(options: PointerDragOptions): PointerDrag {
         }
       };
 
-      const finish = () => {
+      const finish = (upEvent: PointerEvent) => {
         detach();
         const start = startRef.current;
         const target = overRef.current;
@@ -119,7 +126,22 @@ export function usePointerDrag(options: PointerDragOptions): PointerDrag {
           window.setTimeout(() => {
             ignoreClickRef.current = false;
           }, 300);
-          if (start && target) optionsRef.current.onDrop?.(start.id, target);
+          if (start && target) {
+            optionsRef.current.onDrop?.(start.id, target);
+          } else if (start && optionsRef.current.insideSelector) {
+            // 没落到任何 data-drag-id 上：判断是不是拖出了容器（拆窗热区）。
+            const under = document.elementFromPoint(
+              upEvent.clientX,
+              upEvent.clientY,
+            ) as HTMLElement | null;
+            if (!under?.closest(optionsRef.current.insideSelector)) {
+              optionsRef.current.onDropOutside?.(
+                start.id,
+                upEvent.clientX,
+                upEvent.clientY,
+              );
+            }
+          }
         }
         movedRef.current = false;
       };

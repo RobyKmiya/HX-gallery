@@ -86,10 +86,37 @@ export function readStartupTarget(settings: TabSettings): StartupTarget | null {
   return { kind: settings.startupKind, id: settings.startupId };
 }
 
+/** 标签组（M5 Edge 化）：按 kind 归类，可折叠。组归属按 kind 存，重启后稳定。 */
+export interface TabGroup {
+  id: string;
+  title: string;
+  /** 组色（CSS 颜色串），画在组头小圆点上。 */
+  color: string;
+  collapsed: boolean;
+}
+
 /** 上次关闭时的标签集合（只存非浏览器标签，浏览器恢复会重开 webview，太慢）。 */
 export interface PersistedTabs {
   kinds: string[];
   active: string;
+  /** M5：标签组定义；老数据没有此字段，读时补空数组。 */
+  groups?: TabGroup[];
+  /** M5：kind → groupId 的归属映射。 */
+  groupOf?: Record<string, string>;
+}
+
+/** 内置的默认分组方案：画匣功能页 / 阅读 / 工具，浏览器单独一组。 */
+export const DEFAULT_TAB_GROUPS: TabGroup[] = [
+  { id: "grp-core", title: "画匣", color: "#7c93ff", collapsed: false },
+  { id: "grp-read", title: "阅读", color: "#e8a35c", collapsed: false },
+  { id: "grp-web", title: "网页", color: "#5cc8a0", collapsed: false },
+];
+
+/** 默认归属：home/tags/trash/release/settings/net → 画匣；gallery → 阅读；browser → 网页。 */
+export function defaultGroupOf(kind: string): string {
+  if (kind === "gallery") return "grp-read";
+  if (kind === "browser") return "grp-web";
+  return "grp-core";
 }
 
 export function readPersistedTabs(): PersistedTabs | null {
@@ -98,9 +125,28 @@ export function readPersistedTabs(): PersistedTabs | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<PersistedTabs>;
     if (!Array.isArray(parsed.kinds)) return null;
+    const groups = Array.isArray(parsed.groups)
+      ? parsed.groups.filter(
+          (g): g is TabGroup =>
+            !!g &&
+            typeof g.id === "string" &&
+            typeof g.title === "string" &&
+            typeof g.color === "string",
+        ).map((g) => ({ ...g, collapsed: g.collapsed === true }))
+      : undefined;
+    const groupOf =
+      parsed.groupOf && typeof parsed.groupOf === "object"
+        ? Object.fromEntries(
+            Object.entries(parsed.groupOf).filter(
+              (entry): entry is [string, string] => typeof entry[1] === "string",
+            ),
+          )
+        : undefined;
     return {
       kinds: parsed.kinds.filter((kind): kind is string => typeof kind === "string"),
       active: typeof parsed.active === "string" ? parsed.active : "home",
+      groups,
+      groupOf,
     };
   } catch {
     return null;

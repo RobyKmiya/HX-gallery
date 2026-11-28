@@ -21,6 +21,12 @@
   var toastTimer = null;
   var bootAt = Date.now();
   var stalled = false;
+  // M5①：内层标签按域名分组 + 折叠态（工具栏 webview 同源 localStorage）。
+  var COLLAPSE_KEY = "hxToolbarCollapsedGroups";
+  var collapsedGroups = {};
+  try {
+    collapsedGroups = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "{}") || {};
+  } catch (e) { collapsedGroups = {}; }
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -74,10 +80,38 @@
     var settings = state.settings || {};
     setTabsWidth(settings.tabsWidth);
 
-    // 标签条
+    // 标签条（M5①：按域名分组 + 折叠；M5②：拖拽重排保持原 reorder action）
     var tabs = $("tabs");
     tabs.textContent = "";
-    (state.tabs || []).forEach(function (tab, index) {
+    var allTabs = state.tabs || [];
+    // 按域名归组，保持各标签在原数组中的相对位置；组按首次出现顺序排列。
+    var groupOrder = [];
+    var grouped = {};
+    allTabs.forEach(function (tab) {
+      var g = domainOf(tab.url);
+      if (!grouped[g]) { grouped[g] = []; groupOrder.push(g); }
+      grouped[g].push(tab);
+    });
+    // 超过一个分组才显示折叠头，避免单组时多占 38px 工具栏空间。
+    var multiGroup = groupOrder.length > 1;
+    groupOrder.forEach(function (groupName) {
+      var members = grouped[groupName];
+      if (multiGroup) {
+        var head = document.createElement("div");
+        var isCollapsed = collapsedGroups[groupName] === true;
+        head.className = "tab-group-head" + (isCollapsed ? " is-collapsed" : "");
+        head.title = (isCollapsed ? "展开" : "折叠") + "「" + groupName + "」组（" + members.length + "）";
+        head.textContent = (isCollapsed ? "▸" : "▾") + " " + groupName;
+        head.addEventListener("click", function () {
+          collapsedGroups[groupName] = !isCollapsed;
+          try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsedGroups)); } catch (e) {}
+          render();
+        });
+        tabs.appendChild(head);
+        if (isCollapsed) return;
+      }
+      members.forEach(function (tab) {
+      var index = allTabs.indexOf(tab);
       var chip = document.createElement("div");
       chip.className = "tab" + (tab.active ? " active" : "");
       chip.title = (tab.title ? tab.title + "\n" : "") + (tab.url || "");
@@ -129,7 +163,8 @@
         if (dragged && dragged !== tab.id) req("reorder", { tabId: dragged, index: index });
       });
       tabs.appendChild(chip);
-    });
+      }); // members.forEach
+    }); // groupOrder.forEach
 
     // 地址栏：聚焦时不打断输入
     if (!addrFocused && $("addr") !== document.activeElement && !toastTimer) {
@@ -139,6 +174,11 @@
     if (!addrFocused && !toastTimer) {
       $("lock").textContent = /^https:/i.test(state.activeUrl || "") ? "🔒" : "◉";
     }
+
+    // M5③ 逃生舱：内嵌模式（引擎挂在工作台标签里）才显示「弹出为窗口」，
+    // 点了让 Rust 把这批内容标签搬回独立原生窗口；独立窗口模式本就是窗口，隐藏。
+    var detachBtn = $("detach");
+    if (detachBtn) detachBtn.style.display = state.embedded ? "" : "none";
 
     // 缩放：值来自引擎状态，切换标签自动跟着变（以前工具栏自己记 zoomPct，
     // 切到另一个标签后还显示上一个标签的百分比，看着像「缩放键坏了」）。
@@ -228,6 +268,9 @@
   $("zoomOut").addEventListener("click", function () { req("zoomOut"); });
   $("zoom").addEventListener("click", function () { req("zoomReset"); });
   $("settings").addEventListener("click", function () { req("openSettings"); });
+  // M5③ 逃生舱：内嵌引擎一键弹出为独立原生窗口。
+  var detachBtn = $("detach");
+  if (detachBtn) detachBtn.addEventListener("click", function () { req("detach"); });
 
   var addr = $("addr");
   addr.addEventListener("focus", function () {

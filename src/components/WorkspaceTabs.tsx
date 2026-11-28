@@ -22,12 +22,15 @@ import LibraryView from "./LibraryView";
 import NewTab from "./NewTab";
 import GalleryTab from "./GalleryTab";
 import {
+  DEFAULT_TAB_GROUPS,
   TAB_SETTINGS_EVENT,
+  defaultGroupOf,
   readPersistedTabs,
   readStartupTarget,
   readTabSettings,
   savePersistedTabs,
   type StartupTarget,
+  type TabGroup,
   type TabSettings,
 } from "../tabSettings";
 import { EVENT_MODAL } from "../modalBus";
@@ -91,8 +94,41 @@ function hostOf(url: string): string {
   }
 }
 
-/** 启动时决定初始标签集合：主页 / 上次的非浏览器标签 / 指定收藏（仍是主页）。 */
+/** M5③：拆窗数据在主窗写入 localStorage，新窗按 token 读回（避免中文标题走 URL 编码失真）。 */
+export const DETACH_KEY_PREFIX = "huaxia.detached.";
+/** initialTabs() 与 initialActiveId() 会各调一次，token 只能消费一遍，故缓存。 */
+let detachedTabCache: { done: true; tab: WorkTab | null } | null = null;
+
+function readDetachedTab(): WorkTab | null {
+  if (detachedTabCache) return detachedTabCache.tab;
+  let result: WorkTab | null = null;
+  try {
+    const token = new URLSearchParams(window.location.search).get("detach");
+    if (!token) return null;
+    const raw = window.localStorage.getItem(`${DETACH_KEY_PREFIX}${token}`);
+    if (!raw) return null;
+    const tab = JSON.parse(raw) as Partial<WorkTab>;
+    window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
+    if (!tab.id || typeof tab.kind !== "string" || !isTabKind(tab.kind)) return null;
+    result = {
+      id: tab.id,
+      kind: tab.kind,
+      title: tab.title ?? TAB_TITLE[tab.kind],
+      url: tab.url ?? null,
+      archiveId: typeof tab.archiveId === "number" ? tab.archiveId : undefined,
+    };
+  } catch {
+    result = null;
+  } finally {
+    detachedTabCache = { done: true, tab: result };
+  }
+  return result;
+}
+
+/** 启动时决定初始标签集合：拆窗标签 / 主页 / 上次的非浏览器标签 / 指定收藏。 */
 function initialTabs(): WorkTab[] {
+  const detached = readDetachedTab();
+  if (detached) return [detached];
   const settings = readTabSettings();
   if (settings.startupMode === "last") {
     const persisted = readPersistedTabs();
@@ -117,6 +153,9 @@ function initialTabs(): WorkTab[] {
 }
 
 function initialActiveId(tabs: WorkTab[]): string {
+  if (new URLSearchParams(window.location.search).get("detach")) {
+    return tabs[0]?.id ?? "home";
+  }
   const settings = readTabSettings();
   if (settings.startupMode === "last") {
     const persisted = readPersistedTabs();
@@ -295,6 +334,17 @@ export default function WorkspaceTabs({
   const [settings, setSettings] = useState<TabSettings>(() => readTabSettings());
   const [tabs, setTabs] = useState<WorkTab[]>(() => initialTabs());
   const [activeId, setActiveId] = useState(() => initialActiveId(initialTabs()));
+  // M5①：标签分组。从持久化的 groupOf/groups 恢复，老数据走默认方案。
+  const [groups, setGroups] = useState<TabGroup[]>(() => {
+    const saved = readPersistedTabs();
+    return saved?.groups?.length ? saved.groups : DEFAULT_TAB_GROUPS.map((g) => ({ ...g }));
+  });
+  const [groupOf, setGroupOf] = useState<Record<string, string>>(() => {
+    const saved = readPersistedTabs();
+    return saved?.groupOf ?? {};
+  });
+  /** 标签右键菜单：定位 + 目标 tab。 */
+  const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   /** 启动目标只在首帧算一次。 */
   const startupTargetRef = useRef<StartupTarget | null>(readStartupTarget(readTabSettings()));
   /** 启动遮罩：仅首帧按设置决定，之后点一下揭开。 */
@@ -328,8 +378,10 @@ export default function WorkspaceTabs({
         .filter((tab) => tab.kind !== "browser" && tab.kind !== "gallery")
         .map((tab) => tab.kind),
       active: kind,
+      groups,
+      groupOf,
     });
-  }, [tabs, activeId]);
+  }, [tabs, activeId, groups, groupOf]);
 
   /** 统一开标签入口：单例已存在则召回；可多开的按「新开页行为」决定新建还是复用。 */
   const openTab = (
@@ -464,7 +516,22 @@ export default function WorkspaceTabs({
     });
   };
 
-  /** 落点排序：把 from 标签移动到 to 标签的位置（不是硬交换，同标签中心）。 */
+  /** M5：某标签所属组 id（未显式指定或组已不存在则回退到 kind 默认分组）。 */
+  const groupIdOf = (tab: WorkTab) => {
+    const assigned = groupOf[tab.id] ?? defaultGroupOf(tab.kind);
+    return groups.some((group) => group.id === assigned) ? assigned : defaultGroupOf(tab.kind);
+  };
+
+  /** 切换组的折叠态（组头点击）。 */
+  const toggleGroup = (groupId: string) => {
+    setGroups((prev) =>
+      prev.map((group) =>
+        group.id === groupId ? { ...group, collapsed: !group.collapsed } : group,
+      ),
+    );
+  };
+
+  /** 把标签移到目标标签所在位置；跨组时同时改归属（M5②）。 */
   const reorderTabs = (fromId: string, toId: string) => {
     if (fromId === toId) return;
     setTabs((prev) => {
@@ -476,12 +543,53 @@ export default function WorkspaceTabs({
       next.splice(to, 0, moved);
       return next;
     });
+    // 跨组拖动：源标签跟随目标标签的组。
+    setGroupOf((prev) => {
+      const target = tabs.find((tab) => tab.id === toId);
+      if (!target) return prev;
+      const targetGroup = groupIdOf(target);
+      if (groupIdOf(tabs.find((tab) => tab.id === fromId)!) === targetGroup) return prev;
+      return { ...prev, [fromId]: targetGroup };
+    });
   };
 
-  /** 标签条拖拽排序（指针事件；HTML5 draggable 在 WebView2 里会被系统拖放吞掉）。 */
+  /** M5③：把标签拆到独立窗口（后端命令见 lib.rs detach_tab）。 */
+  const detachTab = (id: string, _x: number, _y: number) => {
+    const tab = tabs.find((entry) => entry.id === id);
+    if (!tab || tab.kind === "home") return;
+
+    // 网页标签的逃生舱：有网址就用独立浏览器引擎开新窗（保留多标签/登录态），
+    // 主窗关掉外壳标签。新页（url 为空）没有可搬的引擎，直接忽略。
+    if (tab.kind === "browser") {
+      if (!tab.url) return;
+      void api.d2Open(tab.url, true).then(() => closeTab(id)).catch(() => {});
+      return;
+    }
+
+    // 其余功能标签：新开一份 App 窗口（共享同一库），按 token 还原标签。
+    const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      window.localStorage.setItem(
+        `${DETACH_KEY_PREFIX}${token}`,
+        JSON.stringify(tab),
+      );
+    } catch {
+      return;
+    }
+    void api.detachTab(token).then((opened) => {
+      if (!opened) window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
+      // 功能标签拆出后主窗保留原标签（两窗共享库，各看各的）。
+    }).catch(() => {
+      window.localStorage.removeItem(`${DETACH_KEY_PREFIX}${token}`);
+    });
+  };
+
+  /** 标签条拖拽：横向排序 + 跨组归属 + 拖出拆窗。 */
   const tabDrag = usePointerDrag({
     axis: "x",
     onDrop: reorderTabs,
+    onDropOutside: detachTab,
+    insideSelector: ".workspace-tabs",
   });
 
   /** 面板里的「跳到该标签」走这里；home 关不掉，直接切过去。 */
@@ -505,76 +613,104 @@ export default function WorkspaceTabs({
           overflowX: "auto",
         }}
       >
-        {tabs.map((tab) => {
-          const active = tab.id === activeId;
-          const dragging = tabDrag.dragId === tab.id;
-          const dragOver = tabDrag.overId === tab.id && !dragging;
-          return (
+        {groups.flatMap((group) => {
+          const members = tabs.filter((tab) => groupIdOf(tab) === group.id);
+          if (members.length === 0) return [];
+          const collapsed = group.collapsed;
+          const head = (
             <div
-              key={tab.id}
-              data-drag-id={tab.id}
-              onPointerDown={(event) => tabDrag.begin(event, tab.id)}
-              onClick={() => {
-                if (tabDrag.shouldIgnoreClick()) return;
-                setActiveId(tab.id);
-              }}
-              className={`workspace-tab${active ? " is-active" : ""}${
-                dragging ? " is-dragging" : ""
-              }${dragOver ? " is-drag-over" : ""}`}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "5px 10px",
-                borderRadius: "8px 8px 0 0",
-                cursor: "pointer",
-                fontSize: 12.5,
-                whiteSpace: "nowrap",
-                // 视觉统一：定宽 + 省略，主页与浏览器标签不再长短不一。
-                width: 148,
-                flex: "0 0 148px",
-                overflow: "hidden",
-                background: active ? "var(--bg, #14141a)" : "transparent",
-                color: active ? "var(--text, #e8e8ee)" : "var(--text-dim, #9a9aa4)",
-                borderTop: active ? "2px solid var(--accent, #7c93ff)" : "2px solid transparent",
-              }}
-              title={tab.kind === "home" ? "库主目录（不可关闭）" : tab.title}
+              key={`head-${group.id}`}
+              className={`workspace-tab-group-head${collapsed ? " is-collapsed" : ""}`}
+              data-group-id={group.id}
+              onClick={() => toggleGroup(group.id)}
+              title={collapsed ? `展开「${group.title}」组` : `折叠「${group.title}」组`}
             >
-              <span style={{ flex: "0 0 auto" }}>{TAB_GLYPH[tab.kind]}</span>
-              <span
-                style={{
-                  flex: "1 1 auto",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  textAlign: "left",
-                }}
-              >
-                {tab.title}
-              </span>
-              {tab.kind !== "home" && (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    closeTab(tab.id);
-                  }}
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    color: "inherit",
-                    cursor: "pointer",
-                    padding: "0 2px",
-                    lineHeight: 1,
-                    fontSize: 12,
-                  }}
-                  title="关闭标签"
-                >
-                  ✕
-                </button>
-              )}
+              <span className="group-dot" style={{ background: group.color }} />
+              <span>{group.title}</span>
+              <span className="group-count">{members.length}</span>
+              <span className="group-caret">{collapsed ? "▸" : "▾"}</span>
             </div>
           );
+          if (collapsed) return [head];
+          return [
+            head,
+            ...members.map((tab) => {
+              const active = tab.id === activeId;
+              const dragging = tabDrag.dragId === tab.id;
+              const dragOver = tabDrag.overId === tab.id && !dragging;
+              return (
+                <div
+                  key={tab.id}
+                  data-drag-id={tab.id}
+                  onPointerDown={(event) => tabDrag.begin(event, tab.id)}
+                  onClick={() => {
+                    if (tabDrag.shouldIgnoreClick()) return;
+                    setActiveId(tab.id);
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setTabMenu({ id: tab.id, x: event.clientX, y: event.clientY });
+                  }}
+                  className={`workspace-tab${active ? " is-active" : ""}${
+                    dragging ? " is-dragging" : ""
+                  }${dragOver ? " is-drag-over" : ""}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "5px 10px",
+                    borderRadius: "8px 8px 0 0",
+                    cursor: "pointer",
+                    fontSize: 12.5,
+                    whiteSpace: "nowrap",
+                    width: 148,
+                    flex: "0 0 148px",
+                    overflow: "hidden",
+                    background: active ? "var(--bg, #14141a)" : "transparent",
+                    color: active ? "var(--text, #e8e8ee)" : "var(--text-dim, #9a9aa4)",
+                    borderTop: active
+                      ? `2px solid ${group.color}`
+                      : "2px solid transparent",
+                  }}
+                  title={tab.kind === "home" ? "库主目录（不可关闭）" : tab.title}
+                >
+                  <span style={{ flex: "0 0 auto" }}>{TAB_GLYPH[tab.kind]}</span>
+                  <span
+                    style={{
+                      flex: "1 1 auto",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      textAlign: "left",
+                    }}
+                  >
+                    {tab.title}
+                  </span>
+                  {tab.kind !== "home" && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        closeTab(tab.id);
+                      }}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "inherit",
+                        cursor: "pointer",
+                        padding: "0 2px",
+                        lineHeight: 1,
+                        fontSize: 12,
+                      }}
+                      title="关闭标签"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              );
+            }),
+          ];
         })}
         <button
           type="button"
@@ -717,6 +853,85 @@ export default function WorkspaceTabs({
             </div>
           ))}
       </div>
+      {/* 标签右键菜单：切换分组 / 拆出窗口（M5）。 */}
+      {tabMenu && (() => {
+        const tab = tabs.find((entry) => entry.id === tabMenu.id);
+        if (!tab) return null;
+        const currentGroup = groupIdOf(tab);
+        const itemStyle: React.CSSProperties = {
+          display: "block", width: "100%", textAlign: "left", border: "none",
+          background: "transparent", color: "inherit", cursor: "pointer",
+          padding: "7px 10px", fontSize: 12.5,
+        };
+        return (
+          <div className="tab-context-backdrop" onClick={() => setTabMenu(null)}>
+            <div
+              className="tab-context-menu"
+              style={{
+                position: "fixed",
+                left: Math.min(tabMenu.x, window.innerWidth - 210),
+                top: Math.min(tabMenu.y, window.innerHeight - 240),
+                zIndex: 60,
+                minWidth: 186,
+                padding: 5,
+                borderRadius: 10,
+                border: "1px solid var(--border, #2c2c34)",
+                background: "var(--bg-elev, #1c1c22)",
+                boxShadow: "0 16px 40px -18px rgba(0,0,0,0.9)",
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div style={{ padding: "4px 10px 6px", fontSize: 11, color: "var(--text-dim, #9a9aa4)" }}>
+                移到分组
+              </div>
+              {groups.map((group) => (
+                <button
+                  key={group.id}
+                  type="button"
+                  style={{
+                    ...itemStyle,
+                    fontWeight: group.id === currentGroup ? 700 : 400,
+                    color: group.id === currentGroup ? group.color : "inherit",
+                  }}
+                  onClick={() => {
+                    setGroupOf((prev) => ({ ...prev, [tab.id]: group.id }));
+                    setGroups((prev) => prev.map((g) => g.id === group.id ? { ...g, collapsed: false } : g));
+                    setTabMenu(null);
+                  }}
+                >
+                  <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: group.color, marginRight: 8 }} />
+                  {group.title}
+                </button>
+              ))}
+              <div style={{ height: 1, background: "var(--border, #2c2c34)", margin: "5px 0" }} />
+              <button
+                type="button"
+                style={itemStyle}
+                onClick={() => {
+                  const group = groups.find((g) => g.id === currentGroup);
+                  if (group) toggleGroup(group.id);
+                  setTabMenu(null);
+                }}
+              >
+                折叠/展开当前组
+              </button>
+              {tab.kind !== "home" && (
+                <button
+                  type="button"
+                  style={itemStyle}
+                  title="把标签拖出标签栏也可以拆窗"
+                  onClick={() => {
+                    detachTab(tab.id, 0, 0);
+                    setTabMenu(null);
+                  }}
+                >
+                  ⤢ 拆出为独立窗口
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
       {/* 启动遮罩：盖住内容，点一下才显示（--masked 的本地雏形）。 */}
       {masked && (
         <div

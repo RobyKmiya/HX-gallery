@@ -393,6 +393,9 @@ export const api = {
   /** 拆除（只关 webview，不碰主窗）。 */
   d2EmbedClose: (label: string) => invoke<void>("d2_embed_close", { label }),
 
+  /** M5③：把一个工作台标签拆到独立窗口。token 指向主窗写好 localStorage 的标签数据。 */
+  detachTab: (token: string) => invoke<string>("detach_tab", { token }),
+
   /** 读浏览器设置（settings.json；主设置/⚙面板/D2 面板共用一份真源）。 */
   browserSettingsGet: () =>
     invoke<Record<string, unknown>>("browser_settings_get"),
