@@ -96,7 +96,11 @@ export default function App() {
     void import("@tauri-apps/api/event").then(({ listen }) =>
       listen<string>("huaxia://open-url-tab", (event) => {
         const url = event.payload;
-        if (typeof url === "string" && /^https?:\/\//.test(url)) {
+        // about:blank / huaxia:newtab → 外壳开自己的「新页」标签（Ctrl+T）。
+        if (
+          typeof url === "string" &&
+          (/^https?:\/\//.test(url) || url === "huaxia:newtab" || url === "about:blank")
+        ) {
           window.dispatchEvent(new CustomEvent("huaxia:open-url-tab", { detail: url }));
         }
       }),

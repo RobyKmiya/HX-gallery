@@ -1403,7 +1403,15 @@ pub fn new_tab(app: &AppHandle, label: &str, url: &str, activate: bool) -> Resul
     let embedded = with_state(label, |state| state.embedded).unwrap_or(false);
     if embedded {
         use tauri::Emitter;
-        let _ = app.emit("huaxia://open-url-tab", url.to_string());
+        // about:blank / 画匣新页 → 通知外壳开它自己的「新页」标签。
+        // 以前发 about:blank 被外壳的 http(s) 白名单丢弃 = Ctrl+T 呼不出新签
+        //（管理员 2026-11-28）；b 站 window.open 空白页再跳转的同款也死在这。
+        let payload = if parsed.scheme() == "about" || url.starts_with("huaxia:") {
+            "huaxia:newtab"
+        } else {
+            url
+        };
+        let _ = app.emit("huaxia://open-url-tab", payload);
         return Ok(String::new());
     }
 
@@ -2393,10 +2401,25 @@ const AUTOFILL_SCRIPT: &str = r###"
     } catch (e) {}
   };
 
+  // 密码框是否「真的可见」：b 站这类站点把隐藏登录框常驻 DOM，只查存在
+  // 会让提示在每一页都弹（管理员 2026-11-28：登录时要填账密的时候再弹出）。
+  // rect 尺寸 + display/visibility/opacity 三重校验，凑不够就当没有。
+  function passVisible(el) {
+    if (!el) return false;
+    try {
+      var rect = el.getBoundingClientRect();
+      if (rect.width < 6 || rect.height < 6) return false;
+      var style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (parseFloat(style.opacity || '1') === 0) return false;
+      return true;
+    } catch (e) { return false; }
+  }
+
   function probe() {
     if (window.__xkAutofillAsked) return;
     var pass = document.querySelector('input[type="password"]');
-    if (!pass) return;
+    if (!passVisible(pass)) return;
     window.__xkAutofillAsked = true;
     try {
       (window.__xkReqQ = window.__xkReqQ || []).push({

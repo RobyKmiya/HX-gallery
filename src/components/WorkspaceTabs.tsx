@@ -393,10 +393,17 @@ export default function WorkspaceTabs({
     setActiveId(id);
   };
 
-  // 详情页点「源链接」→ 这里开网页标签（CustomEvent，避免一层层传回调）。
+  // 引擎 Ctrl+T / 弹窗 about:blank → 外壳开自己的「新页」标签（不用 URL）。
+  // ref 保新：事件监听只挂一次，别把首帧的 addBrowserTab 闭包冻在里面。
+  const addBrowserTabRef = useRef(addBrowserTab);
+  addBrowserTabRef.current = addBrowserTab;
   useEffect(() => {
     const handler = (event: Event) => {
       const url = (event as CustomEvent<string>).detail;
+      if (url === "huaxia:newtab" || url === "about:blank") {
+        addBrowserTabRef.current();
+        return;
+      }
       if (typeof url === "string" && /^https?:\/\//.test(url)) openUrlTab(url);
     };
     window.addEventListener("huaxia:open-url-tab", handler);
