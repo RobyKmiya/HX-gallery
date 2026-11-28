@@ -372,7 +372,7 @@ fn log_file(app: &AppHandle) -> Option<PathBuf> {
     Some(dir.join("d2.log"))
 }
 
-fn log(app: &AppHandle, message: &str) {
+pub(crate) fn log(app: &AppHandle, message: &str) {
     let Some(path) = log_file(app) else { return };
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let stamp = std::time::SystemTime::now()

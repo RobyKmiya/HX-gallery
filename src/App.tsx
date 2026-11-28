@@ -100,6 +100,21 @@ export default function App() {
     }
   }, []);
 
+  // 关掉 WebView2 的原生右键菜单（返回/刷新/另存为/打印/检查）。
+  // 网页内容由内嵌的原生引擎自己管，这里只管 React 外壳；输入框保留原生菜单，
+  // 否则输入网址时没法复制粘贴。
+  useEffect(() => {
+    const onContextMenu = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) return;
+      event.preventDefault();
+    };
+    // 捕获阶段：WebView2 判断「要不要弹原生菜单」看的是事件的 defaultPrevented，
+    // 放在冒泡阶段容易被 React 的委托处理晚一步，捕获阶段最稳。
+    document.addEventListener("contextmenu", onContextMenu, true);
+    return () => document.removeEventListener("contextmenu", onContextMenu, true);
+  }, []);
+
   useEffect(() => {
     // 浏览器引擎（嵌入网页标签）要求开新标签：转发给 WorkspaceTabs 已有的
     // open-url-tab 桥，开成一个真正独立的工作台网页标签（有自己的历史栈）。

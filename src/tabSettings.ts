@@ -44,11 +44,22 @@ const STATE_KEY = "huaxia.tabs.state";
  */
 export function detectDetachedWindow(): boolean {
   try {
+    // ① Rust 建窗时注入的标记（最可靠）
     if ((window as { __HX_DETACHED__?: boolean }).__HX_DETACHED__ === true) return true;
-    return !!new URLSearchParams(window.location.search).get("detach");
+    // ② URL query（可能被 webview 吞掉，作备用）
+    if (new URLSearchParams(window.location.search).get("detach")) return true;
+    // ③ 兜底：Tauri 注入的窗口 label，只要不是 main 就一定是拆出的窗。
+    //    前两条都失效时，这一条也能拦住「新窗误恢复主窗快照 → 多引擎卡死」。
+    const label = (
+      window as {
+        __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+      }
+    ).__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+    if (typeof label === "string" && label.length > 0 && label !== "main") return true;
   } catch {
-    return false;
+    // 读不到就按主窗处理
   }
+  return false;
 }
 
 /** 拆窗 token：优先用注入的全局变量，其次 URL query。 */

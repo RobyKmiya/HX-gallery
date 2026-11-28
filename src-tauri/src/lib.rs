@@ -2434,10 +2434,15 @@ fn splash_finish(app: tauri::AppHandle) {
 /// 标签数据由主窗写进 localStorage（token 索引），新窗加载 index.html 时
 /// 从 ?detach=<token> 读回——避免中文标题/URL 经 query 编码失真。
 /// 新窗关闭只关自己：on_window_event 里只对 main 接管 exit。
+///
+/// **必须是 async**：Tauri 文档明确写「Windows 上 `WebviewWindowBuilder` 在同步命令里
+/// 会死锁」，必须用 async 命令或独立线程。上一版是同步 `fn`，结果新窗建到一半
+/// 就卡死（黑屏），同时主线程被阻塞导致主窗整个拖不动、点不动（2026-11-28 实机反馈）。
 #[tauri::command]
-fn detach_tab(app: tauri::AppHandle, token: String) -> Result<String, String> {
+async fn detach_tab(app: tauri::AppHandle, token: String) -> Result<String, String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     let label = format!("hx-detached-{}", uuid::Uuid::new_v4().simple());
+    crate::d2::log(&app, &format!("拆窗开始 label={label}"));
     // 双重标记：URL query 可能被某些 webview 版本吞掉，初始化脚本直接注入
     // 全局变量做兜底。前端只要看到其中任意一个就按「独立窗」处理——这一步
     // 没兜住的话新窗会 fallback 恢复主窗的标签快照，多个引擎叠在一起就卡死。
@@ -2461,9 +2466,13 @@ fn detach_tab(app: tauri::AppHandle, token: String) -> Result<String, String> {
     match built {
         Ok(window) => {
             let _ = window.set_focus();
+            crate::d2::log(&app, &format!("拆窗成功 label={label}"));
             Ok(label)
         }
-        Err(error) => Err(format!("拆出独立窗口失败：{error}")),
+        Err(error) => {
+            crate::d2::log(&app, &format!("拆窗失败 label={label} err={error}"));
+            Err(format!("拆出独立窗口失败：{error}"))
+        }
     }
 }
 
